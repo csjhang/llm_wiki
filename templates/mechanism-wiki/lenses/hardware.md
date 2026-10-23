@@ -6,9 +6,9 @@ This lens says what each mechanism field means in a hardware domain. It also set
 A hardware domain studies circuits, chips, and the systems built from them.
 Use this lens in these cases:
 
-- You read or write a page of a domain whose `lens` is `hardware` in `domains.yaml`.
-- You write a mechanism page that has a hardware instance. Add `hardware` to its `lenses` field.
-- You write a hypothesis page. The lens of `to_domain` sets `strength` and the evidence standard. The lens of `from_domain` explains the parts of the mechanism.
+- You read or write a page of a domain whose `lens` is `hardware` in `domains.yaml`. Concept, entity, and source pages use only the Evidence standard. The Fields section applies to mechanism pages.
+- You write a mechanism page that has a hardware instance. Add `hardware` to its `lenses:` list.
+- You write a hypothesis page. The lens of `to_domain` sets the Strength rules and the Evidence standard. The lens of `from_domain` explains the parts of the mechanism.
 
 ## Fields
 
@@ -52,21 +52,25 @@ Rank evidence from strongest to weakest. When two pieces of evidence disagree, t
 2. Simulation.
 3. Paper claims.
 
-A hypothesis page sets `strength` by this standard. Do not claim more than the evidence supports.
+Evidence does not set `strength`. It decides two other things on a hypothesis page.
+
+- Role mapping: a "Fits?" cell has a value other than "unknown" only when a cited page supports the row. Otherwise write "unknown" and move the claim to "What to verify".
+- Status: `supported` needs evidence from the top two ranks to resolve every "What to verify" row. A row that rests only on lower ranks stays open, so the status stays `testing` at most. `refuted` needs evidence from the top two ranks to refute one row.
 
 ## Strength rules
 
-Pick the highest level that the match meets. If it meets neither `structural` nor `mathematical`, use `surface`.
+`strength` measures the kind of match that the hypothesis claims. Set it from these rules, not from evidence. Read each level by the `relation` of the page. Pick the highest level that the match meets. If it meets neither `structural` nor `mathematical`, use `surface`.
 
-- `surface`: The two sides share words or a story only.
-- `structural`: The parts and the flows match one to one.
-- `mathematical`: Both sides follow the same equations or the same trade-off curve.
+- `surface`: For an analogy, the words look alike, but the parts and the flows do not match one to one. For a stack, only a general dependency is known.
+- `structural`: For an analogy, the parts and the flows match one to one. For a stack, each upper-layer part maps to named lower-layer components.
+- `mathematical`: For an analogy, both sides follow the same equations or the same trade-off curve. For a stack, the equations or the trade-off curve of the lower layer define the behavior of the upper layer.
 
 Compare trade-off curves only for designs built in a similar process, because area, power, and delay change with the process.
 
 ## Example
 
 The slugs in this example are Latin for readability. A real Chinese wiki keeps CJK titles as CJK file names, as `schema.md` says.
+This example uses domain words to show the lens. A real mechanism page uses domain-neutral words, as `schema/page-types/mechanism.md` says.
 
 ```markdown
 ---
@@ -88,7 +92,7 @@ updated: 2026-01-15
 
 - 階段：只做整件工作的一小部分。
 - 暫存單元：保存前一步留下的中間結果。
-- 連線：傳遞訊號的導線。
+- 連線：負責連接的導線。
 - 時鐘：給出同步節拍的來源。[[pipeline-tradeoffs-survey]]
 
 ## 流動
@@ -102,7 +106,7 @@ updated: 2026-01-15
 
 - 階段越多，時鐘可以越快，代價是暫存單元增加面積和功耗。[[pipeline-tradeoffs-survey]]
 - 吞吐量上升，代價是每個工作項目的延遲變長。
-- 面積增加會降低良率，代價是每批製造出來的可用成品變少。
+- 晶片做得越大，放得下的階段越多，代價是良率下降，可用成品變少。
 
 ## 為什麼有效
 

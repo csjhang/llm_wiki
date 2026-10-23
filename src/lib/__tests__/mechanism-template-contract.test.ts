@@ -85,6 +85,22 @@ const LENS_FIELDS = MECHANISM_SECTIONS.filter((section) => section.key !== "inst
 /** The three analogy strength levels, in the order of the lens Strength rules section. */
 const STRENGTH_LEVELS = ["surface", "structural", "mathematical"] as const
 
+/**
+ * Controller ruling R16, stack readings of the strength levels. Every lens (Strength rules)
+ * and hypothesis.md (Rules) must carry these phrases.
+ */
+const STACK_PHRASES = [
+  "only a general dependency is known",
+  "each upper-layer part maps to named lower-layer components",
+  "the equations or the trade-off curve of the lower layer define the behavior of the upper layer",
+]
+
+/** Controller ruling R16, what evidence decides. Every lens (Evidence standard) and hypothesis.md must carry these phrases. */
+const STATUS_PHRASES = ["evidence from the top two ranks", "stays open", "`testing` at most"]
+
+/** Words that describe what parts exchange. A Parts line gives a role and must not use them. */
+const EXCHANGE_WORDS = ["傳遞", "送到", "交給", "付費", "收費", "通往", "帶出", "相加", "輸出"]
+
 /** Files written for AI agents. Every sentence in them must stay short. */
 const AI_FACING_FILES = [
   "CLAUDE.md",
@@ -98,6 +114,15 @@ const AI_FACING_FILES = [
 
 function readTemplate(relativePath: string): string {
   return readFileSync(join(TEMPLATE_DIR, relativePath), "utf8")
+}
+
+/** Paths, relative to the template folder, of every `.md` file under it. */
+function templateMarkdownFiles(directory = ""): string[] {
+  return readdirSync(join(TEMPLATE_DIR, directory), { withFileTypes: true }).flatMap((entry) => {
+    const relative = directory === "" ? entry.name : `${directory}/${entry.name}`
+    if (entry.isDirectory()) return templateMarkdownFiles(relative)
+    return entry.name.endsWith(".md") ? [relative] : []
+  })
 }
 
 /** Lines of `markdown` with their fence state. A fence line itself counts as inside a fence. */
@@ -181,6 +206,23 @@ describe("mechanism template: term alignment", () => {
       // One term, one meaning: the old words "components" and "flow" are gone.
       expect(body, label).not.toMatch(/\bcomponents?\b/i)
       expect(body, label).not.toMatch(/\bflow\b/i)
+    }
+  })
+
+  it("a lens explains each field: no template file says \"what each part means\"", () => {
+    // "Parts" is one section name. A lens explains each field, that is, each section.
+    for (const file of templateMarkdownFiles()) {
+      expect(readTemplate(file), file).not.toMatch(/each part\b[^.]*\bmeans?\b/i)
+    }
+    const cases: Array<[file: string, section: string]> = [
+      ["docs/glossary.md", "Lens"],
+      ["schema.md", "Mechanisms"],
+      ["schema/page-types/mechanism.md", "Purpose"],
+    ]
+    for (const [file, section] of cases) {
+      const body = sectionBody(readTemplate(file), section)
+      expect(body, `${file} ${section}`).toMatch(/what each field\b[^.]*\bmeans\b/)
+      expect(body, `${file} ${section} defines a field`).toMatch(/A field is one of (?:the six|these|those) sections/)
     }
   })
 })
@@ -731,6 +773,8 @@ describe("mechanism template: lens files", () => {
       STRENGTH_LEVELS.forEach((level, index) => {
         expect(lines[index + 1], `${id} ${level}`).toMatch(new RegExp(`^- \`${level}\`: \\S`))
       })
+      expect(lines[1], `${id} surface`).toContain("words look alike")
+      expect(lines[1], `${id} surface`).toMatch(/do not match one to one/)
       expect(lines[2], `${id} structural`).toMatch(/one[- ]to[- ]one/)
       expect(lines[3], `${id} mathematical`).toContain("same equations")
       expect(lines[3], `${id} mathematical`).toContain("same trade-off curve")
@@ -743,6 +787,75 @@ describe("mechanism template: lens files", () => {
     expect(new Set(domainSentences).size, "domain sentences differ").toBe(KNOWN_LENSES.length)
   })
 
+  it("R16: lens Strength rules say that strength is the kind of match, and read each level for analogy and stack", () => {
+    for (const id of KNOWN_LENSES) {
+      const lines = sectionBody(readTemplate(`lenses/${id}.md`), "Strength rules")
+        .split(/\r?\n/)
+        .filter((line) => line.trim() !== "")
+      expect(lines[0], `${id} lead-in`).toContain("`strength` measures the kind of match that the hypothesis claims.")
+      expect(lines[0], `${id} lead-in`).toContain("not from evidence")
+      expect(lines[0], `${id} lead-in`).toContain("`relation`")
+      const levels = lines.slice(1, 4).join("\n")
+      for (const phrase of STACK_PHRASES) expect(levels, `${id}: ${phrase}`).toContain(phrase)
+    }
+  })
+
+  it("R16: lens Evidence standard says what evidence decides, and the old strength sentence is gone", () => {
+    const shared: string[][] = []
+    for (const id of KNOWN_LENSES) {
+      const body = sectionBody(readTemplate(`lenses/${id}.md`), "Evidence standard")
+      expect(body, `${id} old sentence`).not.toMatch(/sets `strength` by this standard/)
+      expect(body, `${id} old sentence`).not.toContain("Do not claim more than the evidence supports")
+      expect(body, `${id} strength`).toContain("Evidence does not set `strength`.")
+      expect(body, `${id} role mapping`).toContain('"Fits?"')
+      expect(body, `${id} role mapping`).toContain('"unknown"')
+      expect(body, `${id} role mapping`).toContain('"What to verify"')
+      expect(body, `${id} status`).toContain("`supported`")
+      expect(body, `${id} status`).toContain("`refuted`")
+      for (const phrase of STATUS_PHRASES) expect(body, `${id}: ${phrase}`).toContain(phrase)
+      // The lead-in and the closing rules are equal in the four lenses. Only the ranked list differs.
+      shared.push(body.split(/\r?\n/).filter((line) => line.trim() !== "" && !/^\d+\. /.test(line)))
+    }
+    for (const lines of shared) expect(lines).toEqual(shared[0])
+  })
+
+  it("R16: hypothesis.md sets strength from the Strength rules, and agrees with the lenses on stack and status", () => {
+    const text = readTemplate("schema/page-types/hypothesis.md")
+    expect(text).not.toContain("Set `strength` by the evidence standard")
+    expect(text).not.toContain("Do not claim more than the evidence supports")
+    expect(text).toContain("Set `strength` from the Strength rules in the lens of `to_domain`.")
+    expect(text).toContain("`strength` measures the kind of match that the hypothesis claims. Evidence does not set it.")
+    expect(sectionBody(text, "Rules")).toMatch(/^- Raise or lower `strength` because of the rank of the evidence\.$/m)
+    const strengthRow = tableRows(sectionBody(text, "Frontmatter")).find((row) => row[0] === "strength") ?? []
+    expect(strengthRow[2], "strength row").toContain("Strength rules")
+    expect(strengthRow[2], "strength row").not.toMatch(/evidence/i)
+    for (const phrase of [...STACK_PHRASES, ...STATUS_PHRASES]) expect(text, phrase).toContain(phrase)
+    expect(text).toContain("`status: supported`")
+    expect(text).toContain("`status: refuted`")
+    // Every phrase that hypothesis.md shares with the lenses also appears in each lens.
+    for (const id of KNOWN_LENSES) {
+      const lens = readTemplate(`lenses/${id}.md`)
+      for (const phrase of [...STACK_PHRASES, ...STATUS_PHRASES]) expect(lens, `${id}: ${phrase}`).toContain(phrase)
+    }
+  })
+
+  it("lens Purpose says where the Fields and the Evidence standard apply, and names the lenses: list", () => {
+    for (const id of KNOWN_LENSES) {
+      const purpose = sectionBody(readTemplate(`lenses/${id}.md`), "Purpose")
+      expect(purpose, `${id} Purpose`).toContain("Concept, entity, and source pages use only the Evidence standard.")
+      expect(purpose, `${id} Purpose`).toContain("The Fields section applies to mechanism pages.")
+      expect(purpose, `${id} Purpose`).toContain(`Add \`${id}\` to its \`lenses:\` list.`)
+      expect(purpose, `${id} Purpose`).not.toMatch(/`lenses`\s+field/)
+    }
+  })
+
+  it("physics Constraints names the approximation that the page states", () => {
+    const entry = fieldEntries(sectionBody(readTemplate("lenses/physics.md"), "Fields")).find(
+      (candidate) => candidate.heading === "Constraints and trade-offs",
+    )
+    expect(entry?.lines[0]).toContain("Name the approximation that the page states, and the scale where it holds.")
+  })
+
   it("every lens Example starts with a line about Latin slugs and CJK file names", () => {
     for (const id of KNOWN_LENSES) {
       const example = sectionBody(readTemplate(`lenses/${id}.md`), "Example")
@@ -750,6 +863,11 @@ describe("mechanism template: lens files", () => {
       expect(firstLine, id).toContain("Latin")
       expect(firstLine, id).toContain("CJK")
       expect(firstLine, id).toContain("`schema.md`")
+      // The second line says that the example uses domain words, and a real page does not.
+      const secondLine = example.split(/\r?\n/).filter((line) => line.trim() !== "")[1] ?? ""
+      expect(secondLine, `${id} second line`).toContain("domain words")
+      expect(secondLine, `${id} second line`).toContain("domain-neutral")
+      expect(secondLine, `${id} second line`).toContain("`schema/page-types/mechanism.md`")
     }
   })
 
@@ -785,6 +903,14 @@ describe("mechanism template: lens files", () => {
       within(`${id} why sentences`, why.split("。").filter((sentence) => sentence.trim() !== "").length, 1, 5)
       expectPartsAndFlowsFollowRules(id, page)
       expectInstanceLinesFollowForm(id, page)
+      // A Parts line gives a role. It does not describe what the parts exchange.
+      for (const line of (findSection(page.body, MECHANISM_SECTIONS[0]) ?? "").split(/\r?\n/).filter((l) => l.startsWith("- "))) {
+        for (const word of EXCHANGE_WORDS) expect(line, `${id}: Parts line must not use "${word}"`).not.toContain(word)
+      }
+      // Every trade-off line states a gain and its cost.
+      for (const line of (findSection(page.body, MECHANISM_SECTIONS[2]) ?? "").split(/\r?\n/).filter((l) => l.startsWith("- "))) {
+        expect(line, `${id}: trade-off line states a cost`).toContain("代價是")
+      }
       // Writing rule 5: a Chinese sentence has at most 40 characters. A link does not count.
       for (const sentence of page.body.replace(/\[\[[^\]]+\]\]/g, "").split(/[。！？\n]/)) {
         expect(sentence.trim().length, `${id}: "${sentence.trim()}"`).toBeLessThanOrEqual(40)
@@ -795,6 +921,13 @@ describe("mechanism template: lens files", () => {
         expect(linksASourcePage(section.body, page.sourceFiles), `${id} section ${section.heading}`).toBe(true)
       }
     }
+  })
+
+  it("ai Example uses one word, 模組, for the module and never 層; physics Example states its conservation law", () => {
+    expect(sectionBody(readTemplate("lenses/ai.md"), "Example")).not.toContain("層")
+    const page = parseExampleBlock("physics", sectionBody(readTemplate("lenses/physics.md"), "Example"))
+    const constraints = findSection(page.body, MECHANISM_SECTIONS[2]) ?? ""
+    expect(constraints).toMatch(/^- 能量守恆：.*等於/m)
   })
 })
 

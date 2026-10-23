@@ -6,9 +6,9 @@ This lens says what each mechanism field means in an AI domain. It also sets the
 An AI domain studies models, learning algorithms, and the systems that train and run them.
 Use this lens in these cases:
 
-- You read or write a page of a domain whose `lens` is `ai` in `domains.yaml`.
-- You write a mechanism page that has an AI instance. Add `ai` to its `lenses` field.
-- You write a hypothesis page. The lens of `to_domain` sets `strength` and the evidence standard. The lens of `from_domain` explains the parts of the mechanism.
+- You read or write a page of a domain whose `lens` is `ai` in `domains.yaml`. Concept, entity, and source pages use only the Evidence standard. The Fields section applies to mechanism pages.
+- You write a mechanism page that has an AI instance. Add `ai` to its `lenses:` list.
+- You write a hypothesis page. The lens of `to_domain` sets the Strength rules and the Evidence standard. The lens of `from_domain` explains the parts of the mechanism.
 
 ## Fields
 
@@ -52,21 +52,25 @@ Rank evidence from strongest to weakest. When two pieces of evidence disagree, t
 2. A single benchmark.
 3. Paper claims.
 
-A hypothesis page sets `strength` by this standard. Do not claim more than the evidence supports.
+Evidence does not set `strength`. It decides two other things on a hypothesis page.
+
+- Role mapping: a "Fits?" cell has a value other than "unknown" only when a cited page supports the row. Otherwise write "unknown" and move the claim to "What to verify".
+- Status: `supported` needs evidence from the top two ranks to resolve every "What to verify" row. A row that rests only on lower ranks stays open, so the status stays `testing` at most. `refuted` needs evidence from the top two ranks to refute one row.
 
 ## Strength rules
 
-Pick the highest level that the match meets. If it meets neither `structural` nor `mathematical`, use `surface`.
+`strength` measures the kind of match that the hypothesis claims. Set it from these rules, not from evidence. Read each level by the `relation` of the page. Pick the highest level that the match meets. If it meets neither `structural` nor `mathematical`, use `surface`.
 
-- `surface`: The two sides share words or a story only.
-- `structural`: The parts and the flows match one to one.
-- `mathematical`: Both sides follow the same equations or the same trade-off curve.
+- `surface`: For an analogy, the words look alike, but the parts and the flows do not match one to one. For a stack, only a general dependency is known.
+- `structural`: For an analogy, the parts and the flows match one to one. For a stack, each upper-layer part maps to named lower-layer components.
+- `mathematical`: For an analogy, both sides follow the same equations or the same trade-off curve. For a stack, the equations or the trade-off curve of the lower layer define the behavior of the upper layer.
 
 A match of layer names alone is `surface`, so compare what flows through the modules and what bias the structure builds in.
 
 ## Example
 
 The slugs in this example are Latin for readability. A real Chinese wiki keeps CJK titles as CJK file names, as `schema.md` says.
+This example uses domain words to show the lens. A real mechanism page uses domain-neutral words, as `schema/page-types/mechanism.md` says.
 
 ```markdown
 ---
@@ -86,22 +90,22 @@ updated: 2026-01-15
 
 ## 組成
 
-- 狀態：各層之間傳遞、並隨層更新的資料。
-- 模組：對輸入做一次變換的層。
-- 捷徑：不經過變換，直接通往後面的路徑。
-- 合併點：把兩條路徑的結果相加的位置。[[residual-shortcut-survey]]
+- 狀態：系統保存的中間資料。
+- 模組：負責變換的單元。
+- 捷徑：負責保留原樣的路徑。
+- 合併點：負責合併的位置。[[residual-shortcut-survey]]
 
 ## 流動
 
 - 狀態同時進入模組和捷徑。
 - 模組輸出一個修正量，捷徑輸出原來的狀態，合併點把兩者相加。[[residual-shortcut-survey]]
-- 合併後的結果成為下一層的狀態。
-- 反向傳播時，梯度也走捷徑，直接回到前面的層。
+- 合併後的結果成為下一個模組收到的狀態。
+- 反向傳播時，梯度也走捷徑，直接回到前面的模組。
 
 ## 約束與取捨
 
 - 捷徑不增加計算，代價是兩條路徑的形狀必須一致。[[residual-shortcut-survey]]
-- 堆疊可以很深，代價是訓練時要保留每一層的中間結果，記憶體隨深度增加。
+- 堆疊可以很深，代價是訓練時要保留每個模組的中間結果，記憶體隨深度增加。
 - 容量變大，代價是需要更多資料，否則多出來的容量只會記住訓練資料。
 
 ## 為什麼有效

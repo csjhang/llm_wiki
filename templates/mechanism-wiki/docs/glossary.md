@@ -32,7 +32,7 @@ A domain is one path in `domains.yaml`, for example `hardware/async-circuits`. E
 
 ## Lens
 
-A lens is one file in `lenses/`. It says what each part of a mechanism means in one domain. It also sets the evidence standard of that domain. The term is used most in the files in `lenses/`.
+A lens is one file in `lenses/`. It says what each field of a mechanism page means in one domain. A field is one of the six sections of the page. It also sets the evidence standard of that domain. The term is used most in the files in `lenses/`.
 
 ## Mechanism
 

@@ -3,7 +3,7 @@
 ## Purpose
 
 A mechanism page states a structure that repeats across domains. See `docs/glossary.md` for the terms Mechanism and Instance.
-Every mechanism page has the same six sections. The lens of a domain says what each part means in that domain.
+Every mechanism page has the same six sections. The lens of a domain says what each field means in that domain. A field is one of those sections.
 The page holds no domain detail. The instance pages hold the detail.
 
 ## Location

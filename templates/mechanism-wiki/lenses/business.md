@@ -6,9 +6,9 @@ This lens says what each mechanism field means in a business domain. It also set
 A business domain studies how firms create, deliver, and capture value.
 Use this lens in these cases:
 
-- You read or write a page of a domain whose `lens` is `business` in `domains.yaml`.
-- You write a mechanism page that has a business instance. Add `business` to its `lenses` field.
-- You write a hypothesis page. The lens of `to_domain` sets `strength` and the evidence standard. The lens of `from_domain` explains the parts of the mechanism.
+- You read or write a page of a domain whose `lens` is `business` in `domains.yaml`. Concept, entity, and source pages use only the Evidence standard. The Fields section applies to mechanism pages.
+- You write a mechanism page that has a business instance. Add `business` to its `lenses:` list.
+- You write a hypothesis page. The lens of `to_domain` sets the Strength rules and the Evidence standard. The lens of `from_domain` explains the parts of the mechanism.
 
 ## Fields
 
@@ -53,21 +53,25 @@ Rank evidence from strongest to weakest. When two pieces of evidence disagree, t
 3. Interviews with people who work at or with the firm.
 4. Press claims.
 
-A hypothesis page sets `strength` by this standard. Do not claim more than the evidence supports.
+Evidence does not set `strength`. It decides two other things on a hypothesis page.
+
+- Role mapping: a "Fits?" cell has a value other than "unknown" only when a cited page supports the row. Otherwise write "unknown" and move the claim to "What to verify".
+- Status: `supported` needs evidence from the top two ranks to resolve every "What to verify" row. A row that rests only on lower ranks stays open, so the status stays `testing` at most. `refuted` needs evidence from the top two ranks to refute one row.
 
 ## Strength rules
 
-Pick the highest level that the match meets. If it meets neither `structural` nor `mathematical`, use `surface`.
+`strength` measures the kind of match that the hypothesis claims. Set it from these rules, not from evidence. Read each level by the `relation` of the page. Pick the highest level that the match meets. If it meets neither `structural` nor `mathematical`, use `surface`.
 
-- `surface`: The two sides share words or a story only.
-- `structural`: The parts and the flows match one to one.
-- `mathematical`: Both sides follow the same equations or the same trade-off curve.
+- `surface`: For an analogy, the words look alike, but the parts and the flows do not match one to one. For a stack, only a general dependency is known.
+- `structural`: For an analogy, the parts and the flows match one to one. For a stack, each upper-layer part maps to named lower-layer components.
+- `mathematical`: For an analogy, both sides follow the same equations or the same trade-off curve. For a stack, the equations or the trade-off curve of the lower layer define the behavior of the upper layer.
 
 Check who gives value and who pays on both sides, because a shared word such as "platform" is not a match.
 
 ## Example
 
 The slugs in this example are Latin for readability. A real Chinese wiki keeps CJK titles as CJK file names, as `schema.md` says.
+This example uses domain words to show the lens. A real mechanism page uses domain-neutral words, as `schema/page-types/mechanism.md` says.
 
 ```markdown
 ---
@@ -87,8 +91,8 @@ updated: 2026-01-15
 
 ## 組成
 
-- 賣方：提供產品並收費的一方。
-- 買方：取得產品並付費的一方。
+- 賣方：供應產品的一方。
+- 買方：使用產品的一方。
 - 累積資產：在使用過程中累積的資料、習慣或設定。
 - 替代方案：另一個可以改用的選擇。[[lock-in-case-study]]
 

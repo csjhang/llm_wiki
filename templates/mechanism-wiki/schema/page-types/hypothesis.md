@@ -22,8 +22,8 @@ Write the page only in the target wiki. Never copy work content into a reading w
 | `from_domain` | yes | The domain that gives the mechanism. The user or the whiteboard picks it. Write one path. |
 | `to_domain` | yes | The domain that receives the mechanism. Write one path from `domains.yaml` of this wiki. |
 | `relation` | yes | `analogy` or `stack`. |
-| `strength` | yes | `surface`, `structural`, or `mathematical`. Follow the lens of `to_domain`. |
-| `status` | yes | `draft`, `testing`, `supported`, or `refuted`. Write `draft` for a new page. |
+| `strength` | yes | `surface`, `structural`, or `mathematical`. Set it from the Strength rules in the lens of `to_domain`. |
+| `status` | yes | `draft`, `testing`, `supported`, or `refuted`. Write `draft` for a new page. Rules has the conditions for the other values. |
 | `heptabase_whiteboard` | no | The ID of the whiteboard that the hypothesis came from. Omit the field if there is none. |
 | `tags` | yes | A list of bare words. Write `[]` if you have none. |
 | `related` | yes | A list of bare slugs of pages in this wiki that the hypothesis uses. Write `[]` if you have none. |
@@ -58,7 +58,12 @@ Pick the heading by the output language value. `Traditional Chinese` uses the Tr
 - If a mechanism part has no supporting page in this wiki, write its mapping row with "Fits?" set to "unknown". Move the claim to "What to verify".
 - The one-line hypothesis needs no citation. The sections below support it.
 - Give every row under "What to verify" a "How to refute" cell. The cell says which result would disprove the claim.
-- Set `strength` by the evidence standard in the lens of `to_domain`. Do not claim more than the evidence supports.
+- Set `strength` from the Strength rules in the lens of `to_domain`. `strength` measures the kind of match that the hypothesis claims. Evidence does not set it.
+- Read the levels by `relation`. For `relation: stack`, `mathematical` means the equations or the trade-off curve of the lower layer define the behavior of the upper layer.
+- For `relation: stack`, `structural` means each upper-layer part maps to named lower-layer components. `surface` means only a general dependency is known.
+- Set `status: supported` only when evidence from the top two ranks resolves every row under "What to verify". The ranks are in the Evidence standard of the lens of `to_domain`.
+- A row that rests only on lower ranks stays open. Then the status stays `testing` at most.
+- Set `status: refuted` only when evidence from the top two ranks refutes one row under "What to verify".
 - Write `status: draft` when you create the page. A later fusion update changes it after it reads new evidence.
 - Write only in the target wiki.
 
@@ -69,6 +74,7 @@ Pick the heading by the output language value. `Traditional Chinese` uses the Tr
 - Write a claim without a cited page outside "What to verify".
 - Leave a "How to refute" cell empty.
 - Raise `strength` because two terms look alike.
+- Raise or lower `strength` because of the rank of the evidence.
 - Write the hypothesis as a fact.
 
 ### What to write in each section
@@ -154,6 +160,7 @@ updated: 2026-01-15
 - [ ] Is `mechanism` a bare slug, or `reading:<slug>` in a work wiki?
 - [ ] Do `from_domain` and `to_domain` each hold one domain path?
 - [ ] Are `relation`, `strength`, and `status` values from the allowed lists?
+- [ ] Did you set `strength` from the Strength rules, and `status` from the evidence ranks, in the lens of `to_domain`?
 - [ ] Did you read the lens of `to_domain` and the lens of `from_domain`?
 - [ ] Are the six sections present, in order, with headings in the output language?
 - [ ] Does every claim cite a wiki page, or sit under "What to verify"?
