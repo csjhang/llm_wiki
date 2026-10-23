@@ -1,0 +1,17 @@
+# Domain list for the sample wiki. It replaces the empty list in the template.
+# Two domains here, hardware/async-circuits and ai/architecture, share one
+# mechanism: work happens only when an event arrives.
+version: 1
+domains:
+  hardware/async-circuits:
+    lens: hardware
+    description: Digital circuits without a global clock
+    whiteboards: []
+  ai/architecture:
+    lens: ai
+    description: Designs of neural networks and the hardware that runs them
+    whiteboards: []
+  business/franchising:
+    lens: business
+    description: Growing a business by licensing its brand and operating system
+    whiteboards: []
