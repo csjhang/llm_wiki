@@ -648,8 +648,48 @@ fn ignored_paths(
     }
 }
 
+/// Untracked, non-ignored files at or under `paths`, relative to the project
+/// folder: what `git add -A` would add there.
+fn untracked_entries(
+    project_path: &str,
+    paths: &[String],
+    envs: &[(&str, &str)],
+) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let output = run_git_paths_ok(
+        project_path,
+        &[
+            "--literal-pathspecs",
+            "ls-files",
+            "-z",
+            "--others",
+            "--exclude-standard",
+        ],
+        paths,
+        envs,
+    )?;
+    Ok(nul_entries(&output.stdout))
+}
+
 fn exists_on_disk(project_path: &str, rel: &str) -> bool {
     fs::symlink_metadata(Path::new(project_path).join(rel)).is_ok()
+}
+
+/// A real folder on disk (a symlink to one does not count).
+fn is_dir_on_disk(project_path: &str, rel: &str) -> bool {
+    fs::symlink_metadata(Path::new(project_path).join(rel))
+        .map(|meta| meta.is_dir())
+        .unwrap_or(false)
+}
+
+/// Whether git compares file names without regard to case (`core.ignorecase`,
+/// which `git init` sets on macOS and Windows). Unset or unreadable: false.
+fn ignores_case(project_path: &str) -> bool {
+    run_git(project_path, &["config", "--bool", "core.ignorecase"])
+        .map(|output| output.success && output.stdout.trim() == "true")
+        .unwrap_or(false)
 }
 
 fn git_commit_paths_with_env(
@@ -674,11 +714,27 @@ fn git_commit_paths_with_env(
         .map(|path| path.rel.clone())
         .collect();
     let ignored = ignored_paths(project_path, &new_on_disk, envs)?;
+    // `git add` also fails on a new folder that holds nothing it can add (an
+    // empty one; one with only ignored files can fail too). Leave it out: git
+    // would not record it anyway.
+    let new_dirs: Vec<String> = new_on_disk
+        .iter()
+        .filter(|rel| !ignored.contains(rel) && is_dir_on_disk(project_path, rel))
+        .cloned()
+        .collect();
+    let addable = untracked_entries(project_path, &new_dirs, envs)?;
+    let nothing_to_add: Vec<String> = paths
+        .iter()
+        .filter(|path| new_dirs.contains(&path.rel) && !covers(path, &addable))
+        .map(|path| path.rel.clone())
+        .collect();
     let to_add: Vec<String> = paths
         .iter()
         .filter(|path| {
             covers(path, &in_index)
-                || (exists_on_disk(project_path, &path.rel) && !ignored.contains(&path.rel))
+                || (exists_on_disk(project_path, &path.rel)
+                    && !ignored.contains(&path.rel)
+                    && !nothing_to_add.contains(&path.rel))
         })
         .map(|path| path.rel.clone())
         .collect();
@@ -751,11 +807,45 @@ fn git_restore_paths_inner(project_path: &str, paths: &[String]) -> Result<(), S
         crate::commands::file_sync::mark_app_write_path(&root.join(&path.rel));
     }
 
-    let known: Vec<String> = paths
+    let mut known: Vec<String> = paths
         .iter()
         .filter(|path| covers(path, &in_index) || covers(path, &in_head))
         .map(|path| path.rel.clone())
         .collect();
+    let mut unknown_files: Vec<String> = paths
+        .iter()
+        .filter(|path| !path.is_dir && !known.contains(&path.rel))
+        .filter(|path| {
+            fs::symlink_metadata(root.join(&path.rel))
+                .map(|meta| !meta.is_dir())
+                .unwrap_or(false)
+        })
+        .map(|path| path.rel.clone())
+        .collect();
+
+    // With `core.ignorecase` git treats `wiki/Foo.md` and `wiki/foo.md` as one
+    // file, but a literal pathspec does not match across case. The disk may
+    // hold that one file under either name, so a file that matches a tracked
+    // entry ignoring case is never deleted: the tracked entry is restored.
+    if !unknown_files.is_empty() && ignores_case(project_path) {
+        let top = [RESTORABLE_TOP_LEVEL_DIR.to_string()];
+        let mut tracked = index_entries(project_path, &top, &[])?;
+        tracked.extend(head_entries(project_path, &top, &[])?);
+        unknown_files.retain(|rel| {
+            let lower = rel.to_lowercase();
+            let variants: Vec<&String> = tracked
+                .iter()
+                .filter(|entry| entry.to_lowercase() == lower)
+                .collect();
+            for entry in &variants {
+                if !known.contains(entry) {
+                    known.push((*entry).clone());
+                }
+            }
+            variants.is_empty()
+        });
+    }
+
     if !known.is_empty() {
         if !has_head(project_path, &[])? {
             return Err("There is no commit to restore from".to_string());
@@ -774,16 +864,6 @@ fn git_restore_paths_inner(project_path: &str, paths: &[String]) -> Result<(), S
         )?;
     }
 
-    let unknown_files: Vec<String> = paths
-        .iter()
-        .filter(|path| !path.is_dir && !known.contains(&path.rel))
-        .filter(|path| {
-            fs::symlink_metadata(root.join(&path.rel))
-                .map(|meta| !meta.is_dir())
-                .unwrap_or(false)
-        })
-        .map(|path| path.rel.clone())
-        .collect();
     let ignored = ignored_paths(project_path, &unknown_files, &[])?;
     for rel in unknown_files.iter().filter(|rel| !ignored.contains(rel)) {
         fs::remove_file(root.join(rel))
@@ -1325,6 +1405,66 @@ mod tests {
         assert_eq!(git(&dir, &["status", "--porcelain"]).trim(), "");
     }
 
+    /// A repo whose HEAD holds `wiki/foo.md`; the page is then edited and a
+    /// file `wiki/Foo.md` that differs only in case is created next to it. On a
+    /// case-sensitive disk these are two files; with `core.ignorecase=true`
+    /// git treats them as one, as it does on macOS and Windows.
+    fn repo_with_a_case_variant(ignore_case: bool) -> PathBuf {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        write(&dir, ".gitignore", ".llm-wiki/\n");
+        write(&dir, "wiki/foo.md", "foo committed");
+        git_commit_all_inner(&path_str(&dir), "chore: start").unwrap();
+        git(
+            &dir,
+            &[
+                "config",
+                "core.ignorecase",
+                if ignore_case { "true" } else { "false" },
+            ],
+        );
+        write(&dir, "wiki/foo.md", "foo edited");
+        write(&dir, "wiki/Foo.md", "the written path");
+        dir
+    }
+
+    #[test]
+    fn restore_paths_keeps_a_case_variant_of_a_tracked_file_when_git_ignores_case() {
+        let dir = repo_with_a_case_variant(true);
+
+        git_restore_paths_inner(&path_str(&dir), &strings(&["wiki/Foo.md"])).unwrap();
+
+        assert!(dir.join("wiki/Foo.md").exists());
+        assert_eq!(read(&dir, "wiki/foo.md"), "foo committed");
+    }
+
+    #[test]
+    fn restore_paths_keeps_a_tracked_file_in_a_case_variant_folder_when_git_ignores_case() {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        write(&dir, ".gitignore", ".llm-wiki/\n");
+        write(&dir, "wiki/concepts/x.md", "x committed");
+        git_commit_all_inner(&path_str(&dir), "chore: start").unwrap();
+        git(&dir, &["config", "core.ignorecase", "true"]);
+        write(&dir, "wiki/concepts/x.md", "x edited");
+        write(&dir, "wiki/Concepts/X.md", "the written path");
+
+        git_restore_paths_inner(&path_str(&dir), &strings(&["wiki/Concepts/X.md"])).unwrap();
+
+        assert!(dir.join("wiki/Concepts/X.md").exists());
+        assert_eq!(read(&dir, "wiki/concepts/x.md"), "x committed");
+    }
+
+    #[test]
+    fn restore_paths_deletes_an_unknown_file_when_git_respects_case() {
+        let dir = repo_with_a_case_variant(false);
+
+        git_restore_paths_inner(&path_str(&dir), &strings(&["wiki/Foo.md"])).unwrap();
+
+        assert!(!dir.join("wiki/Foo.md").exists());
+        assert_eq!(read(&dir, "wiki/foo.md"), "foo edited");
+    }
+
     #[test]
     fn restore_paths_keeps_ignored_files() {
         let dir = repo_with_committed_wiki();
@@ -1549,6 +1689,61 @@ mod tests {
 
         assert!(sha.is_some());
         assert_eq!(head_files(&dir), vec!["wiki/new.md"]);
+    }
+
+    #[test]
+    fn commit_paths_skips_an_empty_new_folder() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/a.md", "a edited by the ingest");
+        // The run created its media folder but wrote no image into it.
+        fs::create_dir_all(dir.join("wiki/media/x")).unwrap();
+
+        let sha = git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/a.md", "wiki/media/x/"]),
+            "ingest: A (1 pages)",
+        )
+        .unwrap()
+        .expect("a commit");
+
+        assert!(is_sha(&sha), "not a full sha: {sha}");
+        assert_eq!(head_files(&dir), vec!["wiki/a.md"]);
+    }
+
+    #[test]
+    fn commit_paths_skips_a_new_folder_with_only_ignored_files() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, ".gitignore", ".llm-wiki/\n*.tmp\n");
+        git_commit_all_inner(&path_str(&dir), "chore: ignore tmp").unwrap();
+        write(&dir, "wiki/media/y/z.tmp", "ignored");
+        let head_before = git(&dir, &["rev-parse", "HEAD"]);
+
+        let result = git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/media/y/"]),
+            "ingest: Y (0 pages)",
+        )
+        .unwrap();
+
+        assert_eq!(result, None);
+        assert_eq!(git(&dir, &["rev-parse", "HEAD"]), head_before);
+    }
+
+    #[test]
+    fn commit_paths_commits_a_new_folder_given_without_a_trailing_slash() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/media/s/1.png", "one");
+        fs::create_dir_all(dir.join("wiki/media/empty")).unwrap();
+
+        git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/media/s", "wiki/media/empty"]),
+            "ingest: S (0 pages)",
+        )
+        .unwrap()
+        .expect("a commit");
+
+        assert_eq!(head_files(&dir), vec!["wiki/media/s/1.png"]);
     }
 
     #[test]
