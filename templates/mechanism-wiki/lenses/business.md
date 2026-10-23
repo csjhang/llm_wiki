@@ -55,16 +55,16 @@ Rank evidence from strongest to weakest. When two pieces of evidence disagree, t
 
 Evidence does not set `strength`. It decides two other things on a hypothesis page.
 
-- Role mapping: a "Fits?" cell has a value other than "unknown" only when a cited page supports the row. Otherwise write "unknown" and move the claim to "What to verify".
-- Status: `supported` needs evidence from the top two ranks to resolve every "What to verify" row. A row that rests only on lower ranks stays open, so the status stays `testing` at most. `refuted` needs evidence from the top two ranks to refute one row.
+- Role mapping: a "Fits?" cell has a value other than "unknown" only when a cited page supports the row. Otherwise write "unknown" in the output language, and move the claim to "What to verify".
+- Status: `supported` needs evidence from the top two ranks to resolve every "What to verify" row. It also needs at least one row. A row that rests only on lower ranks stays open, so the status stays `testing` at most. `refuted` needs evidence from the top two ranks to refute one row.
 
 ## Strength rules
 
 `strength` measures the kind of match that the hypothesis claims. Set it from these rules, not from evidence. Read each level by the `relation` of the page. Pick the highest level that the match meets. If it meets neither `structural` nor `mathematical`, use `surface`.
 
 - `surface`: For an analogy, the words look alike, but the parts and the flows do not match one to one. For a stack, only a general dependency is known.
-- `structural`: For an analogy, the parts and the flows match one to one. For a stack, each upper-layer part maps to named lower-layer components.
-- `mathematical`: For an analogy, both sides follow the same equations or the same trade-off curve. For a stack, the equations or the trade-off curve of the lower layer define the behavior of the upper layer.
+- `structural`: For an analogy, the parts and the flows match one to one. For a stack, each upper-layer part maps to named base-layer components.
+- `mathematical`: For an analogy, both sides follow the same equations or the same trade-off curve. For a stack, the equations or the trade-off curve of the base layer define the behavior of the upper layer.
 
 Check who gives value and who pays on both sides, because a shared word such as "platform" is not a match.
 

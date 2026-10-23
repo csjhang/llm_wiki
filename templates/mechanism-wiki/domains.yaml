@@ -1,6 +1,6 @@
 # Domain list. An AI agent picks the domain of each page only from this list.
 # A domain name uses lowercase letters, digits, "-", and "/" between levels.
-# The lens of a domain must be one of: business, physics, hardware, ai.
+# The lens of a domain is the name of a file in `lenses/`, without `.md`.
 # The app adds a domain here after you approve a new-domain review item.
 version: 1
 domains: {}

@@ -2,7 +2,8 @@
 
 This file is the routing rule for every ingest. Follow it when you create or update a page.
 An ingest is one run in which the AI reads one source and writes wiki pages from it.
-Write page text in the output language. The app prompt names it. Otherwise read `Output language:` in `purpose.md`. If it is empty, ask the user.
+Write page text in the output language. The app prompt names it. Otherwise read `Output language:` in `purpose.md`. If that line is empty, ask the user.
+Read the output language by its meaning. Treat `繁體中文`, `zh-TW`, `zh-Hant`, and `Traditional Chinese` as Traditional Chinese. Treat `简体中文`, `zh-CN`, `zh-Hans`, `Simplified Chinese`, and the app value `Chinese` as Simplified Chinese. Mechanism pages and hypothesis pages use fixed section headings. Every other language uses the English headings.
 
 ## Page types
 
@@ -13,8 +14,10 @@ Write page text in the output language. The app prompt names it. Otherwise read 
 | concept | `wiki/concepts/` | An idea, technique, or phenomenon that belongs to one domain. |
 | comparison | `wiki/comparisons/` | A side-by-side analysis of related entities or concepts. |
 | query | `wiki/queries/` | An open question under investigation. It also tracks contradictions. |
-| mechanism | `wiki/mechanisms/` | A structure that repeats across domains. Only a reading wiki has this directory. |
+| mechanism | `wiki/mechanisms/` | A structure that repeats across domains. Only a reading wiki writes pages in this directory. |
 | hypothesis | `wiki/hypotheses/` | A mechanism applied to another domain. Fusion writes it. Ingest does not. |
+
+Use only these seven types. Do not write synthesis, thesis, methodology, or finding pages in a mechanism wiki.
 
 Each type also has a rule file at `schema/page-types/<type>.md`. An agent that can read files must read it before it writes a page of that type.
 
@@ -26,6 +29,8 @@ Each type also has a rule file at `schema/page-types/<type>.md`. An agent that c
 - Never rename an existing file. An ingest writes whole files. It cannot rename them.
 - Two domains can have a page with the same name. Add the suffix `--<last-domain-segment>` to the new page only. Keep the old file name.
 - Example: `attention.md` is in the domain `ai`. A new page in the domain `cognition` gets the file name `attention--cognition.md`.
+- If the `--<last-domain-segment>` file name already exists, use the full domain path instead. Replace each `/` in the domain with `--`.
+- Example: `attention` in `ai/architecture` becomes `attention--ai--architecture.md`.
 - Put one line at the top of each of the two pages that links to the other page.
 - Renaming an old page is a job for the `wiki-recut` skill.
 
@@ -44,7 +49,7 @@ Each page-type file holds the full field list for its type.
 | `instances` | mechanism | yes | Slugs of the instance pages. |
 | `mechanism` | hypothesis | yes | The mechanism page. Across wikis, write `reading:<slug>`. |
 | `from_domain`, `to_domain` | hypothesis | yes | The domain that gives the mechanism, and the domain that receives it. |
-| `relation` | hypothesis | yes | `analogy` or `stack`. |
+| `relation` | hypothesis | yes | `analogy` or `stack`. In a stack, `from_domain` is the base layer and `to_domain` is the upper layer. |
 | `strength` | hypothesis | yes | `surface`, `structural`, or `mathematical`. |
 | `status` | hypothesis | yes | `draft`, `testing`, `supported`, or `refuted`. |
 | `heptabase_whiteboard` | hypothesis | no | The ID of the whiteboard that the hypothesis came from. |
@@ -59,6 +64,7 @@ When `source_kind` is `note`, write the content as the user's view. Do not write
 - If no listed domain fits, propose a new domain as a `new-domain` review item. Wait for the user to approve it.
 - A source, entity, concept, comparison, or query page has one `domain`. Use `also` for related domains.
 - Only a mechanism page applies to many domains. A hypothesis page names its two domains in `from_domain` and `to_domain`.
+- For indexes, lint, and Heptabase, the domain of a hypothesis page is its `to_domain`.
 - When two domains share a concept name, write two pages.
 
 ## Mechanisms
@@ -72,6 +78,7 @@ Full rules are in `schema/page-types/mechanism.md`.
 - List each instance as a link, with its domain and its local term. Put instance detail on the instance page.
 - A reading wiki writes mechanism pages. A work wiki does not.
 - A work wiki sends a `new-mechanism` review item instead.
+- A mechanism page can start with one instance. Write the concept or entity page for the domain-specific thing, and write or update a mechanism page that lists it as an instance.
 - Before you write a mechanism page, check the mechanism index `wiki/indexes/_mechanisms.md` for the same mechanism. If the mechanism page exists, add a line to the known instances of that page.
 
 ## Index and log

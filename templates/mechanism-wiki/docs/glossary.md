@@ -28,7 +28,7 @@ A note is a source that the user wrote. It is the view of the user, not evidence
 
 ## Domain
 
-A domain is one path in `domains.yaml`, for example `hardware/async-circuits`. Each page, except a mechanism page or a hypothesis page, belongs to one domain. Choose a domain only from the list. The term is used most in `domains.yaml`.
+A domain is one path in `domains.yaml`, for example `hardware/async-circuits`. Each page, except a mechanism page or a hypothesis page, belongs to one domain. Choose a domain only from the list. For indexes, lint, and Heptabase, the domain of a hypothesis page is its `to_domain`. The term is used most in `domains.yaml`.
 
 ## Lens
 
@@ -36,7 +36,7 @@ A lens is one file in `lenses/`. It says what each field of a mechanism page mea
 
 ## Mechanism
 
-A mechanism is a structure that repeats across domains. A mechanism page states parts, flows, constraints and trade-offs, why it works, and failure conditions. It states no domain detail. The term is used most in `schema/page-types/mechanism.md`.
+A mechanism is a structure that repeats across domains. A mechanism page states parts, flows, constraints and trade-offs, why it works, and failure conditions. It states no domain detail. A mechanism page can start with one instance. The term is used most in `schema/page-types/mechanism.md`.
 
 ## Instance
 
@@ -60,11 +60,11 @@ An analogy borrows a mechanism from one domain for another domain. The two domai
 
 ## Stack
 
-A stack is a relation in which one domain is the base layer of another domain. Its `relation` value is `stack`. The term is used most in `schema/page-types/hypothesis.md`.
+A stack is a relation in which one domain is the base layer of another domain. The other domain is the upper layer. Its `relation` value is `stack`. In a hypothesis page with `relation: stack`, `from_domain` is the base layer and `to_domain` is the upper layer. The term is used most in `schema/page-types/hypothesis.md`.
 
 ## Analogy strength
 
-Analogy strength has three levels. `surface` means the words look alike. `structural` means the structures correspond. `mathematical` means both sides have the same mathematical form. The term is used most in `schema/page-types/hypothesis.md`.
+Analogy strength has three levels. `surface` means the words look alike. `structural` means the structures correspond. `mathematical` means both sides have the same mathematical form. For a stack, `surface` means only a general dependency is known, and `structural` means each upper-layer part maps to named base-layer components. `mathematical` means the equations or the trade-off curve of the base layer define the behavior of the upper layer. The term is used most in `schema/page-types/hypothesis.md`.
 
 ## Mirror card
 

@@ -49,6 +49,7 @@ A note is the view of the user. Write who holds the view. Do not write it as a f
 ## 7. Cite a source for every claim
 
 Add the source file name to `sources` in the frontmatter, for example `paper.md`. A `sources` entry is the name of a source file. Link the source page in the body with `[[slug]]`. A claim counts as sourced when its section has at least one `[[<source-page-slug>]]` link that supports it. If you have no source, write the claim as a question to verify.
+The rules in `schema/page-types/hypothesis.md` win for a hypothesis page. A hypothesis page may cite any wiki page. Every other page cites source pages.
 
 壞：非同步電路的功耗比同步電路低 30%。
 好：一篇原文指出，非同步電路的功耗比同步電路低，但沒有給數字。[[async-circuits-survey]]

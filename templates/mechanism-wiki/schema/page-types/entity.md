@@ -10,6 +10,7 @@ The page belongs to exactly one domain. See `docs/glossary.md` for the term Doma
 Write the page in `wiki/entities/`. Follow the file-name rules in `schema.md`.
 Two domains can have an entity with the same name. Write two pages. Never rename an existing file.
 Add the suffix `--<last-domain-segment>` to the new page only. Keep the file name of the old page.
+If the `--<last-domain-segment>` file name already exists, use the full domain path instead. Replace each `/` in the domain with `--`. For example, `attention` in `ai/architecture` becomes `attention--ai--architecture.md`.
 
 ## Frontmatter
 
@@ -88,6 +89,7 @@ updated: 2026-01-15
 - [ ] Does each claim stay on the entity that it describes?
 - [ ] Does each section that holds claims link at least one source page that supports it?
 - [ ] If a same-name page exists in another domain, does only the new page carry the `--<last-domain-segment>` suffix?
+- [ ] If the `--<last-domain-segment>` file name exists, did you use the full domain path?
 - [ ] Did you keep the file name of every existing page?
 - [ ] If a same-name page exists, does each of the two pages have a line at the top that links to the other?
 - [ ] Do `related` and `sources` follow the cross-reference rules in `schema.md`?

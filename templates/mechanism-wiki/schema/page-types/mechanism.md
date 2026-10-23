@@ -5,6 +5,7 @@
 A mechanism page states a structure that repeats across domains. See `docs/glossary.md` for the terms Mechanism and Instance.
 Every mechanism page has the same six sections. The lens of a domain says what each field means in that domain. A field is one of those sections.
 The page holds no domain detail. The instance pages hold the detail.
+A mechanism page can start with one instance. Write the concept or entity page for the domain-specific thing, and write or update a mechanism page that lists it as an instance.
 
 ## Location
 
@@ -29,8 +30,10 @@ Before you write a page, search `wiki/indexes/_mechanisms.md` for the same mecha
 ## Sections
 
 Write the six sections below as level-2 headings. Keep this order. Do not add, remove, or rename a section.
-Pick the heading by the output language value. `Traditional Chinese` uses the Traditional Chinese headings.
-`Chinese` is the app value for Simplified Chinese. It uses the Simplified Chinese headings. `auto` and every other value use the English headings.
+Pick the headings by the meaning of the output language, as `schema.md` says.
+`Traditional Chinese` uses the Traditional Chinese headings. `繁體中文`, `zh-TW`, and `zh-Hant` mean the same.
+`Chinese` is the app value for Simplified Chinese. It uses the Simplified Chinese headings. `简体中文`, `zh-CN`, `zh-Hans`, and `Simplified Chinese` mean the same.
+`auto` and every other language use the English headings.
 
 | Key | English | Traditional Chinese | Simplified Chinese |
 |---|---|---|---|
@@ -70,7 +73,7 @@ Pick the heading by the output language value. `Traditional Chinese` uses the Tr
 - Constraints and trade-offs: Write what limits the mechanism and what it gives up. Write 2 to 5 lines. State each trade-off as a gain and its cost.
 - Why it works: Write the reason that the structure works. Write one short paragraph of at most 5 sentences. Do not list instances.
 - Failure conditions: Write when the mechanism stops working. Write 1 to 5 lines. Each line says what changes and what breaks.
-- Known instances: Write one line for each instance. Use exactly this form in every language: `- [[<slug>]] (<domain>): <local term>`. Use ASCII punctuation. The local term is the name that the domain uses.
+- Known instances: Write one line for each instance. Use exactly this form in every language: `- [[<slug>]] (<domain>): <local term>`. Use ASCII punctuation. `<domain>` is the full domain path, for example `ai/architecture`. The local term is the name that the domain uses.
 
 ## Example
 
@@ -96,7 +99,7 @@ updated: 2026-01-15
 
 - 事件：狀態的一次變化。
 - 偵測器：監看狀態，發現變化。
-- 通道：傳遞訊息。
+- 通道：負責傳遞。
 - 處理單元：執行計算。[[async-circuits-survey]]
 
 ## 流動

@@ -91,12 +91,12 @@ const STRENGTH_LEVELS = ["surface", "structural", "mathematical"] as const
  */
 const STACK_PHRASES = [
   "only a general dependency is known",
-  "each upper-layer part maps to named lower-layer components",
-  "the equations or the trade-off curve of the lower layer define the behavior of the upper layer",
+  "each upper-layer part maps to named base-layer components",
+  "the equations or the trade-off curve of the base layer define the behavior of the upper layer",
 ]
 
 /** Controller ruling R16, what evidence decides. Every lens (Evidence standard) and hypothesis.md must carry these phrases. */
-const STATUS_PHRASES = ["evidence from the top two ranks", "stays open", "`testing` at most"]
+const STATUS_PHRASES = ["evidence from the top two ranks", "stays open", "`testing` at most", "at least one row"]
 
 /** Words that describe what parts exchange. A Parts line gives a role and must not use them. */
 const EXCHANGE_WORDS = ["傳遞", "送到", "交給", "付費", "收費", "通往", "帶出", "相加", "輸出"]
@@ -661,7 +661,7 @@ describe("mechanism template: page-type rule files", () => {
       const sections = sectionBody(readTemplate(`schema/page-types/${type}.md`), "Sections")
       expect(sections, type).toContain("`Traditional Chinese` uses the Traditional Chinese headings")
       expect(sections, type).toContain("`Chinese` is the app value for Simplified Chinese")
-      expect(sections, type).toContain("`auto` and every other value use the English headings")
+      expect(sections, type).toContain("`auto` and every other language use the English headings")
     }
   })
 
@@ -928,6 +928,206 @@ describe("mechanism template: lens files", () => {
     const page = parseExampleBlock("physics", sectionBody(readTemplate("lenses/physics.md"), "Example"))
     const constraints = findSection(page.body, MECHANISM_SECTIONS[2]) ?? ""
     expect(constraints).toMatch(/^- 能量守恆：.*等於/m)
+  })
+})
+
+/** Text of every template file that an agent reads: the Markdown files and the YAML files. */
+function templateTextFiles(directory = ""): string[] {
+  return readdirSync(join(TEMPLATE_DIR, directory), { withFileTypes: true }).flatMap((entry) => {
+    const relative = directory === "" ? entry.name : `${directory}/${entry.name}`
+    if (entry.isDirectory()) return templateTextFiles(relative)
+    return /\.(md|ya?ml)$/.test(entry.name) ? [relative] : []
+  })
+}
+
+/** The phrase that A1 repeats in schema.md, mechanism.md, and concept.md. Case does not matter. */
+const WRITE_BOTH_PHRASE =
+  "write the concept or entity page for the domain-specific thing, and write or update a mechanism page that lists it as an instance"
+
+/** Controller ruling R19, repeated in schema.md, the glossary, and hypothesis.md. */
+const HYPOTHESIS_DOMAIN_SENTENCE =
+  "For indexes, lint, and Heptabase, the domain of a hypothesis page is its `to_domain`."
+
+/** Ways to say each output language. A3 and A4 ask every file that reads the language to know them. */
+const TRADITIONAL_CHINESE_NAMES = ["繁體中文", "zh-TW", "zh-Hant", "Traditional Chinese"]
+const SIMPLIFIED_CHINESE_NAMES = ["简体中文", "zh-CN", "zh-Hans", "Simplified Chinese", "Chinese"]
+
+/** Final review fixes for sub-project 0 (items A1 to A14). */
+describe("mechanism template: final review fixes", () => {
+  it("A1: a mechanism page can start with one instance, and the concept page is still written", () => {
+    const sentence = "A mechanism page can start with one instance."
+    expect(sectionBody(readTemplate("docs/glossary.md"), "Mechanism")).toContain(sentence)
+    const cases: Array<[label: string, text: string]> = [
+      ["schema.md Mechanisms", sectionBody(readTemplate("schema.md"), "Mechanisms")],
+      ["mechanism.md", readTemplate("schema/page-types/mechanism.md")],
+      ["concept.md", readTemplate("schema/page-types/concept.md")],
+    ]
+    for (const [label, text] of cases) {
+      expect(text.toLowerCase(), label).toContain(WRITE_BOTH_PHRASE)
+    }
+    expect(cases[0][1], "schema.md Mechanisms").toContain(sentence)
+    expect(cases[1][1], "mechanism.md").toContain(sentence)
+    const concept = readTemplate("schema/page-types/concept.md")
+    expect(concept, "concept.md must not say mechanism page instead of concept page").not.toMatch(
+      /is not a concept|Use a mechanism page/,
+    )
+  })
+
+  it("A2 (R19): the domain of a hypothesis page is its to_domain for indexes, lint, and Heptabase", () => {
+    expect(sectionBody(readTemplate("schema.md"), "Domains")).toContain(HYPOTHESIS_DOMAIN_SENTENCE)
+    expect(sectionBody(readTemplate("docs/glossary.md"), "Domain")).toContain(HYPOTHESIS_DOMAIN_SENTENCE)
+    expect(readTemplate("schema/page-types/hypothesis.md")).toContain(HYPOTHESIS_DOMAIN_SENTENCE)
+    const body = sectionBody(readTemplate("CLAUDE.md"), "Read order")
+    const lensItem = body.split(/\r?\n/).find((line) => line.includes("`lenses/<lens>.md`")) ?? ""
+    expect(lensItem).toMatch(/hypothesis page/)
+    expect(lensItem).toContain("the lens of `to_domain` and the lens of `from_domain`")
+  })
+
+  it("A3: only a reading wiki writes pages in the mechanisms directory", () => {
+    const types = sectionBody(readTemplate("schema.md"), "Page types")
+    expect(types).toContain("Only a reading wiki writes pages in this directory.")
+    expect(types).not.toContain("has this directory")
+  })
+
+  it("A4: the output language is read by meaning in CLAUDE.md, schema.md, mechanism.md, and hypothesis.md", () => {
+    const files = ["CLAUDE.md", "schema.md", "schema/page-types/mechanism.md", "schema/page-types/hypothesis.md"]
+    for (const file of files) {
+      const text = readTemplate(file)
+      for (const name of [...TRADITIONAL_CHINESE_NAMES, ...SIMPLIFIED_CHINESE_NAMES]) {
+        expect(text, `${file}: ${name}`).toContain(name)
+      }
+    }
+    for (const file of ["schema/page-types/mechanism.md", "schema/page-types/hypothesis.md"]) {
+      const sections = sectionBody(readTemplate(file), "Sections")
+      expect(sections, file).toContain("`auto` and every other language use the English headings")
+    }
+    for (const file of ["CLAUDE.md", "schema.md"]) {
+      const text = readTemplate(file)
+      expect(text, file).toContain("If that line is empty, ask the user.")
+      expect(text, file).not.toContain("If it is empty")
+    }
+  })
+
+  it("A5: a mechanism wiki has only the seven page types", () => {
+    expect(sectionBody(readTemplate("schema.md"), "Page types")).toContain(
+      "Use only these seven types. Do not write synthesis, thesis, methodology, or finding pages in a mechanism wiki.",
+    )
+  })
+
+  it("A6: a same-name file name that exists already takes the full domain path", () => {
+    const rule = "If the `--<last-domain-segment>` file name already exists, use the full domain path instead."
+    const how = "Replace each `/` in the domain with `--`."
+    const example = "`attention` in `ai/architecture` becomes `attention--ai--architecture.md`"
+    const cases: Array<[string, string]> = [
+      ["schema.md File names", sectionBody(readTemplate("schema.md"), "File names")],
+      ["entity.md", readTemplate("schema/page-types/entity.md")],
+      ["concept.md", readTemplate("schema/page-types/concept.md")],
+    ]
+    for (const [label, text] of cases) {
+      expect(text, label).toContain(rule)
+      expect(text, label).toContain(how)
+      expect(text, label).toContain(example)
+    }
+  })
+
+  it("A7: hypothesis.md citation rules win for a hypothesis page", () => {
+    const rule7 = sectionBody(readTemplate("schema/writing-rules.md"), "7. Cite a source for every claim")
+    expect(rule7).toContain("The rules in `schema/page-types/hypothesis.md` win for a hypothesis page.")
+    expect(rule7).toContain("A hypothesis page may cite any wiki page.")
+    expect(rule7).toContain("Every other page cites source pages.")
+    const hypothesis = readTemplate("schema/page-types/hypothesis.md")
+    expect(hypothesis).toContain("These citation rules win over rule 7 in `schema/writing-rules.md`.")
+    expect(hypothesis).toContain("A hypothesis page may cite any wiki page.")
+  })
+
+  it("A8: from_domain and to_domain come from domains.yaml of this wiki or of the reading wiki", () => {
+    const text = readTemplate("schema/page-types/hypothesis.md")
+    const rules = sectionBody(text, "Rules")
+    expect(rules).toContain(
+      "Take `from_domain` and `to_domain` from `domains.yaml` of this wiki. In a work wiki, you can also take them from `domains.yaml` of the reading wiki.",
+    )
+    expect(rules).toContain("Do not invent a domain.")
+    for (const field of ["from_domain", "to_domain"]) {
+      const row = tableRows(sectionBody(text, "Frontmatter")).find((cells) => cells[0] === field) ?? []
+      expect(row[2], `${field} row`).toContain("domains.yaml")
+    }
+  })
+
+  it("A9 (R17): a stack names from_domain as the base layer and to_domain as the upper layer", () => {
+    const sentence = "In a stack, `from_domain` is the base layer and `to_domain` is the upper layer."
+    expect(readTemplate("schema/page-types/hypothesis.md")).toContain(sentence)
+    expect(sectionBody(readTemplate("schema.md"), "Frontmatter")).toContain(sentence)
+    const stack = sectionBody(readTemplate("docs/glossary.md"), "Stack")
+    expect(stack).toContain("base layer")
+    expect(stack).toContain("upper layer")
+    expect(stack).toContain("`from_domain` is the base layer")
+    const strength = sectionBody(readTemplate("docs/glossary.md"), "Analogy strength")
+    expect(strength).toContain("For a stack,")
+    for (const phrase of STACK_PHRASES) expect(strength, phrase).toContain(phrase)
+    for (const file of templateMarkdownFiles()) {
+      expect(readTemplate(file), file).not.toMatch(/lower[- ]layer/i)
+    }
+    for (const id of KNOWN_LENSES) {
+      expect(sectionBody(readTemplate(`lenses/${id}.md`), "Strength rules"), id).toContain("base-layer")
+    }
+  })
+
+  it("A10 (R18): draft, testing, and supported have separate conditions", () => {
+    const text = readTemplate("schema/page-types/hypothesis.md")
+    expect(text).toContain("The Rules section has the condition for each value.")
+    expect(text).not.toContain("Rules has the conditions for the other values")
+    const rules = sectionBody(text, "Rules")
+    expect(rules).toContain("`draft` means you wrote the page and have not tested it.")
+    expect(rules).toContain(
+      'Change `draft` to `testing` when at least one row under "What to verify" links a query page that holds evidence.',
+    )
+    expect(rules).toContain('`supported` also needs at least one row under "What to verify".')
+    expect(rules).toContain("A page with zero rows stays `testing`.")
+  })
+
+  it("A11: the unknown rule covers parts, flows, and constraints; the one-line exemption is repeated", () => {
+    const text = readTemplate("schema/page-types/hypothesis.md")
+    const rules = sectionBody(text, "Rules")
+    expect(rules).toContain(
+      'If a part, a flow, or a constraint has no supporting page in this wiki, write its mapping row with "Fits?" set to "unknown".',
+    )
+    const doNot = rules.slice(rules.indexOf("### Do not"), rules.indexOf("### What to write in each section"))
+    expect(doNot).toContain("The one-line hypothesis is the exception.")
+    const checklist = sectionBody(text, "Checklist")
+    expect(checklist).toContain("every claim except the one-line hypothesis")
+    for (const id of KNOWN_LENSES) {
+      expect(sectionBody(readTemplate(`lenses/${id}.md`), "Evidence standard"), id).toContain(
+        'write "unknown" in the output language',
+      )
+    }
+  })
+
+  it("A12: the instance line defines <domain>, and the Parts example gives roles only", () => {
+    const text = readTemplate("schema/page-types/mechanism.md")
+    expect(text).toContain("`<domain>` is the full domain path, for example `ai/architecture`.")
+    const page = parseExample("mechanism")
+    const parts = findSection(page.body, MECHANISM_SECTIONS[0]) ?? ""
+    expect(parts).not.toContain("訊息")
+    expect(parts).toContain("通道：負責傳遞")
+    expect(page.body).not.toContain("訊息")
+  })
+
+  it("A13: the Heptabase example names the real command, and no template file says wiki-hepta", () => {
+    expect(readTemplate("heptabase.example.yaml")).toContain("wiki-tool hepta init")
+    for (const file of templateTextFiles()) {
+      expect(readTemplate(file), file).not.toContain("wiki-hepta")
+    }
+  })
+
+  it("A14: the domains.yaml comment does not hard-code the lens ids", () => {
+    const text = readTemplate("domains.yaml")
+    expect(text).toContain("`lenses/`")
+    expect(text).toContain("without `.md`")
+    // The example entry names one lens. The comment does not list the four ids.
+    const comments = text.split(/\r?\n/).filter((line) => line.startsWith("#")).join("\n")
+    const mentioned = KNOWN_LENSES.filter((id) => new RegExp(`\\b${id}\\b`).test(comments))
+    expect(mentioned.length, "lens ids named in comments").toBeLessThanOrEqual(1)
+    expect(text).not.toMatch(/must be one of/)
   })
 })
 

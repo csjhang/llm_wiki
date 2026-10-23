@@ -3,13 +3,15 @@
 ## Purpose
 
 A concept page explains one idea, technique, or phenomenon. The page belongs to exactly one domain.
-A structure that repeats across domains is not a concept. It is a mechanism. See `schema/page-types/mechanism.md` and `docs/glossary.md`.
+A structure that repeats across domains is a mechanism. Write the concept or entity page for the domain-specific thing, and write or update a mechanism page that lists it as an instance.
+See `schema/page-types/mechanism.md` and `docs/glossary.md`.
 
 ## Location
 
 Write the page in `wiki/concepts/`. Follow the file-name rules in `schema.md`.
 Two domains can have a concept with the same name. Write two pages. Never rename an existing file.
 Add the suffix `--<last-domain-segment>` to the new page only. Keep the file name of the old page.
+If the `--<last-domain-segment>` file name already exists, use the full domain path instead. Replace each `/` in the domain with `--`. For example, `attention` in `ai/architecture` becomes `attention--ai--architecture.md`.
 
 ## Frontmatter
 
@@ -37,12 +39,13 @@ Add the suffix `--<last-domain-segment>` to the new page only. Keep the file nam
 - If another domain has a concept with the same name, add `--<last-domain-segment>` to the new page only.
 - Put one line at the top of each of the two pages, directly under the title. Each line links to the other page.
 - Write a claim from a note as the view of the user.
+- When the idea is one instance of a mechanism, still write this concept page. Then write or update the mechanism page that lists it.
 
 ### Do not
 
 - Put two domains in `domain`.
 - Mix the meanings of a same-name concept from two domains on one page.
-- Write one concept page for a structure that repeats across domains. Use a mechanism page, as `schema.md` says.
+- State a structure that repeats across domains on a concept page. The mechanism page states it.
 - Move a claim to another concept because the two concepts share a term.
 - Use a synonym for a glossary term.
 - Rename an existing file. Renaming an old page is a job for the `wiki-recut` skill.
@@ -90,6 +93,7 @@ updated: 2026-01-15
 - [ ] Does each claim stay on the concept that it describes?
 - [ ] Does each section that holds claims link at least one source page that supports it?
 - [ ] If a same-name page exists in another domain, does only the new page carry the `--<last-domain-segment>` suffix?
+- [ ] If the `--<last-domain-segment>` file name exists, did you use the full domain path?
 - [ ] Did you keep the file name of every existing page?
 - [ ] If a same-name page exists, does each of the two pages have a line at the top that links to the other?
 - [ ] Does the page use each glossary term with its one meaning?
