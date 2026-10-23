@@ -3,7 +3,7 @@
 ## Purpose
 
 A concept page explains one idea, technique, or phenomenon. The page belongs to exactly one domain.
-A structure that repeats across domains is a mechanism. Write the concept or entity page for the domain-specific thing, and write or update a mechanism page that lists it as an instance.
+A structure that repeats across domains is a mechanism. Write the concept or entity page for the domain-specific thing, and write or update a mechanism page that lists it as an instance. In a work wiki, send a `new-mechanism` review item instead.
 See `schema/page-types/mechanism.md` and `docs/glossary.md`.
 
 ## Location

@@ -8,11 +8,11 @@ A wiki is one folder. It holds `raw/`, `wiki/`, and the config files. One wiki i
 
 ## Reading wiki
 
-A reading wiki stores the daily reading and interests of the user. It holds the mechanism library. The mechanism library is the set of mechanism pages in `wiki/mechanisms/`. The term is used most in `schema.md`.
+A reading wiki stores the daily reading and interests of the user. It holds the mechanism library. The mechanism library is the set of mechanism pages in `wiki/mechanisms/`. The `role` field of `wiki.yaml` is the test: a reading wiki has `role: reading`. The term is used most in `schema.md`.
 
 ## Work wiki
 
-A work wiki stores work material. It has no mechanism library. It points to the mechanism library of a reading wiki. The term is used most in `heptabase.example.yaml`.
+A work wiki stores work material. It has no mechanism library. It points to the mechanism library of a reading wiki. The `role` field of `wiki.yaml` is the test: a work wiki has `role: work`. Its `mechanism_library` field holds the path to the reading wiki. The term is used most in `wiki.yaml`.
 
 ## Source
 

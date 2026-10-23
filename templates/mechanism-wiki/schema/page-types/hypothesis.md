@@ -18,7 +18,7 @@ Write the page only in the target wiki. Never copy work content into a reading w
 |---|---|---|
 | `type` | yes | Write `hypothesis`. |
 | `title` | yes | The hypothesis, in the output language. Quote it if it has a colon. |
-| `mechanism` | yes | The mechanism page. Write the bare slug if the mechanism page is in this wiki. Write `reading:<slug>` if it is in the reading wiki and this wiki is a work wiki. |
+| `mechanism` | yes | The mechanism page. Write the bare slug if the mechanism page is in this wiki. Write `reading:<slug>` if it is in the reading wiki and this wiki is a work wiki. The `role` field of `wiki.yaml` says which wiki this is: `role: work` is a work wiki. |
 | `from_domain` | yes | The domain that gives the mechanism. The user or the whiteboard picks it. Write one path from `domains.yaml`. In a stack, it is the base layer. |
 | `to_domain` | yes | The domain that receives the mechanism. Write one path from `domains.yaml`. In a stack, it is the upper layer. For indexes, lint, and Heptabase, it is the domain of the page. |
 | `relation` | yes | `analogy` or `stack`. In a stack, `from_domain` is the base layer and `to_domain` is the upper layer. |

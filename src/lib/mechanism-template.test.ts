@@ -25,6 +25,7 @@ describe("mechanism template files", () => {
       "schema.md",
       "purpose.md",
       "domains.yaml",
+      "wiki.yaml",
       "heptabase.example.yaml",
       "docs/glossary.md",
       "schema/writing-rules.md",

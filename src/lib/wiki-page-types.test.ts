@@ -28,6 +28,25 @@ describe("inferWikiTypeFromPath", () => {
   })
 })
 
+describe("mechanism wiki page types", () => {
+  it("recognizes the mechanism and hypothesis directories", () => {
+    expect(inferWikiTypeFromPath("wiki/mechanisms/event-driven-computing.md")).toBe("mechanism")
+    expect(inferWikiTypeFromPath("/project/wiki/mechanisms/x.md")).toBe("mechanism")
+    expect(inferWikiTypeFromPath("wiki/hypotheses/x.md")).toBe("hypothesis")
+    expect(inferWikiTypeFromPath("C:\\project\\wiki\\hypotheses\\x.md")).toBe("hypothesis")
+  })
+
+  it("lists both types for generation", () => {
+    expect(GENERATION_WIKI_TYPES).toContain("mechanism")
+    expect(GENERATION_WIKI_TYPES).toContain("hypothesis")
+  })
+
+  it("labels both types", () => {
+    expect(wikiTypeLabel("mechanism")).toBe("Mechanism")
+    expect(wikiTypeLabel("hypothesis")).toBe("Hypothesis")
+  })
+})
+
 describe("wikiTypeLabel", () => {
   it("uses readable singular labels for research-template types", () => {
     expect(wikiTypeLabel("finding")).toBe("Finding")

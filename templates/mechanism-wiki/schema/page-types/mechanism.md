@@ -5,11 +5,12 @@
 A mechanism page states a structure that repeats across domains. See `docs/glossary.md` for the terms Mechanism and Instance.
 Every mechanism page has the same six sections. The lens of a domain says what each field means in that domain. A field is one of those sections.
 The page holds no domain detail. The instance pages hold the detail.
-A mechanism page can start with one instance. Write the concept or entity page for the domain-specific thing, and write or update a mechanism page that lists it as an instance.
+A mechanism page can start with one instance. Write the concept or entity page for the domain-specific thing, and write or update a mechanism page that lists it as an instance. In a work wiki, send a `new-mechanism` review item instead.
 
 ## Location
 
 Write the page in `wiki/mechanisms/`. Only a reading wiki writes mechanism pages.
+The `role` field of `wiki.yaml` says which wiki this is: `role: reading` is a reading wiki, and `role: work` is a work wiki.
 A work wiki does not write them. It sends a `new-mechanism` review item instead.
 Before you write a page, search `wiki/indexes/_mechanisms.md` for the same mechanism. If a page exists, add one line to its Known instances section. Do not write a second page.
 
@@ -99,7 +100,7 @@ updated: 2026-01-15
 
 - 事件：狀態的一次變化。
 - 偵測器：監看狀態，發現變化。
-- 通道：負責傳遞。
+- 通道：連接各個部分的路徑。
 - 處理單元：執行計算。[[async-circuits-survey]]
 
 ## 流動

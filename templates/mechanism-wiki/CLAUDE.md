@@ -8,12 +8,13 @@ Read these files in this order before you write or change a page.
 
 1. `docs/glossary.md`: the meaning of each term.
 2. `purpose.md`: why this wiki exists, and the `Output language:` line.
-3. `schema.md`: the page types, file names, and routing rules.
-4. `domains.yaml`: the list of allowed domains.
-5. `schema/writing-rules.md`: the rules for the text of every wiki page you write.
-6. `schema/page-types/<type>.md`: `<type>` is the `type:` value of the page. Read the file for each page type you write.
-7. `lenses/<lens>.md`: `<lens>` is the `lens:` value of the page domain in `domains.yaml`. For a mechanism page, read each lens in its `lenses:` field. For a hypothesis page, read the lens of `to_domain` and the lens of `from_domain`, as `schema/page-types/hypothesis.md` says.
-8. `heptabase.yaml` (optional): read it only when the task uses Heptabase.
+3. `wiki.yaml`: the `id` of this wiki. Its `role` field says if this wiki is a reading wiki or a work wiki.
+4. `schema.md`: the page types, file names, and routing rules.
+5. `domains.yaml`: the list of allowed domains.
+6. `schema/writing-rules.md`: the rules for the text of every wiki page you write.
+7. `schema/page-types/<type>.md`: `<type>` is the `type:` value of the page. Read the file for each page type you write.
+8. `lenses/<lens>.md`: `<lens>` is the `lens:` value of the page domain in `domains.yaml`. For a mechanism page, read each lens in its `lenses:` field. For a hypothesis page, read the lens of `to_domain` and the lens of `from_domain`, as `schema/page-types/hypothesis.md` says.
+9. `heptabase.yaml` (optional): read it only when the task uses Heptabase.
 
 ## Rules
 

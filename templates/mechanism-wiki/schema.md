@@ -76,9 +76,10 @@ Full rules are in `schema/page-types/mechanism.md`.
 - A mechanism page has six sections: parts, flows, constraints and trade-offs, why it works, failure conditions, and known instances.
 - The lens of a domain says what each field means in that domain. A field is one of these sections.
 - List each instance as a link, with its domain and its local term. Put instance detail on the instance page.
+- The `role` field of `wiki.yaml` says if this wiki is a reading wiki (`reading`) or a work wiki (`work`).
 - A reading wiki writes mechanism pages. A work wiki does not.
 - A work wiki sends a `new-mechanism` review item instead.
-- A mechanism page can start with one instance. Write the concept or entity page for the domain-specific thing, and write or update a mechanism page that lists it as an instance.
+- A mechanism page can start with one instance. Write the concept or entity page for the domain-specific thing, and write or update a mechanism page that lists it as an instance. In a work wiki, send a `new-mechanism` review item instead.
 - Before you write a mechanism page, check the mechanism index `wiki/indexes/_mechanisms.md` for the same mechanism. If the mechanism page exists, add a line to the known instances of that page.
 
 ## Index and log

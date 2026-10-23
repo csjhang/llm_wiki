@@ -27,11 +27,9 @@ const EXAMPLE = readFileSync(
 
 /** A minimal valid file; each test overrides one part. */
 function build(
-  parts: { wikiId?: string; library?: string; roots?: string; whiteboards?: string; tags?: string; properties?: string } = {},
+  parts: { roots?: string; whiteboards?: string; tags?: string; properties?: string } = {},
 ): string {
   return `version: 1
-wiki_id: ${parts.wikiId ?? "reading"}
-mechanism_library: ${parts.library ?? "null"}
 roots:
 ${parts.roots ?? `  - ${id(1)}`}
 whiteboards:
@@ -50,8 +48,7 @@ describe("parseHeptabaseYaml", () => {
   it("parses the template example", () => {
     const config = valueOf(parseHeptabaseYaml(EXAMPLE))
     expect(config.version).toBe(1)
-    expect(config.wiki_id).toBe("reading")
-    expect(config.mechanism_library).toBeNull()
+    expect(Object.keys(config).sort()).toEqual(["properties", "roots", "tags", "version", "whiteboards"])
     expect(config.roots).toEqual([id(1)])
     expect(config.whiteboards).toEqual({
       [id(2)]: { kind: "topic", auto_ingest: false },
@@ -123,17 +120,12 @@ describe("parseHeptabaseYaml", () => {
     expect(valueOf(parseHeptabaseYaml(text)).whiteboards).toEqual({})
   })
 
-  it("rejects bad wiki_id", () => {
-    // A bare 123 is a number in YAML, not a string, so it fails too.
-    for (const wikiId of ['"Reading Wiki"', "Reading", '"a_b"', '""', "123"]) {
-      expect(pathsOf(parseHeptabaseYaml(build({ wikiId }))), wikiId).toEqual(["wiki_id"])
-    }
-  })
-
-  it("accepts slug wiki ids", () => {
-    for (const wikiId of ["reading", "work", "my-research-2"]) {
-      expect(valueOf(parseHeptabaseYaml(build({ wikiId }))).wiki_id).toBe(wikiId)
-    }
+  it("rejects wiki_id and mechanism_library: wiki identity lives in wiki.yaml", () => {
+    const text = build().replace("version: 1\n", "version: 1\nwiki_id: reading\nmechanism_library: null\n")
+    const result = parseHeptabaseYaml(text)
+    expect(pathsOf(result)).toEqual(["wiki_id", "mechanism_library"])
+    if (result.ok) throw new Error("expected issues")
+    expect(result.issues[0].message).toContain("unknown key")
   })
 
   it("requires at least one root", () => {
@@ -180,50 +172,27 @@ describe("parseHeptabaseYaml", () => {
     expect(pathsOf(parseHeptabaseYaml(build({ tags })))).toEqual(["tags.extra"])
   })
 
-  it("accepts null mechanism_library and a string path", () => {
-    expect(valueOf(parseHeptabaseYaml(build({ library: "null" }))).mechanism_library).toBeNull()
-    expect(valueOf(parseHeptabaseYaml(build({ library: "../reading-wiki" }))).mechanism_library).toBe(
-      "../reading-wiki",
-    )
-  })
-
-  it("defaults a missing mechanism_library to null", () => {
-    const text = build().replace("mechanism_library: null\n", "")
-    expect(valueOf(parseHeptabaseYaml(text)).mechanism_library).toBeNull()
-  })
-
-  it("rejects an empty or non-string mechanism_library", () => {
-    for (const library of ['""', "42", "[a]"]) {
-      expect(pathsOf(parseHeptabaseYaml(build({ library }))), library).toEqual(["mechanism_library"])
-    }
-  })
-
   it("rejects wrong version and unknown top-level keys", () => {
     const text = build().replace("version: 1", "version: 2") + "extra: 1\n"
     expect(pathsOf(parseHeptabaseYaml(text))).toEqual(["version", "extra"])
   })
 
   it("reports every missing section", () => {
-    expect(pathsOf(parseHeptabaseYaml("version: 1\n"))).toEqual([
-      "wiki_id",
-      "roots",
-      "tags",
-      "properties",
-    ])
+    expect(pathsOf(parseHeptabaseYaml("version: 1\n"))).toEqual(["roots", "tags", "properties"])
   })
 
   it("reports duplicate keys", () => {
-    const text = build() + `wiki_id: work\n`
+    const text = build() + `version: 1\n`
     const result = parseHeptabaseYaml(text)
     if (result.ok) throw new Error("expected issues")
     expect(result.issues).toHaveLength(1)
     expect(result.issues[0].path).toBe("")
-    expect(result.issues[0].message).toContain("wiki_id")
+    expect(result.issues[0].message).toContain("version")
     expect(result.issues[0].message).toMatch(/duplicate/i)
   })
 
   it("reports YAML syntax errors and non-mapping files", () => {
-    for (const text of ["wiki_id: [unclosed\n", "", "- a\n"]) {
+    for (const text of ["roots: [unclosed\n", "", "- a\n"]) {
       expect(pathsOf(parseHeptabaseYaml(text)), JSON.stringify(text)).toEqual([""])
     }
   })

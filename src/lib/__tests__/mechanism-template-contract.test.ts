@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest"
 import { findLongSentences } from "@/test-helpers/ste-check"
 import { KNOWN_LENSES, parseDomainsYaml } from "@/lib/wiki-config/domains"
 import { parseHeptabaseYaml } from "@/lib/wiki-config/heptabase-config"
+import { parseWikiYaml } from "@/lib/wiki-config/wiki-identity"
 import {
   HYPOTHESIS_SECTIONS,
   MECHANISM_SECTIONS,
@@ -233,6 +234,7 @@ describe("mechanism template: entry files", () => {
     expect(items.map((item) => item.path)).toEqual([
       "docs/glossary.md",
       "purpose.md",
+      "wiki.yaml",
       "schema.md",
       "domains.yaml",
       "schema/writing-rules.md",
@@ -357,6 +359,22 @@ describe("mechanism template: config files", () => {
     expect(result.ok).toBe(true)
   })
 
+  it("wiki.yaml is valid", () => {
+    const result = parseWikiYaml(readTemplate("wiki.yaml"))
+    expect(result.issues).toEqual([])
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // The template is a reading wiki. A work wiki sets role: work and a library path.
+    expect(result.value).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null })
+  })
+
+  it("heptabase example holds Heptabase settings only: wiki identity lives in wiki.yaml", () => {
+    const text = readTemplate("heptabase.example.yaml")
+    expect(text).not.toMatch(/^wiki_id:/m)
+    expect(text).not.toMatch(/^mechanism_library:/m)
+    expect(text).toContain("`id` in `wiki.yaml`")
+  })
+
   it("heptabase example is valid", () => {
     const result = parseHeptabaseYaml(readTemplate("heptabase.example.yaml"))
     expect(result.issues).toEqual([])
@@ -462,6 +480,10 @@ function expectPartsAndFlowsFollowRules(label: string, page: ExamplePage): void 
     for (const other of names.filter((candidate) => candidate !== name)) {
       expect(role, `${label}: role of ${name} must not name ${other}`).not.toContain(other)
     }
+  }
+  // A Parts line gives a role. It does not describe what the parts exchange.
+  for (const line of parts.split(/\r?\n/).filter((l) => l.startsWith("- "))) {
+    for (const word of EXCHANGE_WORDS) expect(line, `${label}: Parts line must not use "${word}"`).not.toContain(word)
   }
   const flowLines = flows.split(/\r?\n/).filter((line) => line.startsWith("- "))
   expect(flowLines.length, `${label} flows`).toBeGreaterThan(0)
@@ -903,10 +925,6 @@ describe("mechanism template: lens files", () => {
       within(`${id} why sentences`, why.split("。").filter((sentence) => sentence.trim() !== "").length, 1, 5)
       expectPartsAndFlowsFollowRules(id, page)
       expectInstanceLinesFollowForm(id, page)
-      // A Parts line gives a role. It does not describe what the parts exchange.
-      for (const line of (findSection(page.body, MECHANISM_SECTIONS[0]) ?? "").split(/\r?\n/).filter((l) => l.startsWith("- "))) {
-        for (const word of EXCHANGE_WORDS) expect(line, `${id}: Parts line must not use "${word}"`).not.toContain(word)
-      }
       // Every trade-off line states a gain and its cost.
       for (const line of (findSection(page.body, MECHANISM_SECTIONS[2]) ?? "").split(/\r?\n/).filter((l) => l.startsWith("- "))) {
         expect(line, `${id}: trade-off line states a cost`).toContain("代價是")
@@ -1108,7 +1126,7 @@ describe("mechanism template: final review fixes", () => {
     const page = parseExample("mechanism")
     const parts = findSection(page.body, MECHANISM_SECTIONS[0]) ?? ""
     expect(parts).not.toContain("訊息")
-    expect(parts).toContain("通道：負責傳遞")
+    expect(parts).toContain("通道：連接各個部分的路徑")
     expect(page.body).not.toContain("訊息")
   })
 
@@ -1128,6 +1146,68 @@ describe("mechanism template: final review fixes", () => {
     const mentioned = KNOWN_LENSES.filter((id) => new RegExp(`\\b${id}\\b`).test(comments))
     expect(mentioned.length, "lens ids named in comments").toBeLessThanOrEqual(1)
     expect(text).not.toMatch(/must be one of/)
+  })
+})
+
+/** The sentence that follows every "write or update a mechanism page" instruction. */
+const WORK_WIKI_SENTENCE = "In a work wiki, send a `new-mechanism` review item instead."
+
+/** Sub-project 2, Task 1: the `role` field of `wiki.yaml` is the test for a reading wiki or a work wiki. */
+describe("mechanism template: wiki identity", () => {
+  it("CLAUDE.md read order lists wiki.yaml after purpose.md and says what it holds", () => {
+    const body = sectionBody(readTemplate("CLAUDE.md"), "Read order")
+    const line = body.split(/\r?\n/).find((l) => l.includes("`wiki.yaml`")) ?? ""
+    expect(line).toContain("`role`")
+    expect(line).toContain("reading wiki")
+    expect(line).toContain("work wiki")
+  })
+
+  it("the glossary entries for a reading wiki and a work wiki name the role field of wiki.yaml", () => {
+    const glossary = readTemplate("docs/glossary.md")
+    const reading = sectionBody(glossary, "Reading wiki")
+    const work = sectionBody(glossary, "Work wiki")
+    expect(reading).toContain("`role` field of `wiki.yaml`")
+    expect(reading).toContain("`role: reading`")
+    expect(work).toContain("`role` field of `wiki.yaml`")
+    expect(work).toContain("`role: work`")
+    expect(work).toContain("`mechanism_library`")
+    expect(work).toContain("The term is used most in `wiki.yaml`.")
+  })
+
+  it("schema.md, mechanism.md, and hypothesis.md name the role field of wiki.yaml as the test", () => {
+    const hypothesisRow =
+      sectionBody(readTemplate("schema/page-types/hypothesis.md"), "Frontmatter")
+        .split(/\r?\n/)
+        .find((line) => line.startsWith("| `mechanism`")) ?? ""
+    const cases: Array<[label: string, text: string]> = [
+      ["schema.md Mechanisms", sectionBody(readTemplate("schema.md"), "Mechanisms")],
+      ["mechanism.md Location", sectionBody(readTemplate("schema/page-types/mechanism.md"), "Location")],
+      ["hypothesis.md mechanism field", hypothesisRow],
+    ]
+    for (const [label, text] of cases) {
+      expect(text, label).toContain("`role` field of `wiki.yaml`")
+    }
+    expect(cases[2][1]).toContain("`role: work`")
+  })
+
+  it("a work wiki sends a new-mechanism review item wherever a file says to write or update a mechanism page", () => {
+    const cases: Array<[label: string, text: string]> = [
+      ["schema.md Mechanisms", sectionBody(readTemplate("schema.md"), "Mechanisms")],
+      ["mechanism.md Purpose", sectionBody(readTemplate("schema/page-types/mechanism.md"), "Purpose")],
+      ["concept.md Purpose", sectionBody(readTemplate("schema/page-types/concept.md"), "Purpose")],
+    ]
+    for (const [label, text] of cases) {
+      expect(text.toLowerCase(), label).toContain(WRITE_BOTH_PHRASE)
+      expect(text, label).toContain(WORK_WIKI_SENTENCE)
+    }
+  })
+
+  it("every file that says write or update a mechanism page also gives the work wiki exception", () => {
+    for (const file of templateMarkdownFiles()) {
+      const text = readTemplate(file)
+      if (!text.toLowerCase().includes("write or update a mechanism page")) continue
+      expect(text, file).toContain(WORK_WIKI_SENTENCE)
+    }
   })
 })
 

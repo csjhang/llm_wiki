@@ -30,25 +30,14 @@ export type PropertyKey =
 
 export interface HeptabaseConfig {
   version: 1
-  wiki_id: string
-  mechanism_library: string | null
   roots: string[]
   whiteboards: Record<string, WhiteboardSetting>
   tags: { ingest: string; mirror: string }
   properties: Partial<Record<PropertyKey, string>>
 }
 
-const WIKI_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
-
-const TOP_LEVEL_KEYS = [
-  "version",
-  "wiki_id",
-  "mechanism_library",
-  "roots",
-  "whiteboards",
-  "tags",
-  "properties",
-] as const
+// Wiki identity (id, role, mechanism library) lives in `wiki.yaml`. See wiki-identity.ts.
+const TOP_LEVEL_KEYS = ["version", "roots", "whiteboards", "tags", "properties"] as const
 const WHITEBOARD_KEYS = ["kind", "auto_ingest"] as const
 const TAG_KEYS = ["ingest", "mirror"] as const
 const PROPERTY_KEYS: readonly PropertyKey[] = [...REQUIRED_PROPERTY_KEYS, ...OPTIONAL_PROPERTY_KEYS]
@@ -65,8 +54,6 @@ export function parseHeptabaseYaml(text: string): ParseResult<HeptabaseConfig> {
   const issues: ConfigIssue[] = []
   checkVersion(root, issues)
   reportUnknownKeys(root, TOP_LEVEL_KEYS, "", issues)
-  const wikiId = parseWikiId(root.wiki_id, issues)
-  const mechanismLibrary = parseMechanismLibrary(root.mechanism_library, issues)
   const roots = parseRoots(root.roots, issues)
   const whiteboards = parseWhiteboards(root.whiteboards, issues)
   const tags = parseTags(root.tags, issues)
@@ -77,8 +64,6 @@ export function parseHeptabaseYaml(text: string): ParseResult<HeptabaseConfig> {
     ok: true,
     value: {
       version: 1,
-      wiki_id: wikiId,
-      mechanism_library: mechanismLibrary,
       roots,
       whiteboards,
       tags,
@@ -86,22 +71,6 @@ export function parseHeptabaseYaml(text: string): ParseResult<HeptabaseConfig> {
     },
     issues: [],
   }
-}
-
-function parseWikiId(raw: unknown, issues: ConfigIssue[]): string {
-  if (typeof raw === "string" && WIKI_ID_PATTERN.test(raw)) return raw
-  issues.push({
-    path: "wiki_id",
-    message: 'must be lowercase letters and digits, with "-" between words (for example "reading")',
-  })
-  return ""
-}
-
-function parseMechanismLibrary(raw: unknown, issues: ConfigIssue[]): string | null {
-  if (raw === undefined || raw === null) return null
-  if (typeof raw === "string" && raw.trim() !== "") return raw
-  issues.push({ path: "mechanism_library", message: "must be null or a non-empty path string" })
-  return null
 }
 
 function parseRoots(raw: unknown, issues: ConfigIssue[]): string[] {

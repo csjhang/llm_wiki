@@ -2,9 +2,8 @@
 # Run `wiki-tool hepta init` to create the real `heptabase.yaml` for your wiki.
 # Every ID below is a placeholder. Real IDs come from your own Heptabase space.
 # All IDs are lowercase UUIDs.
+# This file holds Heptabase settings only. The id and the role of the wiki are in `wiki.yaml`.
 version: 1
-wiki_id: reading              # A slug for this wiki, for example reading or work.
-mechanism_library: null       # In a work wiki: the path to the reading wiki. Otherwise null.
 
 roots:                        # Cards under these whiteboards belong to this wiki.
   - 00000000-0000-4000-8000-000000000001
@@ -22,7 +21,7 @@ tags:
 properties:                   # The IDs of the properties of the #wiki tag.
   domain: 00000000-0000-4000-8000-000000000008              # Required.
   page_type: 00000000-0000-4000-8000-000000000009           # Required.
-  wiki: 00000000-0000-4000-8000-000000000010                # Required.
+  wiki: 00000000-0000-4000-8000-000000000010                # Required. The value on a card is the `id` in `wiki.yaml`.
   status: 00000000-0000-4000-8000-000000000011              # Required.
   wiki_page: 00000000-0000-4000-8000-000000000012           # Optional.
   last_synced: 00000000-0000-4000-8000-000000000013         # Optional.

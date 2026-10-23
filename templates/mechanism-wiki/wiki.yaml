@@ -1,0 +1,6 @@
+# The identity of this wiki. Every wiki has this file.
+# The `role` field says if this wiki is a reading wiki or a work wiki.
+version: 1
+id: reading                   # A slug for this wiki, for example reading or work. The Heptabase `wiki` property uses it.
+role: reading                 # `reading` holds the mechanism library. `work` does not.
+mechanism_library: null       # In a work wiki: the path to the reading wiki. In a reading wiki: null.

@@ -295,6 +295,7 @@ Heptabase 卡片 ──────┴→ raw/sources/（卡片是快照，卡�
   AGENTS.md                 同上，給 Codex
   purpose.md                這個 wiki 為什麼存在（app 既有）
   schema.md                 規則檔入口（app 既有，改寫成 STE 英文）
+  wiki.yaml                 wiki 身分：id、角色（閱讀或工作）、機制庫路徑
   domains.yaml              領域清單
   heptabase.yaml            Heptabase 設定
   heptabase-map.json        卡片對照表（工具產生）
@@ -317,6 +318,17 @@ Heptabase 卡片 ──────┴→ raw/sources/（卡片是快照，卡�
 ```
 
 `schema.md`、`purpose.md` 放在專案根目錄。app 的 `ingest.ts` 目前從 `${project}/schema.md` 與 `${project}/purpose.md` 讀取。
+
+`wiki.yaml` 記錄 wiki 的身分，格式如下。`role` 是判斷閱讀 wiki 或工作 wiki 的依據。
+
+```yaml
+version: 1
+id: reading                   # wiki 的代號（slug）。Heptabase 的「wiki」欄位值取自這裡
+role: reading                 # reading 或 work
+mechanism_library: null       # role 是 work 時，填閱讀 wiki 的路徑；role 是 reading 時，必須是 null
+```
+
+身分放在 `wiki.yaml`，不放在 `heptabase.yaml`，理由有兩個。沒有 Heptabase 的 wiki 也要能說明自己是工作 wiki。`id` 也不必在兩個檔案各寫一次。
 
 ### 5.2 頁面不照領域分資料夾
 
@@ -586,8 +598,6 @@ app 既有的去重只比對同一個檔名的內容。它抓不到「同一篇�
 
 ```yaml
 version: 1
-wiki_id: reading              # reading、work、或其他
-mechanism_library: null       # 工作 wiki 填閱讀 wiki 的路徑
 roots:                        # 這些白板底下的卡片屬於這個 wiki
   - <whiteboard-id>
 whiteboards:                  # 白板類型。沒列的白板視為 topic
@@ -608,6 +618,8 @@ properties:                   # #wiki 的欄位 ID
 ```
 
 白板類型：`topic`（主題）、`source`（來源）、`project`（專案）、`archive`（封存，不參與同步）。
+
+`heptabase.yaml` 只放 Heptabase 設定。wiki 的 `id`、角色與機制庫路徑放在 `wiki.yaml`（見 5.1）。卡片「wiki」欄位的值取自 `wiki.yaml` 的 `id`。舊版的 `wiki_id` 與 `mechanism_library` 已移出；留在 `heptabase.yaml` 會被當成未知欄位而報錯。
 
 `wiki-tool hepta init` 讀取使用者的 tag 與欄位，產生這份檔案的初稿。
 
