@@ -23,6 +23,8 @@ const REQUIRED_GITIGNORE_LINES: [&str; 3] = [
     "agent-workspace/",
 ];
 const LLM_WIKI_IGNORE_LINE: &str = ".llm-wiki/";
+/// Top-level folders `git_restore_dir` refuses: sources and secrets/caches.
+const PROTECTED_TOP_LEVEL_DIRS: [&str; 2] = ["raw", ".llm-wiki"];
 const INIT_COMMIT_MESSAGE: &str = "chore: start version history";
 const FALLBACK_NAME: &str = "LLM Wiki";
 const FALLBACK_EMAIL: &str = "llm-wiki@localhost";
@@ -199,14 +201,28 @@ fn ensure_gitignore_lines(project_path: &str, lines: &[&str]) -> Result<(), Stri
     fs::write(&path, updated).map_err(|error| format!("Failed to write .gitignore: {error}"))
 }
 
-fn git_init_inner(project_path: &str) -> Result<(), String> {
+fn git_init_with_env(project_path: &str, envs: &[(&str, &str)]) -> Result<(), String> {
     if git_info_inner(project_path).is_repo {
         return Err("This folder is already inside a git repository".to_string());
     }
-    run_git_ok(project_path, &["init"], &[])?;
-    ensure_gitignore_lines(project_path, &REQUIRED_GITIGNORE_LINES)?;
-    git_commit_all_inner(project_path, INIT_COMMIT_MESSAGE)?;
+    let git_dir = Path::new(project_path).join(".git");
+    let git_dir_existed = git_dir.exists();
+    run_git_ok(project_path, &["init"], envs)?;
+    let baseline = ensure_gitignore_lines(project_path, &REQUIRED_GITIGNORE_LINES)
+        .and_then(|()| git_commit_all_with_env(project_path, INIT_COMMIT_MESSAGE, envs));
+    if let Err(error) = baseline {
+        // Do not leave a half-initialised repo that a retry would refuse as
+        // "already a repository". Only remove what this call created.
+        if !git_dir_existed {
+            let _ = fs::remove_dir_all(&git_dir);
+        }
+        return Err(error);
+    }
     Ok(())
+}
+
+fn git_init_inner(project_path: &str) -> Result<(), String> {
+    git_init_with_env(project_path, &[])
 }
 
 /// `.llm-wiki/` must never be committed: make sure git ignores it, appending
@@ -221,12 +237,60 @@ fn ensure_llm_wiki_ignored(project_path: &str, envs: &[(&str, &str)]) -> Result<
     }
 }
 
+/// Ignoring `.llm-wiki/` does not untrack files an older commit already
+/// recorded, and a path-limited `commit -- .` takes such a file's current
+/// content from disk, so it would keep committing the secret. Drop the files
+/// from the index (they stay on disk). Returns true when `.llm-wiki` is in the
+/// index or in HEAD, i.e. when this commit has to carry its removal.
+fn untrack_llm_wiki(project_path: &str, envs: &[(&str, &str)]) -> Result<bool, String> {
+    let in_index = !run_git_ok(project_path, &["ls-files", "--", ".llm-wiki"], envs)?
+        .stdout
+        .trim()
+        .is_empty();
+    let has_head =
+        run_git_with_env(project_path, &["rev-parse", "--verify", "-q", "HEAD"], envs)?.success;
+    let in_head = has_head
+        && !run_git_ok(
+            project_path,
+            &["ls-tree", "-r", "--name-only", "HEAD", "--", ".llm-wiki"],
+            envs,
+        )?
+        .stdout
+        .trim()
+        .is_empty();
+    if !in_index && !in_head {
+        return Ok(false);
+    }
+    // The removal is committed without a pathspec (see `git_commit_all_with_env`),
+    // which takes the whole index: refuse rather than sweep in staged changes
+    // that belong to the repository outside this project folder.
+    let outside_args = ["diff", "--cached", "--quiet", "--", ":(top)", ":(exclude)."];
+    let outside = run_git_with_env(project_path, &outside_args, envs)?;
+    match outside.code {
+        Some(0) => {}
+        Some(1) => return Err(
+            "Cannot stop tracking .llm-wiki/ while changes outside this project folder are staged"
+                .to_string(),
+        ),
+        _ => return Err(outside.failure_message(&outside_args)),
+    }
+    if in_index {
+        run_git_ok(
+            project_path,
+            &["rm", "-r", "--cached", "-q", "--", ".llm-wiki"],
+            envs,
+        )?;
+    }
+    Ok(true)
+}
+
 fn git_commit_all_with_env(
     project_path: &str,
     message: &str,
     envs: &[(&str, &str)],
 ) -> Result<Option<String>, String> {
     ensure_llm_wiki_ignored(project_path, envs)?;
+    let carries_llm_wiki_removal = untrack_llm_wiki(project_path, envs)?;
     run_git_ok(project_path, &["add", "-A", "--", "."], envs)?;
 
     let diff_args = ["diff", "--cached", "--quiet", "--", "."];
@@ -238,7 +302,9 @@ fn git_commit_all_with_env(
     }
 
     // Use the fallback identity only for the parts the user has not configured.
-    let mut args: Vec<String> = Vec::new();
+    // Signing and hooks are the user's own commit habits; an automated history
+    // commit must not depend on a gpg agent or on a hook that may refuse it.
+    let mut args: Vec<String> = vec!["-c".to_string(), "commit.gpgsign=false".to_string()];
     if !has_config(project_path, "user.name", envs)? {
         args.push("-c".to_string());
         args.push(format!("user.name={FALLBACK_NAME}"));
@@ -247,7 +313,11 @@ fn git_commit_all_with_env(
         args.push("-c".to_string());
         args.push(format!("user.email={FALLBACK_EMAIL}"));
     }
-    args.extend(["commit", "-m", message, "--", "."].map(String::from));
+    args.extend(["commit", "--no-verify", "-m", message].map(String::from));
+    if !carries_llm_wiki_removal {
+        // Path-limited: keeps staged changes outside a nested project folder out.
+        args.extend(["--", "."].map(String::from));
+    }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run_git_ok(project_path, &arg_refs, envs)?;
 
@@ -265,8 +335,10 @@ fn git_commit_all_inner(project_path: &str, message: &str) -> Result<Option<Stri
     git_commit_all_with_env(project_path, message, &[])
 }
 
-/// Accept only a relative, non-empty path with no `..` segment. Both `/` and
-/// `\` count as separators so the check holds on every platform.
+/// Accept only a relative path that names a folder inside the project and is
+/// not the whole project, `raw/` or `.llm-wiki/` (a failed ingest never
+/// touches those). Both `/` and `\\` count as separators so the check holds on
+/// every platform, and `.` / empty segments are ignored.
 fn validate_relative_dir(relative_dir: &str) -> Result<(), String> {
     let invalid = || format!("Invalid directory: {relative_dir:?}");
     if relative_dir.trim().is_empty() {
@@ -280,11 +352,24 @@ fn validate_relative_dir(relative_dir: &str) -> Result<(), String> {
     if looks_absolute || relative_dir.starts_with(':') {
         return Err(invalid());
     }
-    if relative_dir
+    let segments: Vec<&str> = relative_dir
         .split(['/', '\\'])
-        .any(|segment| segment == "..")
-    {
+        .filter(|segment| !segment.is_empty() && *segment != ".")
+        .collect();
+    if segments.contains(&"..") {
         return Err(invalid());
+    }
+    // `.` / `./` would restore and clean the whole project.
+    let Some(first) = segments.first() else {
+        return Err(invalid());
+    };
+    if PROTECTED_TOP_LEVEL_DIRS
+        .iter()
+        .any(|protected| first.eq_ignore_ascii_case(protected))
+    {
+        return Err(format!(
+            "Refusing to restore {relative_dir:?}: {first} is never touched"
+        ));
     }
     Ok(())
 }
@@ -789,6 +874,284 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("wiki/outer.md")).unwrap(),
             "outer changed"
+        );
+    }
+
+    #[cfg(unix)]
+    fn write_failing_pre_commit_hook(repo: &Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let hook = repo.join(".git/hooks/pre-commit");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(&hook, "#!/bin/sh\necho hook refused >&2\nexit 1\n").unwrap();
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_all_ignores_gpgsign_and_failing_pre_commit_hook() {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        git(&dir, &["config", "commit.gpgsign", "true"]);
+        // `false` as the signer always fails (pin the format so a global ssh
+        // signing setup cannot take over).
+        git(&dir, &["config", "gpg.format", "openpgp"]);
+        git(&dir, &["config", "gpg.program", "false"]);
+        write_failing_pre_commit_hook(&dir);
+        write(&dir, "wiki/a.md", "# A");
+
+        let sha = git_commit_all_inner(&path_str(&dir), "ingest: A (1 pages)").unwrap();
+
+        assert!(sha.is_some());
+        assert!(git(&dir, &["ls-files"]).contains("wiki/a.md"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn init_baseline_commit_ignores_gpgsign_and_failing_hook() {
+        // A global template with a failing hook and signing on, as a user could have.
+        let template = temp_dir();
+        let hooks = template.join("hooks");
+        fs::create_dir_all(&hooks).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let hook = hooks.join("pre-commit");
+            fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let home = temp_dir();
+        write(
+            &home,
+            ".gitconfig",
+            &format!(
+                "[init]\n\ttemplateDir = {}\n[commit]\n\tgpgsign = true\n[gpg]\n\tprogram = false\n",
+                template.display()
+            ),
+        );
+        let dir = temp_dir();
+        write(&dir, "wiki/a.md", "# A");
+        let home_str = path_str(&home);
+
+        git_init_with_env(
+            &path_str(&dir),
+            &[
+                ("HOME", home_str.as_str()),
+                ("USERPROFILE", home_str.as_str()),
+                ("XDG_CONFIG_HOME", home_str.as_str()),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(git(&dir, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    }
+
+    #[test]
+    fn commit_all_untracks_an_already_tracked_llm_wiki_folder() {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        write(&dir, ".llm-wiki/secret", "v1");
+        write(&dir, "wiki/a.md", "# A");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-m", "old commit that tracked .llm-wiki"]);
+        assert!(git(&dir, &["ls-files", ".llm-wiki"]).contains("secret"));
+        write(&dir, ".llm-wiki/secret", "v2 changed since");
+        write(&dir, "wiki/a.md", "# A changed");
+
+        let sha = git_commit_all_inner(&path_str(&dir), "ingest: A (1 pages)").unwrap();
+
+        assert!(sha.is_some());
+        assert_eq!(git(&dir, &["ls-files", ".llm-wiki"]).trim(), "");
+        assert_eq!(
+            fs::read_to_string(dir.join(".llm-wiki/secret")).unwrap(),
+            "v2 changed since"
+        );
+        assert_eq!(
+            git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"])
+                .lines()
+                .filter(|l| l.starts_with(".llm-wiki/"))
+                .count(),
+            0
+        );
+        assert!(git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).contains("wiki/a.md"));
+        assert_eq!(git(&dir, &["status", "--porcelain"]).trim(), "");
+    }
+
+    #[test]
+    fn commit_all_untracks_llm_wiki_even_when_it_is_the_only_change() {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        write(&dir, ".llm-wiki/secret", "v1");
+        write(&dir, "wiki/a.md", "# A");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-m", "old commit that tracked .llm-wiki"]);
+
+        let sha = git_commit_all_inner(&path_str(&dir), "chore: untrack").unwrap();
+
+        assert!(sha.is_some());
+        assert_eq!(git(&dir, &["ls-files", ".llm-wiki"]).trim(), "");
+        assert!(dir.join(".llm-wiki/secret").exists());
+        assert!(!git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).contains(".llm-wiki/"));
+    }
+
+    #[test]
+    fn restore_dir_rejects_unsafe_paths_in_a_nested_project() {
+        let root = temp_dir();
+        init_repo_with_identity(&root);
+        let project = root.join("p");
+        write(&project, ".gitignore", ".llm-wiki/\n");
+        write(&project, "wiki/a.md", "committed");
+        write(&root, "outer/o.md", "outer committed");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-m", "seed"]);
+        write(&root, "outer/o.md", "outer edited, uncommitted");
+        write(&root, "outer/new.md", "outer untracked");
+
+        let outer_abs = path_str(&root.join("outer"));
+        for bad in ["../outer", outer_abs.as_str(), "wiki/../../outer"] {
+            assert!(
+                git_restore_dir_inner(&path_str(&project), bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+
+        assert_eq!(
+            fs::read_to_string(root.join("outer/o.md")).unwrap(),
+            "outer edited, uncommitted"
+        );
+        assert!(root.join("outer/new.md").exists());
+    }
+
+    #[test]
+    fn restore_dir_refuses_the_whole_project_raw_and_llm_wiki() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "raw/sources/s.md", "source committed");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-m", "add raw"]);
+        write(&dir, "raw/sources/s.md", "source edited");
+        write(&dir, "raw/sources/untracked.md", "untracked source");
+        write(&dir, ".llm-wiki/cache.json", "{}");
+        write(&dir, "wiki/a.md", "edited wiki");
+        let p = path_str(&dir);
+
+        for bad in [
+            ".",
+            "./",
+            "./.",
+            "raw",
+            "raw/",
+            "raw/sources",
+            "./raw",
+            "RAW",
+            ".llm-wiki",
+            ".llm-wiki/cache.json",
+            "./.llm-wiki",
+            "raw\\sources",
+        ] {
+            assert!(
+                git_restore_dir_inner(&p, bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+
+        assert_eq!(
+            fs::read_to_string(dir.join("raw/sources/s.md")).unwrap(),
+            "source edited"
+        );
+        assert!(dir.join("raw/sources/untracked.md").exists());
+        assert!(dir.join(".llm-wiki/cache.json").exists());
+        assert_eq!(
+            fs::read_to_string(dir.join("wiki/a.md")).unwrap(),
+            "edited wiki"
+        );
+        // Folders that merely contain the words are still fine.
+        git_restore_dir_inner(&p, "wiki").unwrap();
+        git_restore_dir_inner(&p, "wiki/raw").unwrap();
+    }
+
+    /// An index path git cannot write to: every `add` / `commit` fails.
+    fn broken_index_env() -> String {
+        path_str(&temp_dir().join("missing-dir").join("index"))
+    }
+
+    #[test]
+    fn init_removes_the_git_folder_it_created_when_the_baseline_commit_fails() {
+        let dir = temp_dir();
+        write(&dir, "wiki/a.md", "# A");
+        let index = broken_index_env();
+
+        let result = git_init_with_env(&path_str(&dir), &[("GIT_INDEX_FILE", index.as_str())]);
+
+        assert!(result.is_err());
+        assert!(
+            !dir.join(".git").exists(),
+            ".git should have been rolled back"
+        );
+        assert!(!git_info_inner(&path_str(&dir)).is_repo);
+        assert!(dir.join("wiki/a.md").exists());
+        // A retry now works from scratch.
+        git_init_inner(&path_str(&dir)).unwrap();
+        assert_eq!(git(&dir, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    }
+
+    #[test]
+    fn init_keeps_a_git_folder_that_existed_before_when_the_commit_fails() {
+        let dir = temp_dir();
+        // An empty `.git` folder is not a repository, so `git_init` proceeds.
+        fs::create_dir_all(dir.join(".git")).unwrap();
+        write(&dir, "wiki/a.md", "# A");
+        let index = broken_index_env();
+
+        let result = git_init_with_env(&path_str(&dir), &[("GIT_INDEX_FILE", index.as_str())]);
+
+        assert!(result.is_err());
+        assert!(
+            dir.join(".git").exists(),
+            "a pre-existing .git must not be removed"
+        );
+    }
+
+    #[test]
+    fn commit_all_commits_a_staged_llm_wiki_removal_instead_of_re_adding_it() {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        write(&dir, ".gitignore", ".llm-wiki/\n");
+        write(&dir, ".llm-wiki/secret", "v1");
+        write(&dir, "wiki/a.md", "# A");
+        git(&dir, &["add", "-f", "-A"]);
+        git(&dir, &["commit", "-m", "old commit that tracked .llm-wiki"]);
+        // The user already ran `git rm --cached` but has not committed yet.
+        git(&dir, &["rm", "-r", "--cached", "-q", ".llm-wiki"]);
+        write(&dir, ".llm-wiki/secret", "v2 changed since");
+
+        git_commit_all_inner(&path_str(&dir), "ingest: A (1 pages)").unwrap();
+
+        assert!(!git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).contains(".llm-wiki/"));
+        assert!(dir.join(".llm-wiki/secret").exists());
+    }
+
+    #[test]
+    fn commit_all_refuses_to_untrack_llm_wiki_over_staged_changes_outside_the_project() {
+        let root = temp_dir();
+        init_repo_with_identity(&root);
+        let project = root.join("p");
+        write(&project, ".llm-wiki/secret", "v1");
+        write(&project, "wiki/a.md", "# A");
+        write(&root, "outer/o.md", "outer");
+        git(&root, &["add", "-A"]);
+        git(&root, &["commit", "-m", "seed"]);
+        write(&project, ".llm-wiki/secret", "v2 changed since");
+        write(&root, "outer/o.md", "outer staged by the user");
+        git(&root, &["add", "outer/o.md"]);
+        let head_before = git(&root, &["rev-parse", "HEAD"]);
+
+        let result = git_commit_all_inner(&path_str(&project), "ingest: A (1 pages)");
+
+        assert!(result.is_err());
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]), head_before);
+        assert!(git(&root, &["show", "HEAD:p/.llm-wiki/secret"]).contains("v1"));
+        assert_eq!(
+            fs::read_to_string(project.join(".llm-wiki/secret")).unwrap(),
+            "v2 changed since"
         );
     }
 }
