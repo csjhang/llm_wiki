@@ -2,6 +2,7 @@
 
 These rules apply to the text of wiki pages in any output language.
 The rules are in English. Each rule has one short example in Traditional Chinese.
+In each example, 壞 marks a bad example and 好 marks a good example.
 
 ## 1. One term has one meaning
 
@@ -47,13 +48,15 @@ A note is the view of the user. Write who holds the view. Do not write it as a f
 
 ## 7. Cite a source for every claim
 
-Add the source to `sources` in the frontmatter. Link the related page in the body with `[[slug]]`. If you have no source, write the claim as a question to verify.
+Add the source file name to `sources` in the frontmatter, for example `paper.md`. A `sources` entry is the name of a source file. Link the source page in the body with `[[slug]]`. If you have no source, write the claim as a question to verify.
 
 壞：非同步電路的功耗比同步電路低 30%。
-好：一篇原文指出，非同步電路的功耗比同步電路低，但沒有給數字。[[async-handshake]]
+好：一篇原文指出，非同步電路的功耗比同步電路低，但沒有給數字。[[async-circuits-survey]]
 
 ## Source of these rules
 
-These rules are our own summary. The principles of ASD-STE100 Simplified Technical English inspired them.
+These rules are our own summary. They are inspired by the principles of Simplified Technical English.
+The source of those principles is ASD-STE100, Issue 9 (2025).
 This repository does not include the standard itself, because ASD owns its copyright.
-To read the standard, get a copy from ASD. Keep your copy outside this repository.
+To read the standard, get a copy from ASD. Keep your copy on your own computer.
+Write the path of your copy in your own notes. Add that path to `.gitignore`. Never commit the copy.

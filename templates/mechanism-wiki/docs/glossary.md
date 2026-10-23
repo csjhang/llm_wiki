@@ -8,7 +8,7 @@ A wiki is one folder. It holds `raw/`, `wiki/`, and the config files. One wiki i
 
 ## Reading wiki
 
-A reading wiki stores the daily reading and interests of the user. It holds the mechanism library. The term is used most in `schema.md`.
+A reading wiki stores the daily reading and interests of the user. It holds the mechanism library. The mechanism library is the set of mechanism pages in `wiki/mechanisms/`. The term is used most in `schema.md`.
 
 ## Work wiki
 
@@ -28,7 +28,7 @@ A note is a source that the user wrote. It is the view of the user, not evidence
 
 ## Domain
 
-A domain is one path in `domains.yaml`, for example `hardware/async-circuits`. Each page, except a mechanism page, belongs to one domain. Choose a domain only from the list. The term is used most in `domains.yaml`.
+A domain is one path in `domains.yaml`, for example `hardware/async-circuits`. Each page, except a mechanism page or a hypothesis page, belongs to one domain. Choose a domain only from the list. The term is used most in `domains.yaml`.
 
 ## Lens
 

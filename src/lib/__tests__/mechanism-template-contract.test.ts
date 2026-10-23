@@ -106,6 +106,11 @@ describe("mechanism template: glossary", () => {
     const order = GLOSSARY_TERMS.map((term) => headings.indexOf(term))
     expect(order, "terms keep the contract order").toEqual([...order].sort((a, b) => a - b))
   })
+
+  it("glossary Domain agrees with schema.md: mechanism and hypothesis pages have no single domain", () => {
+    const domain = sectionBody(readTemplate("docs/glossary.md"), "Domain")
+    expect(domain).toMatch(/except a mechanism page or a hypothesis page/)
+  })
 })
 
 describe("mechanism template: entry files", () => {
@@ -130,6 +135,22 @@ describe("mechanism template: entry files", () => {
     }
   })
 
+  it("CLAUDE.md read order explains the placeholders", () => {
+    const body = sectionBody(readTemplate("CLAUDE.md"), "Read order")
+    const lineOf = (path: string): string => body.split(/\r?\n/).find((line) => line.includes(`\`${path}\``)) ?? ""
+    expect(lineOf("schema/page-types/<type>.md")).toContain("`type:`")
+    expect(lineOf("lenses/<lens>.md")).toContain("`lens:`")
+    expect(lineOf("lenses/<lens>.md")).toContain("`lenses:`")
+  })
+
+  it("CLAUDE.md rules name the raw/ exception and the output language source", () => {
+    const rules = sectionBody(readTemplate("CLAUDE.md"), "Rules")
+    expect(rules).toContain("`wiki-sync`")
+    expect(rules).toContain("raw/sources/heptabase/")
+    expect(rules).toContain("`Output language:`")
+    expect(rules).toContain("`purpose.md`")
+  })
+
   it("CLAUDE.md rules section has at most five lines", () => {
     const rules = sectionBody(readTemplate("CLAUDE.md"), "Rules")
       .split(/\r?\n/)
@@ -142,6 +163,11 @@ describe("mechanism template: entry files", () => {
     const lines = readTemplate("AGENTS.md").trimEnd().split(/\r?\n/)
     expect(lines.length).toBeLessThanOrEqual(5)
     expect(lines.join("\n")).toContain("CLAUDE.md")
+  })
+
+  it("purpose.md has an empty Output language line with a hint", () => {
+    const text = readTemplate("purpose.md")
+    expect(text).toMatch(/^Output language:[ \t]*\r?\n<!--[\s\S]+?-->/m)
   })
 
   it("purpose.md has the four headings and a hint under each", () => {
@@ -163,6 +189,25 @@ describe("mechanism template: schema.md", () => {
     const dataRows = rows.slice(2) // skip the header and the separator row
     expect(dataRows.map((row) => [row[0], row[1]])).toEqual(PAGE_TYPES)
     for (const row of dataRows) expect(row[2].length, `purpose of ${row[0]}`).toBeGreaterThan(0)
+  })
+
+  it("schema.md names the output language source", () => {
+    const text = readTemplate("schema.md")
+    expect(text).toContain("`Output language:`")
+    expect(text).toContain("`purpose.md`")
+  })
+
+  it("schema.md bare-slug rule covers only related and instances; sources keep file names", () => {
+    const body = sectionBody(readTemplate("schema.md"), "Cross-references")
+    expect(body).toContain('`sources: ["paper.md"]`')
+    expect(body).toMatch(/`related:`.*`instances:`/)
+    expect(body).not.toMatch(/in frontmatter/i)
+  })
+
+  it("schema.md defines ingest and mechanism library", () => {
+    const text = readTemplate("schema.md")
+    expect(text).toMatch(/An ingest is /)
+    expect(text).toMatch(/The mechanism library is /)
   })
 
   it("schema.md has the sections that the ingest prompt relies on", () => {
@@ -207,6 +252,17 @@ describe("mechanism template: writing rules", () => {
     const body = sectionBody(text, "Source of these rules")
     expect(body).toContain("ASD-STE100")
     expect(body).toMatch(/copyright/i)
+    expect(body).toContain("ASD-STE100, Issue 9 (2025)")
+    expect(body).toContain(".gitignore")
+    expect(body).toMatch(/never commit/i)
+  })
+
+  it("writing-rules.md explains the example marks and what a sources entry is", () => {
+    const text = readTemplate("schema/writing-rules.md")
+    expect(text).toContain("壞")
+    expect(text).toMatch(/壞.*marks a bad example/)
+    expect(text).toMatch(/好.*marks a good example/)
+    expect(sectionBody(text, "7. Cite a source for every claim")).toContain("source file")
   })
 })
 

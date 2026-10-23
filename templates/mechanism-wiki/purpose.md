@@ -2,6 +2,9 @@
 
 <!-- You can write this file in any language. Replace each comment with your own text. -->
 
+Output language:
+<!-- Write the language of your wiki pages after "Output language:", for example Traditional Chinese. AI agents read this line. -->
+
 ## Goal
 
 <!-- Write why this wiki exists. Say what you want to know or build with it. One short paragraph is enough. -->

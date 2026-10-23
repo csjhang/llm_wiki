@@ -1,7 +1,8 @@
 # Wiki schema
 
 This file is the routing rule for every ingest. Follow it when you create or update a page.
-Write page text in the output language.
+An ingest is one run in which the AI reads one source and writes wiki pages from it.
+Write page text in the output language. The app prompt names it. Otherwise read `Output language:` in `purpose.md`. If it is empty, ask the user.
 
 ## Page types
 
@@ -24,7 +25,7 @@ Each type also has a rule file at `schema/page-types/<type>.md`. An agent that c
 - Keep proper nouns and code identifiers in their usual form.
 - Two domains can have a page with the same name. Add the suffix `--<last-domain-segment>` to both file names.
 - Example: the domains `ai` and `cognition` give `attention--ai.md` and `attention--cognition.md`.
-- Put a note at the top of each of the two pages that links to the other page.
+- Put one line at the top of each page that links to the other page.
 
 ## Frontmatter
 
@@ -54,13 +55,14 @@ When `source_kind` is `note`, write the content as the user's view. Do not write
 - Choose the `domain` of a page only from `domains.yaml`.
 - Do not invent a domain name. Do not use a synonym of a listed domain.
 - If no listed domain fits, propose a new domain as a `new-domain` review item. Wait for the user to approve it.
-- One page has one `domain`. Use `also` for related domains.
-- Only a mechanism page crosses domains.
+- A source, entity, concept, comparison, or query page has one `domain`. Use `also` for related domains.
+- Only a mechanism page applies to many domains. A hypothesis page names its two domains in `from_domain` and `to_domain`.
 - When two domains share a concept name, write two pages.
 
 ## Mechanisms
 
 A mechanism is a structure that repeats across domains. The mechanism page states the structure. It states no domain detail.
+The mechanism library is the set of mechanism pages in `wiki/mechanisms/` of a reading wiki.
 Full rules are in `schema/page-types/mechanism.md`.
 
 - A mechanism page has these parts: components, flow, constraints and trade-offs, why it works, failure conditions, and known instances.
@@ -68,7 +70,7 @@ Full rules are in `schema/page-types/mechanism.md`.
 - List each instance as a link, with its domain and its local term. Put instance detail on the instance page.
 - A reading wiki writes mechanism pages. A work wiki does not.
 - A work wiki sends a `new-mechanism` review item instead.
-- Before you write a mechanism page, check the mechanism index `wiki/indexes/_mechanisms.md` for the same mechanism. If it exists, add a line to its known instances.
+- Before you write a mechanism page, check the mechanism index `wiki/indexes/_mechanisms.md` for the same mechanism. If the mechanism page exists, add a line to the known instances of that page.
 
 ## Index and log
 
@@ -79,8 +81,9 @@ Full rules are in `schema/page-types/mechanism.md`.
 ## Cross-references
 
 - Use `[[slug]]` links in the page body only.
-- In frontmatter, write bare slugs, for example `related: [foo, bar-baz]`.
-- Do not put `[[ ]]`, `wiki/`, or `.md` in frontmatter.
+- In `related:` and `instances:`, write bare slugs, for example `related: [foo, bar-baz]`.
+- Do not put `[[ ]]`, `wiki/`, or `.md` in `related:` or `instances:`.
+- `sources` lists raw source file names with the extension, for example `sources: ["paper.md"]`.
 - Link each page to the sources and concepts that it uses.
 
 ## Contradictions
