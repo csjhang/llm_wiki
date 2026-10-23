@@ -8,7 +8,6 @@ import { IngestCommitCoordinator } from "@/lib/ingest-commit-coordinator"
 import {
   commitIngest,
   getCachedGitHistory,
-  isGitHistoryOnCached,
   prepareIngestBaseline,
   resolveGitHistory,
   restoreFailedIngest,
@@ -125,9 +124,13 @@ export function getIngestWorkerLimit(): number {
   return workerLimit
 }
 
-/** With version history on, one ingest at a time: each run is one commit and a failed run restores `wiki/`. */
+/**
+ * With version history on, one ingest at a time: each run is one commit and a
+ * failed run restores `wiki/`. Until the decision is settled the answer is
+ * unknown, so it is held at 1 too; only a settled "off" frees the full limit.
+ */
 function effectiveWorkerLimit(projectId: string): number {
-  return isGitHistoryOnCached(projectId) ? 1 : workerLimit
+  return getCachedGitHistory(projectId) === false ? workerLimit : 1
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────
@@ -1118,7 +1121,14 @@ async function runTask(
       trackWrittenFile,
       { runCommit },
     )
-    if (currentProjectId !== projectId || run.epoch !== queueEpoch) return
+    if (currentProjectId !== projectId || run.epoch !== queueEpoch) {
+      // The project changed mid-run: the queue is not ours any more, but the
+      // old project's wiki still needs its commit, so act on it by path.
+      if (historyOn && writtenFiles.length > 0) {
+        await commitIngest(projectPath, titleFromSourcePath(task.sourcePath), writtenFiles)
+      }
+      return
+    }
     run.writtenFiles = writtenFiles
 
     const currentTask = queue.find((candidate) => candidate.id === task.id)
@@ -1127,7 +1137,10 @@ async function runTask(
       // Without a reliable old-content snapshot, deleting them would be data
       // loss. Keep completed atomic writes and let a retry converge via merge.
       // With version history on, wiki/ goes back to the last commit instead.
-      if (historyOn) await restoreFailedIngest(projectPath)
+      if (historyOn) {
+        await restoreFailedIngest(projectPath)
+        if (currentProjectId !== projectId || run.epoch !== queueEpoch) return
+      }
       await saveQueue(projectPath)
       return
     }
@@ -1144,7 +1157,11 @@ async function runTask(
     await saveQueue(projectPath)
     console.log(`[Ingest Queue] Done: ${task.sourcePath}`)
   } catch (err) {
-    if (currentProjectId !== projectId || run.epoch !== queueEpoch) return
+    if (currentProjectId !== projectId || run.epoch !== queueEpoch) {
+      // Stale project: leave the queue alone, but put the old project's wiki/ back.
+      if (historyOn) await restoreFailedIngest(projectPath)
+      return
+    }
     // Every branch below ends without success: put wiki/ back before saving.
     if (historyOn) {
       await restoreFailedIngest(projectPath)

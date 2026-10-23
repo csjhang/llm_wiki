@@ -1806,7 +1806,7 @@ describe("ingest-queue — git history", () => {
     expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
   })
 
-  it("makes no git calls after the project changed mid-run", async () => {
+  it("restores the old project's wiki/ by path when it changed during a failing run", async () => {
     turnHistoryOn()
     const run = createDeferred<string[]>()
     mockAutoIngest.mockImplementation(() => run.promise)
@@ -1814,15 +1814,54 @@ describe("ingest-queue — git history", () => {
     await enqueueIngest(TEST_ID, "raw/sources/switching.md")
     await waitFor(() => mockAutoIngest.mock.calls.length === 1)
     await pauseQueue()
+    const writesBefore = mockWriteFile.mock.calls.length
     run.reject(new Error("boom"))
+    await waitFor(() => mockRestoreFailedIngest.mock.calls.length === 1)
     await flushMicrotasks(20)
 
-    expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
+    expect(mockRestoreFailedIngest).toHaveBeenCalledWith(TEST_PATH)
     expect(mockCommitIngest).not.toHaveBeenCalled()
+    // The queue and its file belong to whatever project is open now.
+    expect(mockWriteFile.mock.calls.length).toBe(writesBefore)
   })
 
-  it("makes no commit when the project changed during a successful run", async () => {
+  it("commits the old project's ingest by path when it changed during a successful run", async () => {
     turnHistoryOn()
+    const run = createDeferred<string[]>()
+    mockAutoIngest.mockImplementation(() => run.promise)
+
+    await enqueueIngest(TEST_ID, "raw/sources/switching.md")
+    await waitFor(() => mockAutoIngest.mock.calls.length === 1)
+    await pauseQueue()
+    const writesBefore = mockWriteFile.mock.calls.length
+    run.resolve(["wiki/sources/switching.md"])
+    await waitFor(() => mockCommitIngest.mock.calls.length === 1)
+    await flushMicrotasks(20)
+
+    expect(mockCommitIngest).toHaveBeenCalledWith(TEST_PATH, "switching", [
+      "wiki/sources/switching.md",
+    ])
+    expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
+    expect(mockWriteFile.mock.calls.length).toBe(writesBefore)
+    expect(getQueueSummary().completed).toBe(0)
+  })
+
+  it("does not commit when the project changed during a run that wrote nothing", async () => {
+    turnHistoryOn()
+    const run = createDeferred<string[]>()
+    mockAutoIngest.mockImplementation(() => run.promise)
+
+    await enqueueIngest(TEST_ID, "raw/sources/switching.md")
+    await waitFor(() => mockAutoIngest.mock.calls.length === 1)
+    await pauseQueue()
+    run.resolve([])
+    await flushMicrotasks(20)
+
+    expect(mockCommitIngest).not.toHaveBeenCalled()
+    expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
+  })
+
+  it("makes no git calls on a stale run when history is off", async () => {
     const run = createDeferred<string[]>()
     mockAutoIngest.mockImplementation(() => run.promise)
 
@@ -1860,6 +1899,26 @@ describe("ingest-queue — git history", () => {
     mockAutoIngest.mockRejectedValue(new Error("boom"))
 
     await enqueueIngest(TEST_ID, "raw/sources/switching.md")
+    await waitFor(() => mockRestoreFailedIngest.mock.calls.length === 1)
+    await pauseQueue()
+    const writesBefore = mockWriteFile.mock.calls.length
+    restore.resolve()
+    await flushMicrotasks(20)
+
+    expect(mockWriteFile.mock.calls.length).toBe(writesBefore)
+  })
+
+  it("leaves the queue alone when the project changed while wiki/ was restored after a cancel", async () => {
+    turnHistoryOn()
+    const run = createDeferred<string[]>()
+    const restore = createDeferred<void>()
+    mockRestoreFailedIngest.mockImplementation(() => restore.promise)
+    mockAutoIngest.mockImplementation(() => run.promise)
+
+    await enqueueIngest(TEST_ID, "raw/sources/cancelled.md")
+    await waitFor(() => mockAutoIngest.mock.calls.length === 1)
+    await cancelTask(getQueue()[0].id)
+    run.resolve(["wiki/sources/cancelled.md"])
     await waitFor(() => mockRestoreFailedIngest.mock.calls.length === 1)
     await pauseQueue()
     const writesBefore = mockWriteFile.mock.calls.length
@@ -1916,6 +1975,43 @@ describe("ingest-queue — git history", () => {
 
     expect(mockAutoIngest).toHaveBeenCalledTimes(3)
     expect(maxInFlight).toBe(1)
+  })
+
+  it("holds the worker limit at 1 while the history decision is unsettled", async () => {
+    setIngestWorkerLimit(3)
+    // The first probe fails (git unavailable for a moment): the module resolves
+    // false without caching it. The second one succeeds as on.
+    let settled: boolean | undefined
+    let probes = 0
+    mockResolveGitHistory.mockImplementation(async () => {
+      probes++
+      if (probes === 1) return false
+      await flushIO(1)
+      settled = true
+      return true
+    })
+    mockGetCachedGitHistory.mockImplementation(() => settled)
+    mockIsGitHistoryOnCached.mockImplementation(() => settled === true)
+    let inFlight = 0
+    let maxInFlight = 0
+    mockAutoIngest.mockImplementation(async (_projectPath, sourcePath) => {
+      inFlight++
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await flushIO(3)
+      inFlight--
+      return [`wiki/sources/${sourcePath}`]
+    })
+
+    await enqueueBatch(TEST_ID, [
+      { sourcePath: "a.md", folderContext: "" },
+      { sourcePath: "b.md", folderContext: "" },
+      { sourcePath: "c.md", folderContext: "" },
+    ])
+    await waitFor(() => getQueue().length === 0)
+
+    expect(mockAutoIngest).toHaveBeenCalledTimes(3)
+    expect(maxInFlight).toBe(1)
+    expect(mockCommitIngest).toHaveBeenCalledTimes(3)
   })
 
   it("keeps the configured worker limit when history is off", async () => {
