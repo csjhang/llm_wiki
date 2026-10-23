@@ -8,7 +8,8 @@ The page belongs to exactly one domain. See `docs/glossary.md` for the term Doma
 ## Location
 
 Write the page in `wiki/entities/`. Follow the file-name rules in `schema.md`.
-Two domains can have an entity with the same name. Write two pages. Add the suffix `--<last-domain-segment>` to both file names.
+Two domains can have an entity with the same name. Write two pages. Never rename an existing file.
+Add the suffix `--<last-domain-segment>` to the new page only. Keep the file name of the old page.
 
 ## Frontmatter
 
@@ -31,10 +32,10 @@ Two domains can have an entity with the same name. Write two pages. Add the suff
 - Start the body with one sentence that says what the thing is.
 - Choose exactly one `domain`. Put every other related domain in `also`.
 - Keep each claim on the entity that it describes.
-- Cite a source for every claim. Link the source page with `[[slug]]`.
+- Cite a source for every claim. Link the source page with `[[slug]]`. A claim counts as sourced when its section has at least one `[[<source-page-slug>]]` link that supports it.
 - Link the concept pages that the entity uses.
-- If another domain has an entity with the same name, add `--<last-domain-segment>` to both file names.
-- Put one line directly under the title that links to the same-name page of the other domain.
+- If another domain has an entity with the same name, add `--<last-domain-segment>` to the new page only.
+- Put one line at the top of each of the two pages, directly under the title. Each line links to the other page.
 - Write a claim from a note as the view of the user.
 
 ### Do not
@@ -42,10 +43,12 @@ Two domains can have an entity with the same name. Write two pages. Add the suff
 - Put two domains in `domain`.
 - Merge two things into one page because they share a name.
 - Move a claim to another entity because the two entities share a term.
-- Rename a file when you update a page.
+- Rename an existing file. Renaming an old page is a job for the `wiki-recut` skill.
 - Invent a fact about the entity that no source gives.
 
 ## Example
+
+The slugs in this example are Latin for readability. A real Chinese wiki keeps CJK titles as CJK file names, as `schema.md` says.
 
 ```markdown
 ---
@@ -61,7 +64,7 @@ updated: 2026-01-15
 ---
 # 範例事件資料集
 
-範例事件資料集是一組事件流的記錄，用來訓練脈衝神經網路。
+範例事件資料集是一組事件流的記錄，用來訓練脈衝神經網路。[[event-dataset-paper]]
 
 ## 內容
 
@@ -70,11 +73,11 @@ updated: 2026-01-15
 
 ## 用途
 
-- 論文用它測試[[spiking-neural-network]]的分類能力。
+- 論文用它測試[[spiking-neural-network]]的分類能力。[[event-dataset-paper]]
 
 ## 限制
 
-- 論文沒有說明資料集的授權條款。
+- 論文沒有說明資料集的授權條款。[[event-dataset-paper]]
 ```
 
 ## Checklist
@@ -83,7 +86,8 @@ updated: 2026-01-15
 - [ ] Does `domain` hold exactly one path from `domains.yaml`?
 - [ ] Is each other related domain in `also`?
 - [ ] Does each claim stay on the entity that it describes?
-- [ ] Does each claim have a source?
-- [ ] If a same-name page exists in another domain, do both file names carry the `--<last-domain-segment>` suffix?
-- [ ] If a same-name page exists, does a line under the title link to it?
+- [ ] Does each section that holds claims link at least one source page that supports it?
+- [ ] If a same-name page exists in another domain, does only the new page carry the `--<last-domain-segment>` suffix?
+- [ ] Did you keep the file name of every existing page?
+- [ ] If a same-name page exists, does each of the two pages have a line at the top that links to the other?
 - [ ] Do `related` and `sources` follow the cross-reference rules in `schema.md`?

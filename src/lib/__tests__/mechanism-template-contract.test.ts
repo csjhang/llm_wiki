@@ -16,6 +16,7 @@ import { parseHeptabaseYaml } from "@/lib/wiki-config/heptabase-config"
 import {
   HYPOTHESIS_SECTIONS,
   MECHANISM_SECTIONS,
+  findSection,
   type SectionHeading,
 } from "@/lib/wiki-config/section-headings"
 
@@ -64,6 +65,13 @@ const RULE_FILE_SECTIONS = ["Purpose", "Location", "Frontmatter", "Rules", "Exam
 
 /** Only these two rule files have a `## Sections` table, between Frontmatter and Rules. */
 const RULE_FILES_WITH_SECTIONS = ["mechanism", "hypothesis"]
+
+/** The one sentence that says when a claim counts as sourced. Controller ruling R12. */
+const COUNTING_SENTENCE =
+  "A claim counts as sourced when its section has at least one `[[<source-page-slug>]]` link that supports it."
+
+/** The exact form of a known-instance line, in every language. Controller ruling R13. */
+const INSTANCE_LINE_FORM = "`- [[<slug>]] (<domain>): <local term>`"
 
 /** Files written for AI agents. Every sentence in them must stay short. */
 const AI_FACING_FILES = [
@@ -304,6 +312,51 @@ function tableRows(body: string): string[][] {
     .filter((cells) => !cells.every((cell) => /^:?-+:?$/.test(cell)))
 }
 
+/** A parsed `## Example` block: the page inside the fence, split into frontmatter, intro, and sections. */
+interface ExamplePage {
+  /** Text between the two `---` lines. */
+  frontmatter: string
+  /** Raw file names in the `sources` field. */
+  sourceFiles: string[]
+  /** Page text after the frontmatter. */
+  body: string
+  /** Lines between the `# ` title and the first `## ` heading, trimmed. */
+  intro: string
+  /** Level-2 sections in order: heading text and body. */
+  sections: Array<{ heading: string; body: string }>
+}
+
+function parseExample(type: string): ExamplePage {
+  const example = sectionBody(readTemplate(`schema/page-types/${type}.md`), "Example")
+  const fenced = /^```markdown\r?\n([\s\S]*?)\r?\n```/m.exec(example)
+  if (fenced === null) throw new Error(`${type}: Example has no markdown fence`)
+  const parts = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(fenced[1])
+  if (parts === null) throw new Error(`${type}: Example has no frontmatter`)
+  const [, frontmatter, body] = parts
+  const sourcesLine = /^sources: \[(.*)\]$/m.exec(frontmatter)?.[1] ?? ""
+  const sourceFiles = [...sourcesLine.matchAll(/"([^"]+)"/g)].map((match) => match[1])
+  const lines = body.split(/\r?\n/)
+  const firstSection = lines.findIndex((line) => /^## /.test(line))
+  const head = firstSection === -1 ? lines : lines.slice(0, firstSection)
+  const intro = head.filter((line) => !/^# /.test(line)).join("\n").trim()
+  const sections: ExamplePage["sections"] = []
+  for (const line of firstSection === -1 ? [] : lines.slice(firstSection)) {
+    if (/^## /.test(line)) sections.push({ heading: line.slice(3).trim(), body: "" })
+    else sections[sections.length - 1].body += `${line}\n`
+  }
+  return { frontmatter, sourceFiles, body, intro, sections }
+}
+
+/** Slugs of the `[[slug]]` links in `text`. */
+function linkSlugs(text: string): string[] {
+  return [...text.matchAll(/\[\[([^\]]+)\]\]/g)].map((match) => match[1])
+}
+
+/** True when `text` links at least one source page, that is, a page named after a file in `sourceFiles`. */
+function linksASourcePage(text: string, sourceFiles: string[]): boolean {
+  return linkSlugs(text).some((slug) => sourceFiles.includes(`${slug}.md`))
+}
+
 describe("mechanism template: page-type rule files", () => {
   it("every page type has a rule file", () => {
     for (const file of RULE_FILES) {
@@ -406,6 +459,141 @@ describe("mechanism template: page-type rule files", () => {
     for (const file of RULE_FILES) {
       const ids = readTemplate(file).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g) ?? []
       for (const id of ids) expect(id, file).toMatch(/^00000000-0000-4000-8000-0000000000\d\d$/)
+    }
+  })
+
+  it("same-name pages: never rename an old file; only the new page gets the suffix (schema.md, entity.md, concept.md agree)", () => {
+    const texts: Array<[string, string]> = [
+      ["schema.md", sectionBody(readTemplate("schema.md"), "File names")],
+      ["entity.md", readTemplate("schema/page-types/entity.md")],
+      ["concept.md", readTemplate("schema/page-types/concept.md")],
+    ]
+    for (const [file, text] of texts) {
+      expect(text, file).toContain("Never rename an existing file")
+      expect(text, file).toContain("`--<last-domain-segment>` to the new page only")
+      expect(text, file).not.toMatch(/both file names/)
+      expect(text, file).toMatch(/one line at the top of each of the two pages/i)
+    }
+    expect(readTemplate("schema/page-types/entity.md")).not.toMatch(/^- Rename a file/m)
+  })
+
+  it("the counting sentence for a sourced claim appears in writing-rules.md and in the five claim-writing rule files", () => {
+    expect(sectionBody(readTemplate("schema/writing-rules.md"), "7. Cite a source for every claim")).toContain(
+      COUNTING_SENTENCE,
+    )
+    for (const type of ["entity", "concept", "comparison", "query", "mechanism"]) {
+      expect(readTemplate(`schema/page-types/${type}.md`), type).toContain(COUNTING_SENTENCE)
+    }
+  })
+
+  it("entity, concept, comparison, query, and mechanism examples link a source page in every section that holds claims", () => {
+    // A section counts as sourced when it links a page named after a file in `sources`.
+    // The mechanism one-line summary and Known instances, and the query to-do list, hold no claim of their own.
+    const exempt: Record<string, string[]> = {
+      mechanism: ["已知實例"],
+      query: ["要查的事"],
+    }
+    for (const type of ["entity", "concept", "comparison", "query", "mechanism"]) {
+      const page = parseExample(type)
+      expect(page.sourceFiles.length, `${type} sources`).toBeGreaterThan(0)
+      if (type !== "mechanism") {
+        expect(linksASourcePage(page.intro, page.sourceFiles), `${type} intro`).toBe(true)
+      }
+      for (const section of page.sections) {
+        if ((exempt[type] ?? []).includes(section.heading)) continue
+        expect(linksASourcePage(section.body, page.sourceFiles), `${type} section ${section.heading}`).toBe(true)
+      }
+    }
+  })
+
+  it("query example starts with the question; comparison example opens with every compared page linked", () => {
+    const query = parseExample("query")
+    expect(query.intro.split(/\r?\n/)[0], "query first line").toMatch(/？$/)
+    const comparison = parseExample("comparison")
+    const related = /^related: \[(.*)\]$/m.exec(comparison.frontmatter)?.[1].split(",").map((slug) => slug.trim()) ?? []
+    expect(related.length).toBeGreaterThanOrEqual(2)
+    const opening = comparison.intro.split(/\r?\n/)[0]
+    expect(linkSlugs(opening)).toEqual(expect.arrayContaining(related))
+  })
+
+  it("mechanism.md: Parts and Flows rules agree with the example", () => {
+    const rules = readTemplate("schema/page-types/mechanism.md")
+    expect(rules).toMatch(/Parts: Name each part and its role in one line\./)
+    expect(rules).toMatch(/Flows: .*Name the parts by the names that Parts uses\./)
+    const page = parseExample("mechanism")
+    const parts = findSection(page.body, MECHANISM_SECTIONS[0]) ?? ""
+    const flows = findSection(page.body, MECHANISM_SECTIONS[1]) ?? ""
+    const partRows = parts.split(/\r?\n/).filter((line) => line.startsWith("- ")).map((line) => line.slice(2).split("："))
+    const names = partRows.map(([name]) => name)
+    expect(names.length).toBeGreaterThanOrEqual(3)
+    for (const [name, role] of partRows) {
+      // A part line gives the role of one part. It does not name the other parts.
+      for (const other of names.filter((candidate) => candidate !== name)) {
+        expect(role, `role of ${name} must not name ${other}`).not.toContain(other)
+      }
+    }
+    const flowLines = flows.split(/\r?\n/).filter((line) => line.startsWith("- "))
+    expect(flowLines.length).toBeGreaterThan(0)
+    for (const line of flowLines) {
+      // A flow line names at least one part with the name that Parts uses.
+      expect(names.some((name) => line.includes(name)), `flow line "${line}"`).toBe(true)
+    }
+  })
+
+  it("mechanism.md fixes the known-instance line form", () => {
+    expect(readTemplate("schema/page-types/mechanism.md")).toContain(INSTANCE_LINE_FORM)
+    const page = parseExample("mechanism")
+    const instances = findSection(page.body, MECHANISM_SECTIONS[5]) ?? ""
+    const lines = instances.split(/\r?\n/).filter((line) => line.trim() !== "")
+    expect(lines.length).toBeGreaterThan(0)
+    for (const line of lines) {
+      // ASCII punctuation only around the link, the domain, and the colon.
+      expect(line, line).toMatch(/^- \[\[[a-z0-9-]+\]\] \([a-z0-9-]+(?:\/[a-z0-9-]+)*\): \S.*$/)
+    }
+    const slugs = linkSlugs(instances)
+    const frontmatterSlugs = /^instances: \[(.*)\]$/m.exec(page.frontmatter)?.[1].split(",").map((slug) => slug.trim()) ?? []
+    expect([...slugs].sort()).toEqual([...frontmatterSlugs].sort())
+  })
+
+  it("mechanism.md and hypothesis.md explain which heading language each output language uses", () => {
+    for (const type of ["mechanism", "hypothesis"]) {
+      const sections = sectionBody(readTemplate(`schema/page-types/${type}.md`), "Sections")
+      expect(sections, type).toContain("`Traditional Chinese` uses the Traditional Chinese headings")
+      expect(sections, type).toContain("`Chinese` is the app value for Simplified Chinese")
+      expect(sections, type).toContain("`auto` and every other value use the English headings")
+    }
+  })
+
+  it("hypothesis.md settles unknown rows, from_domain, and the uncited one-line hypothesis", () => {
+    const text = readTemplate("schema/page-types/hypothesis.md")
+    expect(text).toMatch(/"Fits\?" set to "unknown"/)
+    expect(text).toMatch(/The one-line hypothesis needs no citation\./)
+    const fields = sectionBody(text, "Frontmatter")
+    const fromRow = fields.split(/\r?\n/).find((line) => line.startsWith("| `from_domain`")) ?? ""
+    expect(fromRow).toMatch(/user or the whiteboard/)
+    expect(fromRow).not.toMatch(/Known instances/)
+    const page = parseExample("hypothesis")
+    const mapping = findSection(page.body, HYPOTHESIS_SECTIONS[1]) ?? ""
+    const fits = tableRows(mapping).slice(1).map((row) => row[2])
+    expect(new Set(fits)).toEqual(new Set(["套得上", "部分套得上", "套不上", "不確定"]))
+  })
+
+  it("source.md says what the app prompt gives; comparison.md defines the main subject", () => {
+    expect(readTemplate("schema/page-types/source.md")).toContain(
+      "The app prompt gives the file name of the summary page.",
+    )
+    const comparison = readTemplate("schema/page-types/comparison.md")
+    expect(comparison).toContain("The main subject is the first page named in the title.")
+    expect(comparison).toContain("If it is not clear, ask the user.")
+  })
+
+  it("every Example starts with a line about Latin slugs and CJK file names", () => {
+    for (const [type] of PAGE_TYPES) {
+      const example = sectionBody(readTemplate(`schema/page-types/${type}.md`), "Example")
+      const firstLine = example.split(/\r?\n/).find((line) => line.trim() !== "") ?? ""
+      expect(firstLine, type).toContain("Latin")
+      expect(firstLine, type).toContain("CJK")
+      expect(firstLine, type).toContain("`schema.md`")
     }
   })
 

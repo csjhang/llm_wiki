@@ -8,7 +8,8 @@ A structure that repeats across domains is not a concept. It is a mechanism. See
 ## Location
 
 Write the page in `wiki/concepts/`. Follow the file-name rules in `schema.md`.
-Two domains can have a concept with the same name. Write two pages. Add the suffix `--<last-domain-segment>` to both file names.
+Two domains can have a concept with the same name. Write two pages. Never rename an existing file.
+Add the suffix `--<last-domain-segment>` to the new page only. Keep the file name of the old page.
 
 ## Frontmatter
 
@@ -32,9 +33,9 @@ Two domains can have a concept with the same name. Write two pages. Add the suff
 - Choose exactly one `domain`. Put every other related domain in `also`.
 - Explain the concept in the words of its domain.
 - Keep each claim on the concept that it describes.
-- Cite a source for every claim. Link the source page with `[[slug]]`.
-- If another domain has a concept with the same name, add `--<last-domain-segment>` to both file names.
-- Put one line directly under the title that links to the same-name page of the other domain.
+- Cite a source for every claim. Link the source page with `[[slug]]`. A claim counts as sourced when its section has at least one `[[<source-page-slug>]]` link that supports it.
+- If another domain has a concept with the same name, add `--<last-domain-segment>` to the new page only.
+- Put one line at the top of each of the two pages, directly under the title. Each line links to the other page.
 - Write a claim from a note as the view of the user.
 
 ### Do not
@@ -44,8 +45,13 @@ Two domains can have a concept with the same name. Write two pages. Add the suff
 - Write one concept page for a structure that repeats across domains. Use a mechanism page, as `schema.md` says.
 - Move a claim to another concept because the two concepts share a term.
 - Use a synonym for a glossary term.
+- Rename an existing file. Renaming an old page is a job for the `wiki-recut` skill.
 
 ## Example
+
+The slugs in this example are Latin for readability. A real Chinese wiki keeps CJK titles as CJK file names, as `schema.md` says.
+
+The example is the old page `attention.md` of the domain `ai`. The new same-name page of the domain `cognition` is `attention--cognition.md`.
 
 ```markdown
 ---
@@ -63,7 +69,7 @@ updated: 2026-01-15
 
 另見：[[attention--cognition]]。那一頁說明認知領域的注意力。
 
-注意力讓模型依輸入的相關程度分配權重。
+注意力讓模型依輸入的相關程度分配權重。[[attention-primer]]
 
 ## 運作方式
 
@@ -82,7 +88,8 @@ updated: 2026-01-15
 - [ ] Does `domain` hold exactly one path from `domains.yaml`?
 - [ ] Does the page explain only the meaning that this domain uses?
 - [ ] Does each claim stay on the concept that it describes?
-- [ ] Does each claim have a source?
-- [ ] If a same-name page exists in another domain, do both file names carry the `--<last-domain-segment>` suffix?
-- [ ] If a same-name page exists, does a line under the title link to it?
+- [ ] Does each section that holds claims link at least one source page that supports it?
+- [ ] If a same-name page exists in another domain, does only the new page carry the `--<last-domain-segment>` suffix?
+- [ ] Did you keep the file name of every existing page?
+- [ ] If a same-name page exists, does each of the two pages have a line at the top that links to the other?
 - [ ] Does the page use each glossary term with its one meaning?

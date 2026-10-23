@@ -19,7 +19,7 @@ Write the page only in the target wiki. Never copy work content into a reading w
 | `type` | yes | Write `hypothesis`. |
 | `title` | yes | The hypothesis, in the output language. Quote it if it has a colon. |
 | `mechanism` | yes | The mechanism page. Write the bare slug if the mechanism page is in this wiki. Write `reading:<slug>` if it is in the reading wiki and this wiki is a work wiki. |
-| `from_domain` | yes | The domain that gives the mechanism. Write one path. Copy it from the Known instances section of the mechanism page. |
+| `from_domain` | yes | The domain that gives the mechanism. The user or the whiteboard picks it. Write one path. |
 | `to_domain` | yes | The domain that receives the mechanism. Write one path from `domains.yaml` of this wiki. |
 | `relation` | yes | `analogy` or `stack`. |
 | `strength` | yes | `surface`, `structural`, or `mathematical`. Follow the lens of `to_domain`. |
@@ -34,7 +34,8 @@ Write the page only in the target wiki. Never copy work content into a reading w
 ## Sections
 
 Write the six sections below as level-2 headings. Keep this order. Do not add, remove, or rename a section.
-Write each heading in the output language. For Traditional Chinese, use the Traditional Chinese heading. For Chinese, use the Simplified Chinese heading. For every other language, use the English heading.
+Pick the heading by the output language value. `Traditional Chinese` uses the Traditional Chinese headings.
+`Chinese` is the app value for Simplified Chinese. It uses the Simplified Chinese headings. `auto` and every other value use the English headings.
 
 | Key | English | Traditional Chinese | Simplified Chinese |
 |---|---|---|---|
@@ -54,6 +55,8 @@ Write each heading in the output language. For Traditional Chinese, use the Trad
 - Read the Failure conditions section of the mechanism page before you map the parts.
 - Cite a wiki page for every claim. Use a `[[slug]]` link to a page in this wiki.
 - Write a claim that has no wiki page only under "What to verify".
+- If a mechanism part has no supporting page in this wiki, write its mapping row with "Fits?" set to "unknown". Move the claim to "What to verify".
+- The one-line hypothesis needs no citation. The sections below support it.
 - Give every row under "What to verify" a "How to refute" cell. The cell says which result would disprove the claim.
 - Set `strength` by the evidence standard in the lens of `to_domain`. Do not claim more than the evidence supports.
 - Write `status: draft` when you create the page. A later fusion update changes it after it reads new evidence.
@@ -71,13 +74,15 @@ Write each heading in the output language. For Traditional Chinese, use the Trad
 ### What to write in each section
 
 - One-line hypothesis: Write one sentence. Say which mechanism explains what in the target domain.
-- Role mapping: Write one table. Use these columns: Mechanism part, Target counterpart, Fits?, Reason. Write one row for each part, each flow, and each constraint of the mechanism. One row can cover a short chain of flows. In "Fits?", write "fits", "partly fits", or "does not fit" in the output language. Cite a page of this wiki in "Target counterpart" or "Reason".
+- Role mapping: Write one table. Use these columns: Mechanism part, Target counterpart, Fits?, Reason. Write one row for each part, each flow, and each constraint of the mechanism. One row can cover a short chain of flows. In "Fits?", write "fits", "partly fits", "does not fit", or "unknown" in the output language. For all values except "unknown", cite a page of this wiki in "Target counterpart" or "Reason". A row with "unknown" cites no page and has a matching row under "What to verify".
 - Gaps and impact: For each row that does not fit or partly fits, write the gap and what it means for the hypothesis.
 - What to verify: Write one table. Use these columns: Claim, Evidence needed, How to refute. Write one row for each claim that has no page.
 - Search keywords: Write 3 to 8 keywords or short phrases. A reader can search the web with them.
 - Related pages: Link the pages of this wiki that the hypothesis uses. In a work wiki, do not link the mechanism page.
 
 ## Example
+
+The slugs in this example are Latin for readability. A real Chinese wiki keeps CJK titles as CJK file names, as `schema.md` says.
 
 ```markdown
 ---
@@ -107,7 +112,7 @@ updated: 2026-01-15
 | 機制的部分 | 目標領域的對應 | 套得上嗎 | 原因 |
 |---|---|---|---|
 | 事件 | 庫存量降到補貨門檻 | 套得上 | [[restock-policy]]把門檻當成補貨的觸發條件。 |
-| 偵測器 | 庫存系統的警示 | 套得上 | [[stock-count-process]]說明系統即時記錄庫存。 |
+| 偵測器 | 庫存系統的警示 | 不確定 | 目前沒有頁面說明系統能否即時警示。見「要驗證的事」。 |
 | 通道 | 採購通知 | 部分套得上 | 通知要經過人工審核。[[restock-policy]] |
 | 處理單元 | 採購人員 | 部分套得上 | [[restock-policy]]顯示人員同時處理多張訂單。 |
 | 流動：變化、通知、計算 | 庫存下降、通知、下單 | 套得上 | [[restock-policy]]的補貨流程依這個順序進行。 |
@@ -128,6 +133,7 @@ updated: 2026-01-15
 |---|---|---|
 | 門檻補貨的總人力比定期盤點低 | 兩種做法在同一批品項上的人力紀錄 | 門檻補貨的人力紀錄不低於定期盤點 |
 | 事件密集時，門檻補貨會變得沒有效率 | 缺貨高峰期的補貨紀錄 | 高峰期的補貨效率與平常相同 |
+| 庫存系統能即時警示補貨門檻 | 系統的警示設定與警示紀錄 | 警示紀錄顯示系統常常延遲警示 |
 
 ## 建議搜尋關鍵字
 
@@ -151,6 +157,7 @@ updated: 2026-01-15
 - [ ] Did you read the lens of `to_domain` and the lens of `from_domain`?
 - [ ] Are the six sections present, in order, with headings in the output language?
 - [ ] Does every claim cite a wiki page, or sit under "What to verify"?
+- [ ] Does each row with "unknown" in "Fits?" have a matching row under "What to verify"?
 - [ ] Does every row under "What to verify" have a "How to refute" cell?
 - [ ] Does the table have a row for every part, flow, and constraint of the mechanism?
 - [ ] Does each row that does not fit, or partly fits, have an entry under "Gaps and impact"?

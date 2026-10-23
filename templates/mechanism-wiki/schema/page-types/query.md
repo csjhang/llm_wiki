@@ -29,6 +29,7 @@ Write the page in `wiki/queries/`. Follow the file-name rules in `schema.md`.
 
 - Start the body with the question in one sentence.
 - Write the best current answer next. If you have no answer, say so.
+- Cite a source for every claim. A claim counts as sourced when its section has at least one `[[<source-page-slug>]]` link that supports it.
 - Link every source page and concept page that the query uses. Use `[[slug]]` in the body.
 - For a contradiction, link both source pages. State the claim of each source in one sentence.
 - Say what evidence would settle the question.
@@ -46,6 +47,8 @@ Write the page in `wiki/queries/`. Follow the file-name rules in `schema.md`.
 
 ## Example
 
+The slugs in this example are Latin for readability. A real Chinese wiki keeps CJK titles as CJK file names, as `schema.md` says.
+
 ```markdown
 ---
 type: query
@@ -60,12 +63,14 @@ updated: 2026-01-15
 ---
 # 事件驅動電路真的比較省電嗎？
 
-兩篇來源對耗能的說法不同。目前的答案是：閒置時省電，事件密集時不一定。
+問題：[[event-driven-circuits]]在所有情況下都比輪詢省電嗎？
 
-## 目前的答案
+目前的答案：不一定。閒置時省電，事件密集時不一定。[[async-circuits-survey]]
 
-- 閒置時，事件驅動電路不計算，所以耗能低。
-- 事件很密集時，處理事件的成本可能超過輪詢。
+## 目前的證據
+
+- 閒置時，事件驅動電路不計算，所以耗能低。[[async-circuits-survey]]
+- 事件很密集時，處理事件的成本可能超過輪詢。[[snn-primer]]
 
 ## 矛盾
 
@@ -85,6 +90,7 @@ updated: 2026-01-15
 - [ ] Does the page link every source and concept that it uses?
 - [ ] For a contradiction, does the page link both sources and state each claim?
 - [ ] Does the page say what evidence would settle the question?
+- [ ] Does each section that holds claims link at least one source page that supports it?
 - [ ] Did the user approve any deep research result before you saved it here?
 - [ ] Does `domain` hold exactly one path from `domains.yaml`?
 - [ ] Do `related` and `sources` follow the cross-reference rules in `schema.md`?

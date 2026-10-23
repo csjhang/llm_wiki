@@ -7,7 +7,7 @@ The glossary defines the terms Source, Article, and Note. Read `docs/glossary.md
 
 ## Location
 
-Write the page in `wiki/sources/`. Use the path that the app prompt gives.
+Write the page in `wiki/sources/`. The app prompt gives the file name of the summary page.
 Write one source page for each file in `raw/sources/`. Never edit a file in `raw/`.
 
 ## Frontmatter
@@ -48,6 +48,8 @@ Write one source page for each file in `raw/sources/`. Never edit a file in `raw
 - Write a number that the source does not give.
 
 ## Example
+
+The slugs in this example are Latin for readability. A real Chinese wiki keeps CJK titles as CJK file names, as `schema.md` says.
 
 ```markdown
 ---

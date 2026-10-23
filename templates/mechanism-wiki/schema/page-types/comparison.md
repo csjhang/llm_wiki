@@ -29,8 +29,10 @@ Write the page in `wiki/comparisons/`. Follow the file-name rules in `schema.md`
 
 - Start the body with the conclusion. Say which item wins on which point, or say that none wins.
 - Name every compared page in the opening sentence. Link each one with `[[slug]]`.
+- Choose `domain` by the main subject. The main subject is the first page named in the title. If it is not clear, ask the user.
 - Write the comparison as a table. Use one column for each compared page.
 - Add a last column named for the source. Put a `[[slug]]` link to a source page in every row.
+- Cite a source for every claim outside the table too. A claim counts as sourced when its section has at least one `[[<source-page-slug>]]` link that supports it.
 - Compare the items on points that they share. Name the point in the first column.
 - Put every compared page in `related`.
 - Write a claim from a note as the view of the user.
@@ -44,6 +46,8 @@ Write the page in `wiki/comparisons/`. Follow the file-name rules in `schema.md`
 - Write a number that the cited source does not give.
 
 ## Example
+
+The slugs in this example are Latin for readability. A real Chinese wiki keeps CJK titles as CJK file names, as `schema.md` says.
 
 ```markdown
 ---
@@ -59,7 +63,7 @@ updated: 2026-01-15
 ---
 # 輪詢與事件驅動的比較
 
-事件驅動在閒置時比輪詢省電，但它比較難驗證。本頁比較[[polling]]與[[event-driven-circuits]]。
+[[event-driven-circuits]]在閒置時比[[polling]]省電，但比較難驗證。[[async-circuits-survey]]
 
 | 比較項目 | 輪詢 | 事件驅動 | 來源 |
 |---|---|---|---|
@@ -69,14 +73,15 @@ updated: 2026-01-15
 
 ## 沒有結論的部分
 
-- 兩篇來源沒有比較事件很密集時的耗能。
+- [[async-circuits-survey]]和[[snn-primer]]都沒有比較事件很密集時的耗能。
 ```
 
 ## Checklist
 
 - [ ] Is the page in `wiki/comparisons/`?
 - [ ] Does the opening sentence give the conclusion?
-- [ ] Does the body link every compared page?
+- [ ] Does the opening sentence name and link every compared page?
+- [ ] Does each section outside the table link at least one source page that supports it?
 - [ ] Does every compared page appear in `related`?
 - [ ] Does every row cite a source page?
 - [ ] Does each source page in a row have its raw file name in `sources`?

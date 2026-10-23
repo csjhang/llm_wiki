@@ -29,7 +29,8 @@ Before you write a page, search `wiki/indexes/_mechanisms.md` for the same mecha
 ## Sections
 
 Write the six sections below as level-2 headings. Keep this order. Do not add, remove, or rename a section.
-Write each heading in the output language. For Traditional Chinese, use the Traditional Chinese heading. For Chinese, use the Simplified Chinese heading. For every other language, use the English heading.
+Pick the heading by the output language value. `Traditional Chinese` uses the Traditional Chinese headings.
+`Chinese` is the app value for Simplified Chinese. It uses the Simplified Chinese headings. `auto` and every other value use the English headings.
 
 | Key | English | Traditional Chinese | Simplified Chinese |
 |---|---|---|---|
@@ -47,7 +48,8 @@ Write each heading in the output language. For Traditional Chinese, use the Trad
 - Write the title, then one line that states the mechanism. In Traditional Chinese, start that line with `一句話：`.
 - Write every section in domain-neutral words. Use "event", not the word that one domain uses.
 - Write at least one failure condition. A mechanism page without one is not complete.
-- Add a source for every claim. See rule 7 in `schema/writing-rules.md`.
+- Cite a source for every claim. See rule 7 in `schema/writing-rules.md`. A claim counts as sourced when its section has at least one `[[<source-page-slug>]]` link that supports it.
+- Skip the source link in the one-line summary and in Known instances. The other sections support the summary. Each instance page holds its own sources.
 - Use one word for one part on the whole page. See rule 1 in `schema/writing-rules.md`.
 - Keep `instances` equal to the slugs that you link under Known instances.
 - Add the lens of each instance domain to `lenses`.
@@ -56,21 +58,23 @@ Write each heading in the output language. For Traditional Chinese, use the Trad
 
 - Write a `domain` field or an `also` field. A mechanism page applies to many domains.
 - Write an industry name, a vendor name, a product name, or a number that belongs to one domain.
-- Explain an instance on the mechanism page. Write one line and link the instance page.
+- Explain an instance on the mechanism page. Write one line in the known-instance form and link the instance page.
 - Write a mechanism page in a work wiki.
 - Write a second page for a mechanism that already has a page.
 - Write a failure condition that only one instance has.
 
 ### What to write in each section
 
-- Parts: Name each part in one line. Write 3 to 7 parts. Do not say how the parts work together.
-- Flows: Write what moves between the parts, for example signals, material, or information. Write 3 to 7 lines, in order. Do not name the parts again.
+- Parts: Name each part and its role in one line. Write 3 to 7 parts. Do not describe what the parts exchange.
+- Flows: Write what moves between the parts, for example signals, material, or information. Name the parts by the names that Parts uses. Do not define a part again. Write 3 to 7 lines, in order.
 - Constraints and trade-offs: Write what limits the mechanism and what it gives up. Write 2 to 5 lines. State each trade-off as a gain and its cost.
 - Why it works: Write the reason that the structure works. Write one short paragraph of at most 5 sentences. Do not list instances.
 - Failure conditions: Write when the mechanism stops working. Write 1 to 5 lines. Each line says what changes and what breaks.
-- Known instances: Write one line for each instance. Use this form: `- [[slug]] (domain): local term`. The local term is the name that the domain uses.
+- Known instances: Write one line for each instance. Use exactly this form in every language: `- [[<slug>]] (<domain>): <local term>`. Use ASCII punctuation. The local term is the name that the domain uses.
 
 ## Example
+
+The slugs in this example are Latin for readability. A real Chinese wiki keeps CJK titles as CJK file names, as `schema.md` says.
 
 ```markdown
 ---
@@ -91,22 +95,22 @@ updated: 2026-01-15
 ## 組成
 
 - 事件：狀態的一次變化。
-- 偵測器：發現變化，並產生事件。
-- 通道：把事件送到處理單元。
-- 處理單元：收到事件才計算。
+- 偵測器：監看狀態，發現變化。
+- 通道：傳遞訊息。
+- 處理單元：執行計算。[[async-circuits-survey]]
 
 ## 流動
 
-- 偵測器發現狀態變化，並產生事件。
+- 偵測器發現變化後，產生事件。
 - 通道把事件送到處理單元。
-- 處理單元計算，並把結果當成新的事件送出。
-- 沒有事件時，整個系統保持閒置。
+- 處理單元收到事件才計算，並把結果當成新事件送出。
+- 沒有事件時，偵測器、通道和處理單元都保持閒置。[[async-circuits-survey]]
 
 ## 約束與取捨
 
-- 系統在閒置時省電，代價是事件到達的時間不固定。
+- 系統在閒置時省電，代價是事件到達的時間不固定。[[async-circuits-survey]]
 - 處理單元不需要共用時鐘，代價是它們要自己協調順序。
-- 系統回應快，代價是它更難驗證。
+- 系統回應快，代價是它更難驗證。[[snn-primer]]
 
 ## 為什麼有效
 
@@ -116,12 +120,12 @@ updated: 2026-01-15
 
 - 事件太密集時，處理事件的成本超過輪詢的成本。
 - 計算需要全域一致的順序時，事件各自到達會造成錯誤。
-- 事件會遺失，又沒有重送機制時，結果會缺漏。
+- 事件會遺失，又沒有重送機制時，結果會缺漏。[[snn-primer]]
 
 ## 已知實例
 
-- [[spiking-neural-network]]（ai/architecture）：叫「脈衝」
-- [[async-handshake]]（hardware/async-circuits）：叫「request/ack」
+- [[spiking-neural-network]] (ai/architecture): 脈衝
+- [[async-handshake]] (hardware/async-circuits): request/ack
 ```
 
 ## Checklist
@@ -133,6 +137,7 @@ updated: 2026-01-15
 - [ ] Are the six sections present, in order, with headings in the output language?
 - [ ] Does Failure conditions hold at least one condition?
 - [ ] Is the text free of industry names, vendor names, and product names?
-- [ ] Does each instance line have a link, a domain, and the local term?
+- [ ] Does each instance line have the exact form `- [[<slug>]] (<domain>): <local term>`?
 - [ ] Did you search `wiki/indexes/_mechanisms.md` for the same mechanism?
-- [ ] Does each claim have a source?
+- [ ] Does every section except Known instances link at least one source page that supports it?
+- [ ] Does Parts give one role per part, and does Flows use the names that Parts uses?

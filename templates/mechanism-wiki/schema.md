@@ -23,9 +23,11 @@ Each type also has a rule file at `schema/page-types/<type>.md`. An agent that c
 - Use kebab-case for Latin-script titles, for example `event-driven-computing.md`.
 - Keep CJK titles as CJK. Do not romanize or translate them.
 - Keep proper nouns and code identifiers in their usual form.
-- Two domains can have a page with the same name. Add the suffix `--<last-domain-segment>` to both file names.
-- Example: the domains `ai` and `cognition` give `attention--ai.md` and `attention--cognition.md`.
-- Put one line at the top of each page that links to the other page.
+- Never rename an existing file. An ingest writes whole files. It cannot rename them.
+- Two domains can have a page with the same name. Add the suffix `--<last-domain-segment>` to the new page only. Keep the old file name.
+- Example: `attention.md` is in the domain `ai`. A new page in the domain `cognition` gets the file name `attention--cognition.md`.
+- Put one line at the top of each of the two pages that links to the other page.
+- Renaming an old page is a job for the `wiki-recut` skill.
 
 ## Frontmatter
 
