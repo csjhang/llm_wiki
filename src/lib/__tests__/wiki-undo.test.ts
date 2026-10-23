@@ -25,7 +25,7 @@ interface Action {
 type RevertResult =
   | { ok: true; sha: string; reverted: string }
   | { ok: false; reason: "conflict"; files: string[] }
-  | { ok: false; reason: "not-action" | "dirty" | "not-a-wiki-project" }
+  | { ok: false; reason: "not-action" | "dirty" | "not-a-wiki-project" | "protected" }
 
 interface UndoModule {
   ACTION_PREFIXES: string[]
@@ -652,6 +652,124 @@ describe("revertAction safety", () => {
   })
 })
 
+describe("revertAction never changes raw/ or .gitignore", () => {
+  it("keeps a raw source that an ingest commit swept in", () => {
+    const repo = makeRepo()
+    commitFiles(repo, "chore: base", { "wiki/log.md": "# Log\n" })
+    const sha = commitFiles(repo, "ingest: a (1 pages)", {
+      "wiki/concepts/a.md": "a\n",
+      "raw/sources/new.pdf": "a source the user added during the ingest\n",
+    })
+
+    expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha)
+
+    expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(false)
+    expect(read(repo, "raw/sources/new.pdf")).toBe("a source the user added during the ingest\n")
+    expect(git(repo, "ls-files", "raw/sources/new.pdf").trim()).toBe("raw/sources/new.pdf")
+    expect(git(repo, "show", "--name-only", "--format=", "HEAD")).not.toContain("raw/")
+    expect(git(repo, "status", "--porcelain")).toBe("")
+  })
+
+  it("does not bring back a raw source that the reverted commit deleted", () => {
+    const repo = makeRepo()
+    commitFiles(repo, "chore: base", { "raw/sources/old.md": "old source\n", "wiki/log.md": "# Log\n" })
+    write(repo, "wiki/concepts/a.md", "a\n")
+    rmSync(join(repo, "raw/sources/old.md"))
+    git(repo, "add", "-A")
+    git(repo, "commit", "--quiet", "--no-verify", "-m", "ingest: a (1 pages)")
+    const sha = git(repo, "rev-parse", "HEAD").trim()
+
+    expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha)
+
+    expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(false)
+    expect(existsSync(join(repo, "raw/sources/old.md"))).toBe(false)
+    expect(git(repo, "status", "--porcelain")).toBe("")
+  })
+
+  it("keeps the current raw/ version when the revert conflicts there", () => {
+    const repo = makeRepo()
+    commitFiles(repo, "chore: base", { "raw/sources/s.md": "one\ntwo\n", "wiki/log.md": "# Log\n" })
+    const shaA = commitFiles(repo, "ingest: a (1 pages)", {
+      "wiki/concepts/a.md": "a\n",
+      "raw/sources/s.md": "one\ntwo by a\n",
+    })
+    commitFiles(repo, "chore: save changes before ingest", { "raw/sources/s.md": "one\ntwo by the user\n" })
+
+    expectUndone(undo.revertAction(repo, shaA, "2026-02-03"), repo, shaA)
+
+    expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(false)
+    expect(read(repo, "raw/sources/s.md")).toBe("one\ntwo by the user\n")
+    expect(git(repo, "status", "--porcelain")).toBe("")
+  })
+
+  it("keeps raw/ in a project folder inside a larger repository", () => {
+    const outer = makeRepo()
+    const project = join(outer, "my-wiki")
+    commitFiles(outer, "chore: base", { "my-wiki/wiki/log.md": "# Log\n", "raw/outer.md": "outer\n" })
+    const sha = commitFiles(outer, "ingest: a (1 pages)", {
+      "my-wiki/wiki/concepts/a.md": "a\n",
+      "my-wiki/raw/sources/new.md": "new source\n",
+    })
+
+    expectUndone(undo.revertAction(project, sha, "2026-02-03"), project, sha)
+
+    expect(existsSync(join(project, "wiki/concepts/a.md"))).toBe(false)
+    expect(read(project, "raw/sources/new.md")).toBe("new source\n")
+    expect(git(outer, "status", "--porcelain")).toBe("")
+  })
+})
+
+describe("revertAction refuses protected commits", () => {
+  it("refuses a commit that changed .llm-wiki/", () => {
+    const repo = makeRepo()
+    commitFiles(repo, "chore: base", { "wiki/log.md": "# Log\n" })
+    const sha = commitFiles(repo, "ingest: a (1 pages)", {
+      "wiki/concepts/a.md": "a\n",
+      ".llm-wiki/cache.json": "{}\n",
+    })
+    const head = git(repo, "rev-parse", "HEAD").trim()
+
+    expect(undo.revertAction(repo, sha, "2026-02-03")).toEqual({ ok: false, reason: "protected" })
+    expect(git(repo, "rev-parse", "HEAD").trim()).toBe(head)
+    expect(git(repo, "status", "--porcelain")).toBe("")
+  })
+
+  it("refuses a commit that changed .gitignore", () => {
+    const repo = makeRepo()
+    commitFiles(repo, "chore: base", { "wiki/log.md": "# Log\n" })
+    const sha = commitFiles(repo, "ingest: a (1 pages)", {
+      "wiki/concepts/a.md": "a\n",
+      ".gitignore": ".llm-wiki/\n",
+    })
+
+    expect(undo.revertAction(repo, sha, "2026-02-03")).toEqual({ ok: false, reason: "protected" })
+  })
+
+  it("refuses a root commit that added .llm-wiki/", () => {
+    const repo = makeRepo()
+    const sha = commitFiles(repo, "ingest: a (1 pages)", {
+      "wiki/concepts/a.md": "a\n",
+      ".llm-wiki/secret": "key\n",
+    })
+
+    expect(undo.revertAction(repo, sha, "2026-02-03")).toEqual({ ok: false, reason: "protected" })
+  })
+
+  it("looks only inside the project folder of a larger repository", () => {
+    const outer = makeRepo()
+    const project = join(outer, "my-wiki")
+    commitFiles(outer, "chore: base", { "my-wiki/wiki/log.md": "# Log\n" })
+    const sha = commitFiles(outer, "ingest: a (1 pages)", {
+      "my-wiki/wiki/concepts/a.md": "a\n",
+      ".gitignore": "node_modules/\n",
+    })
+
+    expectUndone(undo.revertAction(project, sha, "2026-02-03"), project, sha)
+    // The outer .gitignore is not part of the project; it is reverted with the rest.
+    expect(existsSync(join(outer, ".gitignore"))).toBe(false)
+  })
+})
+
 describe("project folder guard", () => {
   it("refuses a folder that has no wiki/ folder", () => {
     const repo = makeRepo()
@@ -686,7 +804,7 @@ describe("SKILL.md", () => {
 
   it("tells the agent how to read exit code 2 and each result", () => {
     expect(skill).toMatch(/exit code 2/i)
-    for (const reason of ["conflict", "dirty", "not-action", "not-a-wiki-project", "error"]) {
+    for (const reason of ["conflict", "dirty", "not-action", "not-a-wiki-project", "protected", "error"]) {
       expect(skill, reason).toContain(`"reason": "${reason}"`)
     }
   })

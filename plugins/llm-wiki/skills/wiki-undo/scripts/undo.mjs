@@ -27,6 +27,11 @@ export const GENERATED_PATHS = ["wiki/index.md", "wiki/log.md", "wiki/overview.m
 const GENERATED_DIR = "wiki/indexes/"
 const LOG_PATH = "wiki/log.md"
 const LLM_WIKI_DIR = ".llm-wiki/"
+/** An undo never changes these. A revert keeps their HEAD version. */
+const KEPT_DIR = "raw/"
+const KEPT_FILE = ".gitignore"
+/** A commit that changed these cannot be undone: a revert could track secrets again. */
+const PROTECTED_PATHS = [".llm-wiki", ".gitignore"]
 
 const FALLBACK_NAME = "LLM Wiki"
 const FALLBACK_EMAIL = "llm-wiki@localhost"
@@ -84,6 +89,48 @@ function hasActionPrefix(subject) {
 
 function isGeneratedPath(path) {
   return GENERATED_PATHS.includes(path) || path.startsWith(GENERATED_DIR)
+}
+
+/** `raw/` holds the sources and `.gitignore` keeps secrets out: an undo keeps both as they are. */
+function isKeptPath(path) {
+  return path.startsWith(KEPT_DIR) || path === KEPT_FILE
+}
+
+/** Whether the commit changed `.llm-wiki/` or `.gitignore` of the project. */
+function touchesProtectedPath(project, sha) {
+  const output = git(project, [
+    "diff-tree",
+    "--root",
+    "--no-commit-id",
+    "-r",
+    "--name-only",
+    sha,
+    "--",
+    ...PROTECTED_PATHS,
+  ])
+  return output.trim() !== ""
+}
+
+/**
+ * Put `raw/` and `.gitignore` back to HEAD after the revert, in the index and
+ * in the work tree. A file the revert removed comes back; a file it added goes away.
+ */
+function keepHeadVersionOfKeptPaths(project) {
+  const changed = git(project, [
+    "diff",
+    "--cached",
+    "--name-only",
+    "--relative",
+    "-z",
+    "HEAD",
+    "--",
+    KEPT_DIR,
+    KEPT_FILE,
+  ])
+    .split("\0")
+    .filter((path) => path !== "")
+  if (changed.length === 0) return
+  git(project, ["--literal-pathspecs", "restore", "--source=HEAD", "--staged", "--worktree", "--", ...changed])
 }
 
 function localDate() {
@@ -225,7 +272,7 @@ function identityArgs(project) {
  * @param {string} projectPath The project folder: the folder that contains `wiki/` and `raw/`.
  * @param {string} sha The commit to undo.
  * @param {string} [today] Date for the log line, `YYYY-MM-DD`. Defaults to the local date.
- * @returns {{ ok: true, sha: string, reverted: string } | { ok: false, reason: "conflict", files: string[] } | { ok: false, reason: "not-action" | "dirty" | "not-a-wiki-project" }}
+ * @returns {{ ok: true, sha: string, reverted: string } | { ok: false, reason: "conflict", files: string[] } | { ok: false, reason: "not-action" | "dirty" | "not-a-wiki-project" | "protected" }}
  *   On success `sha` is the full sha of the new undo commit. `reverted` is the full sha of the commit that was undone.
  */
 export function revertAction(projectPath, sha, today = localDate()) {
@@ -246,6 +293,7 @@ export function revertAction(projectPath, sha, today = localDate()) {
   const subject = git(project, ["log", "-1", "--format=%s", fullSha]).trim()
   const parents = git(project, ["rev-list", "--parents", "-n", "1", fullSha]).trim().split(/\s+/).slice(1)
   if (!hasActionPrefix(subject) || parents.length > 1) return { ok: false, reason: "not-action" }
+  if (touchesProtectedPath(project, fullSha)) return { ok: false, reason: "protected" }
 
   if (isDirty(project, prefix)) return { ok: false, reason: "dirty" }
 
@@ -261,7 +309,7 @@ export function revertAction(projectPath, sha, today = localDate()) {
     for (const path of conflicted) {
       const projectRelative = toProjectPath(path)
       if (projectRelative === path && prefix !== "") continue // outside the project: not generated
-      if (isGeneratedPath(projectRelative)) keepCurrentVersion(project, projectRelative)
+      if (isGeneratedPath(projectRelative) || isKeptPath(projectRelative)) keepCurrentVersion(project, projectRelative)
     }
 
     const remaining = revert.status === 0 ? [] : unmergedPaths(project)
@@ -271,6 +319,8 @@ export function revertAction(projectPath, sha, today = localDate()) {
       return { ok: false, reason: "conflict", files: remaining.map(toProjectPath) }
     }
 
+    // An undo changes only the wiki: sources and .gitignore keep their HEAD version.
+    keepHeadVersionOfKeptPaths(project)
     // Whether the revert touched wiki/log.md or not, start from the HEAD version.
     writeLogWithLine(project, `## [${today}] undo | ${subject}`)
     git(project, ["add", "--", LOG_PATH])
