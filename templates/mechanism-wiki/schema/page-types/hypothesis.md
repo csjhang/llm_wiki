@@ -1,0 +1,157 @@
+# Page type: hypothesis
+
+## Purpose
+
+A hypothesis page records one fusion: one mechanism applied to one target domain. See `docs/glossary.md` for the terms Fusion, Hypothesis page, Relation, Analogy, Stack, and Analogy strength.
+The page says which parts of the mechanism fit the target domain and which parts do not. It lists what to verify.
+The page is a hypothesis. Do not write it as a fact.
+
+## Location
+
+Write the page in `wiki/hypotheses/` of the target wiki. The target wiki is the wiki of the target domain.
+Fusion writes hypothesis pages. Ingest does not.
+Write the page only in the target wiki. Never copy work content into a reading wiki.
+
+## Frontmatter
+
+| Field | Required | Rule |
+|---|---|---|
+| `type` | yes | Write `hypothesis`. |
+| `title` | yes | The hypothesis, in the output language. Quote it if it has a colon. |
+| `mechanism` | yes | The mechanism page. Write the bare slug if the mechanism page is in this wiki. Write `reading:<slug>` if it is in the reading wiki and this wiki is a work wiki. |
+| `from_domain` | yes | The domain that gives the mechanism. Write one path. Copy it from the Known instances section of the mechanism page. |
+| `to_domain` | yes | The domain that receives the mechanism. Write one path from `domains.yaml` of this wiki. |
+| `relation` | yes | `analogy` or `stack`. |
+| `strength` | yes | `surface`, `structural`, or `mathematical`. Follow the lens of `to_domain`. |
+| `status` | yes | `draft`, `testing`, `supported`, or `refuted`. Write `draft` for a new page. |
+| `heptabase_whiteboard` | no | The ID of the whiteboard that the hypothesis came from. Omit the field if there is none. |
+| `tags` | yes | A list of bare words. Write `[]` if you have none. |
+| `related` | yes | A list of bare slugs of pages in this wiki that the hypothesis uses. Write `[]` if you have none. |
+| `sources` | yes | The raw file names behind the pages that you cite, with extensions, for example `["paper.md"]`. |
+| `created` | yes | The date in `YYYY-MM-DD` form, without quotes. |
+| `updated` | yes | The date in `YYYY-MM-DD` form. Set it to today when you change the page. |
+
+## Sections
+
+Write the six sections below as level-2 headings. Keep this order. Do not add, remove, or rename a section.
+Write each heading in the output language. For Traditional Chinese, use the Traditional Chinese heading. For Chinese, use the Simplified Chinese heading. For every other language, use the English heading.
+
+| Key | English | Traditional Chinese | Simplified Chinese |
+|---|---|---|---|
+| `claim` | One-line hypothesis | 一句話假說 | 一句话假说 |
+| `mapping` | Role mapping | 角色對照表 | 角色对照表 |
+| `gaps` | Gaps and impact | 套不上的部分與影響 | 套不上的部分与影响 |
+| `verify` | What to verify | 要驗證的事 | 要验证的事 |
+| `search` | Search keywords | 建議搜尋關鍵字 | 建议搜索关键词 |
+| `related` | Related pages | 相關頁面 | 相关页面 |
+
+## Rules
+
+### Do
+
+- Read the lens of `to_domain` for the strength rules and the evidence rules. The domain entry in `domains.yaml` names the lens.
+- Read the lens of `from_domain` to understand the parts of the mechanism. If `domains.yaml` does not list `from_domain`, read the lenses in the `lenses` field of the mechanism page.
+- Read the Failure conditions section of the mechanism page before you map the parts.
+- Cite a wiki page for every claim. Use a `[[slug]]` link to a page in this wiki.
+- Write a claim that has no wiki page only under "What to verify".
+- Give every row under "What to verify" a "How to refute" cell. The cell says which result would disprove the claim.
+- Set `strength` by the evidence standard in the lens of `to_domain`. Do not claim more than the evidence supports.
+- Write `status: draft` when you create the page. A later fusion update changes it after it reads new evidence.
+- Write only in the target wiki.
+
+### Do not
+
+- Write a `domain` field. A hypothesis page uses `from_domain` and `to_domain`.
+- Link the mechanism page of the reading wiki from a work wiki. In a work wiki, write the mechanism name as plain text.
+- Write a claim without a cited page outside "What to verify".
+- Leave a "How to refute" cell empty.
+- Raise `strength` because two terms look alike.
+- Write the hypothesis as a fact.
+
+### What to write in each section
+
+- One-line hypothesis: Write one sentence. Say which mechanism explains what in the target domain.
+- Role mapping: Write one table. Use these columns: Mechanism part, Target counterpart, Fits?, Reason. Write one row for each part, each flow, and each constraint of the mechanism. One row can cover a short chain of flows. In "Fits?", write "fits", "partly fits", or "does not fit" in the output language. Cite a page of this wiki in "Target counterpart" or "Reason".
+- Gaps and impact: For each row that does not fit or partly fits, write the gap and what it means for the hypothesis.
+- What to verify: Write one table. Use these columns: Claim, Evidence needed, How to refute. Write one row for each claim that has no page.
+- Search keywords: Write 3 to 8 keywords or short phrases. A reader can search the web with them.
+- Related pages: Link the pages of this wiki that the hypothesis uses. In a work wiki, do not link the mechanism page.
+
+## Example
+
+```markdown
+---
+type: hypothesis
+title: 事件驅動計算可以用在庫存補貨
+mechanism: reading:event-driven-computing
+from_domain: hardware/async-circuits
+to_domain: business/inventory
+relation: analogy
+strength: structural
+status: draft
+heptabase_whiteboard: 00000000-0000-4000-8000-000000000001
+tags: [fusion, inventory]
+related: [stock-count-process, restock-policy]
+sources: ["restock-notes.md"]
+created: 2026-01-15
+updated: 2026-01-15
+---
+# 事件驅動計算可以用在庫存補貨
+
+## 一句話假說
+
+事件驅動計算的結構，可以說明為什麼「庫存降到門檻才補貨」比「定期盤點」省工。
+
+## 角色對照表
+
+| 機制的部分 | 目標領域的對應 | 套得上嗎 | 原因 |
+|---|---|---|---|
+| 事件 | 庫存量降到補貨門檻 | 套得上 | [[restock-policy]]把門檻當成補貨的觸發條件。 |
+| 偵測器 | 庫存系統的警示 | 套得上 | [[stock-count-process]]說明系統即時記錄庫存。 |
+| 通道 | 採購通知 | 部分套得上 | 通知要經過人工審核。[[restock-policy]] |
+| 處理單元 | 採購人員 | 部分套得上 | [[restock-policy]]顯示人員同時處理多張訂單。 |
+| 流動：變化、通知、計算 | 庫存下降、通知、下單 | 套得上 | [[restock-policy]]的補貨流程依這個順序進行。 |
+| 約束：閒置時省電，代價是時間不固定 | 不盤點時省工，代價是補貨時間不固定 | 套得上 | [[stock-count-process]]指出定期盤點要耗費人力。 |
+| 約束：不用共用時鐘，代價是要自己協調 | 不用統一盤點日，代價是各品項要自訂門檻 | 部分套得上 | [[restock-policy]]要求每個品項自訂門檻。 |
+| 約束：回應快，代價是更難驗證 | 補貨快，代價是更難稽核 | 套不上 | [[stock-count-process]]顯示系統已保留完整紀錄。 |
+
+## 套不上的部分與影響
+
+- 採購通知要人工審核。所以事件到補貨之間有延遲，這會削弱「回應快」的優勢。[[restock-policy]]
+- 採購人員一次處理多張訂單。所以「一次處理一個事件」只能當近似。[[restock-policy]]
+- 每個品項要自訂門檻。所以管理成本會隨品項數增加。[[restock-policy]]
+- 庫存系統已保留完整紀錄。所以「更難驗證」的代價在這裡不成立。[[stock-count-process]]
+
+## 要驗證的事
+
+| 主張 | 需要什麼證據 | 怎樣算推翻 |
+|---|---|---|
+| 門檻補貨的總人力比定期盤點低 | 兩種做法在同一批品項上的人力紀錄 | 門檻補貨的人力紀錄不低於定期盤點 |
+| 事件密集時，門檻補貨會變得沒有效率 | 缺貨高峰期的補貨紀錄 | 高峰期的補貨效率與平常相同 |
+
+## 建議搜尋關鍵字
+
+- reorder point policy
+- continuous review inventory
+- event-driven replenishment
+
+## 相關頁面
+
+- [[stock-count-process]]
+- [[restock-policy]]
+```
+
+## Checklist
+
+- [ ] Is the page in `wiki/hypotheses/` of the target wiki?
+- [ ] Is there no `domain` field?
+- [ ] Is `mechanism` a bare slug, or `reading:<slug>` in a work wiki?
+- [ ] Do `from_domain` and `to_domain` each hold one domain path?
+- [ ] Are `relation`, `strength`, and `status` values from the allowed lists?
+- [ ] Did you read the lens of `to_domain` and the lens of `from_domain`?
+- [ ] Are the six sections present, in order, with headings in the output language?
+- [ ] Does every claim cite a wiki page, or sit under "What to verify"?
+- [ ] Does every row under "What to verify" have a "How to refute" cell?
+- [ ] Does the table have a row for every part, flow, and constraint of the mechanism?
+- [ ] Does each row that does not fit, or partly fits, have an entry under "Gaps and impact"?
+- [ ] In a work wiki, did you leave the mechanism page of the reading wiki unlinked?

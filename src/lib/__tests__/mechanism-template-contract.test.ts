@@ -13,6 +13,11 @@ import { describe, expect, it } from "vitest"
 import { findLongSentences } from "@/test-helpers/ste-check"
 import { parseDomainsYaml } from "@/lib/wiki-config/domains"
 import { parseHeptabaseYaml } from "@/lib/wiki-config/heptabase-config"
+import {
+  HYPOTHESIS_SECTIONS,
+  MECHANISM_SECTIONS,
+  type SectionHeading,
+} from "@/lib/wiki-config/section-headings"
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url))
 const TEMPLATE_DIR = join(REPO_ROOT, "templates", "mechanism-wiki")
@@ -51,6 +56,15 @@ const PAGE_TYPES: Array<[type: string, directory: string]> = [
   ["hypothesis", "wiki/hypotheses/"],
 ]
 
+/** The seven rule files, one per page type. */
+const RULE_FILES = PAGE_TYPES.map(([type]) => `schema/page-types/${type}.md`)
+
+/** Sections that every rule file has, in this order. */
+const RULE_FILE_SECTIONS = ["Purpose", "Location", "Frontmatter", "Rules", "Example", "Checklist"] as const
+
+/** Only these two rule files have a `## Sections` table, between Frontmatter and Rules. */
+const RULE_FILES_WITH_SECTIONS = ["mechanism", "hypothesis"]
+
 /** Files written for AI agents. Every sentence in them must stay short. */
 const AI_FACING_FILES = [
   "CLAUDE.md",
@@ -58,28 +72,43 @@ const AI_FACING_FILES = [
   "schema.md",
   "docs/glossary.md",
   "schema/writing-rules.md",
+  ...RULE_FILES,
 ]
 
 function readTemplate(relativePath: string): string {
   return readFileSync(join(TEMPLATE_DIR, relativePath), "utf8")
 }
 
-/** Body of a `## <heading>` section, up to the next `## ` heading. Throws when missing. */
-function sectionBody(markdown: string, heading: string): string {
-  const lines = markdown.split(/\r?\n/)
-  const start = lines.findIndex((line) => line.trim() === `## ${heading}`)
-  if (start === -1) throw new Error(`Missing section "## ${heading}"`)
-  const rest = lines.slice(start + 1)
-  const end = rest.findIndex((line) => /^## /.test(line))
-  return (end === -1 ? rest : rest.slice(0, end)).join("\n")
+/** Lines of `markdown` with their fence state. A fence line itself counts as inside a fence. */
+function linesOutsideFences(markdown: string): Array<{ line: string; inFence: boolean }> {
+  let open = false
+  return markdown.split(/\r?\n/).map((line) => {
+    if (/^\s*(```|~~~)/.test(line)) {
+      open = !open
+      return { line, inFence: true }
+    }
+    return { line, inFence: open }
+  })
 }
 
-/** Text of every `## ` heading, in file order. */
+/**
+ * Body of a `## <heading>` section, up to the next `## ` heading. Throws when missing.
+ * A `## ` line inside a fenced code block is not a heading.
+ */
+function sectionBody(markdown: string, heading: string): string {
+  const lines = linesOutsideFences(markdown)
+  const start = lines.findIndex((entry) => !entry.inFence && entry.line.trim() === `## ${heading}`)
+  if (start === -1) throw new Error(`Missing section "## ${heading}"`)
+  const rest = lines.slice(start + 1)
+  const end = rest.findIndex((entry) => !entry.inFence && /^## /.test(entry.line))
+  return (end === -1 ? rest : rest.slice(0, end)).map((entry) => entry.line).join("\n")
+}
+
+/** Text of every `## ` heading outside fenced code blocks, in file order. */
 function secondLevelHeadings(markdown: string): string[] {
-  return markdown
-    .split(/\r?\n/)
-    .filter((line) => /^## /.test(line))
-    .map((line) => line.slice(3).trim())
+  return linesOutsideFences(markdown)
+    .filter((entry) => !entry.inFence && /^## /.test(entry.line))
+    .map((entry) => entry.line.slice(3).trim())
 }
 
 /** First backticked span of each numbered list item. */
@@ -263,6 +292,130 @@ describe("mechanism template: writing rules", () => {
     expect(text).toMatch(/壞.*marks a bad example/)
     expect(text).toMatch(/好.*marks a good example/)
     expect(sectionBody(text, "7. Cite a source for every claim")).toContain("source file")
+  })
+})
+
+/** Cells of every table row in `body`, without the separator row. Backticks are removed. */
+function tableRows(body: string): string[][] {
+  return body
+    .split(/\r?\n/)
+    .filter((line) => line.trim().startsWith("|"))
+    .map((line) => line.split("|").slice(1, -1).map((cell) => cell.replace(/`/g, "").trim()))
+    .filter((cells) => !cells.every((cell) => /^:?-+:?$/.test(cell)))
+}
+
+describe("mechanism template: page-type rule files", () => {
+  it("every page type has a rule file", () => {
+    for (const file of RULE_FILES) {
+      expect(existsSync(join(TEMPLATE_DIR, file)), file).toBe(true)
+    }
+  })
+
+  it("rule files have the required sections", () => {
+    for (const [type] of PAGE_TYPES) {
+      const text = readTemplate(`schema/page-types/${type}.md`)
+      expect(text.split(/\r?\n/)[0], `${type} title`).toBe(`# Page type: ${type}`)
+      const expected: string[] = [...RULE_FILE_SECTIONS]
+      if (RULE_FILES_WITH_SECTIONS.includes(type)) expected.splice(3, 0, "Sections")
+      expect(secondLevelHeadings(text), type).toEqual(expected)
+    }
+  })
+
+  it("rule files name their directory in the Location section", () => {
+    for (const [type, directory] of PAGE_TYPES) {
+      const text = readTemplate(`schema/page-types/${type}.md`)
+      expect(sectionBody(text, "Location"), type).toContain(`\`${directory}\``)
+    }
+  })
+
+  it("every Frontmatter table has the columns Field, Required, and Rule and lists the app fields", () => {
+    for (const [type] of PAGE_TYPES) {
+      const rows = tableRows(sectionBody(readTemplate(`schema/page-types/${type}.md`), "Frontmatter"))
+      expect(rows[0], type).toEqual(["Field", "Required", "Rule"])
+      const fields = rows.slice(1).map((row) => row[0])
+      for (const field of ["type", "title", "tags", "related", "sources", "created", "updated"]) {
+        expect(fields, `${type} field ${field}`).toContain(field)
+      }
+    }
+  })
+
+  it("Frontmatter fields follow schema.md for each page type", () => {
+    const fieldsOf = (type: string): string[] =>
+      tableRows(sectionBody(readTemplate(`schema/page-types/${type}.md`), "Frontmatter"))
+        .slice(1)
+        .map((row) => row[0])
+    for (const type of ["source", "entity", "concept", "comparison", "query"]) {
+      expect(fieldsOf(type), type).toContain("domain")
+      expect(fieldsOf(type), type).toContain("also")
+    }
+    expect(fieldsOf("source")).toContain("source_kind")
+    for (const type of ["mechanism", "hypothesis"]) {
+      expect(fieldsOf(type), type).not.toContain("domain")
+    }
+    expect(fieldsOf("mechanism")).toEqual(expect.arrayContaining(["lenses", "instances"]))
+    expect(fieldsOf("hypothesis")).toEqual(
+      expect.arrayContaining([
+        "mechanism",
+        "from_domain",
+        "to_domain",
+        "relation",
+        "strength",
+        "status",
+        "heptabase_whiteboard",
+      ]),
+    )
+  })
+
+  it("mechanism and hypothesis sections match the code", () => {
+    const cases: Array<[file: string, expected: readonly SectionHeading[]]> = [
+      ["schema/page-types/mechanism.md", MECHANISM_SECTIONS],
+      ["schema/page-types/hypothesis.md", HYPOTHESIS_SECTIONS],
+    ]
+    for (const [file, expected] of cases) {
+      const rows = tableRows(sectionBody(readTemplate(file), "Sections"))
+      expect(rows[0], file).toEqual(["Key", "English", "Traditional Chinese", "Simplified Chinese"])
+      expect(rows.slice(1), file).toEqual(expected.map((s) => [s.key, s.en, s.zhHant, s.zhHans]))
+    }
+  })
+
+  it("examples use the defined headings", () => {
+    const cases: Array<[file: string, sections: readonly SectionHeading[]]> = [
+      ["schema/page-types/mechanism.md", MECHANISM_SECTIONS],
+      ["schema/page-types/hypothesis.md", HYPOTHESIS_SECTIONS],
+    ]
+    for (const [file, sections] of cases) {
+      const example = sectionBody(readTemplate(file), "Example")
+      const headings = example.split(/\r?\n/).filter((line) => /^## /.test(line)).map((line) => line.trim())
+      for (const section of sections) {
+        expect(headings, `${file} ${section.key}`).toContain(`## ${section.zhHant}`)
+      }
+    }
+  })
+
+  it("every Example block is one fenced Traditional Chinese page with frontmatter", () => {
+    for (const [type] of PAGE_TYPES) {
+      const example = sectionBody(readTemplate(`schema/page-types/${type}.md`), "Example")
+      const fence = example.match(/^(```|~~~)/m)
+      expect(fence, `${type} example fence`).not.toBeNull()
+      expect(example, `${type} example frontmatter`).toMatch(new RegExp(`^type: ${type}$`, "m"))
+      expect(example, `${type} example language`).toMatch(/[\u4e00-\u9fff]/)
+    }
+  })
+
+  it("rule files do not use an example UUID outside the placeholder form", () => {
+    for (const file of RULE_FILES) {
+      const ids = readTemplate(file).match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g) ?? []
+      for (const id of ids) expect(id, file).toMatch(/^00000000-0000-4000-8000-0000000000\d\d$/)
+    }
+  })
+
+  it("mechanism.md and hypothesis.md settle the cross-wiki rules", () => {
+    const mechanism = readTemplate("schema/page-types/mechanism.md")
+    expect(mechanism).toMatch(/Only a reading wiki writes mechanism pages/)
+    const hypothesis = readTemplate("schema/page-types/hypothesis.md")
+    expect(hypothesis).toContain("reading:<slug>")
+    expect(hypothesis).toMatch(/lens of `to_domain`/)
+    expect(hypothesis).toMatch(/lens of `from_domain`/)
   })
 })
 
