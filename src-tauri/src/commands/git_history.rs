@@ -41,6 +41,8 @@ const GIT_FALLBACK_PATHS: [&str; 3] = [
 pub struct GitInfo {
     pub available: bool,
     pub is_repo: bool,
+    /// The project folder is the top of its repository (not nested in a bigger one).
+    pub is_root: bool,
 }
 
 struct GitOutput {
@@ -162,6 +164,7 @@ fn git_info_inner(project_path: &str) -> GitInfo {
         return GitInfo {
             available: false,
             is_repo: false,
+            is_root: false,
         };
     }
     let is_repo = run_git(project_path, &["rev-parse", "--is-inside-work-tree"])
@@ -170,6 +173,29 @@ fn git_info_inner(project_path: &str) -> GitInfo {
     GitInfo {
         available: true,
         is_repo,
+        is_root: is_repo && is_repo_root(project_path),
+    }
+}
+
+/// Whether the work tree's top-level folder is the project folder itself.
+/// Both sides are canonicalised so symlinks and `\\?\` prefixes compare equal.
+fn is_repo_root(project_path: &str) -> bool {
+    let Ok(output) = run_git(project_path, &["rev-parse", "--show-toplevel"]) else {
+        return false;
+    };
+    if !output.success {
+        return false;
+    }
+    let top_level = output.stdout.trim();
+    if top_level.is_empty() {
+        return false;
+    }
+    match (
+        fs::canonicalize(top_level),
+        fs::canonicalize(project_path),
+    ) {
+        (Ok(top), Ok(project)) => top == project,
+        _ => false,
     }
 }
 
@@ -435,6 +461,7 @@ pub async fn git_info(project_path: String) -> GitInfo {
         .unwrap_or(GitInfo {
             available: false,
             is_repo: false,
+            is_root: false,
         })
 }
 
@@ -519,6 +546,7 @@ mod tests {
         let info = git_info_inner(&path_str(&dir));
         assert!(info.available);
         assert!(!info.is_repo);
+        assert!(!info.is_root);
     }
 
     #[test]
@@ -528,6 +556,28 @@ mod tests {
         let info = git_info_inner(&path_str(&dir));
         assert!(info.available);
         assert!(info.is_repo);
+        assert!(info.is_root);
+    }
+
+    #[test]
+    fn info_reports_a_project_nested_in_another_repo_as_not_root() {
+        let root = temp_dir();
+        init_repo_with_identity(&root);
+        let project = root.join("wiki-p");
+        fs::create_dir_all(&project).unwrap();
+        let info = git_info_inner(&path_str(&project));
+        assert!(info.available);
+        assert!(info.is_repo);
+        assert!(!info.is_root);
+    }
+
+    #[test]
+    fn info_serializes_is_root_as_camel_case() {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        let json = serde_json::to_value(git_info_inner(&path_str(&dir))).unwrap();
+        assert_eq!(json["isRoot"], serde_json::Value::Bool(true));
+        assert_eq!(json["isRepo"], serde_json::Value::Bool(true));
     }
 
     #[test]

@@ -9,7 +9,7 @@ const STORE_NAME = "app-state.json"
 const RECENT_PROJECTS_KEY = "recentProjects"
 const LAST_PROJECT_KEY = "lastProject"
 
-async function getStore() {
+export async function getStore() {
   return load(STORE_NAME, { autoSave: true, defaults: {} })
 }
 

@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs"
 import { describe, expect, it } from "vitest"
 import { buildActionCommitMessage, titleFromSourcePath } from "./commit-message"
 
@@ -70,6 +71,15 @@ describe("buildActionCommitMessage", () => {
     expect(message).toBe("ingest: T (1 pages)\n\n- wiki/sources/a.md")
   })
 
+  it("uses untitled when the title is empty or only whitespace", () => {
+    expect(buildActionCommitMessage("ingest", "", ["wiki/a.md"]).split("\n")[0]).toBe(
+      "ingest: untitled (1 pages)",
+    )
+    expect(buildActionCommitMessage("lint", " \n\t ", []).split("\n")[0]).toBe(
+      "lint: untitled (0 pages)",
+    )
+  })
+
   it("omits the body when there are no files", () => {
     expect(buildActionCommitMessage("lint", "Fixes", [])).toBe("lint: Fixes (0 pages)")
   })
@@ -90,7 +100,22 @@ describe("titleFromSourcePath", () => {
     expect(titleFromSourcePath("raw\\sources\\report.v2.pdf")).toBe("report.v2")
   })
 
+  it("returns untitled when the path has no file name", () => {
+    expect(titleFromSourcePath("")).toBe("untitled")
+    expect(titleFromSourcePath("raw/sources/")).toBe("untitled")
+    expect(titleFromSourcePath("raw\\sources\\")).toBe("untitled")
+  })
+
   it("keeps a name with no extension", () => {
     expect(titleFromSourcePath("raw/sources/README")).toBe("README")
+  })
+})
+
+describe("commit-message.ts purity", () => {
+  it("has no import lines, so the bundled wiki-tool can reuse it", () => {
+    const source = readFileSync(new URL("./commit-message.ts", import.meta.url), "utf8")
+    expect(source).not.toMatch(/^\s*import[\s{*"']/m)
+    expect(source).not.toMatch(/\brequire\s*\(/)
+    expect(source).not.toMatch(/\bimport\s*\(/)
   })
 })

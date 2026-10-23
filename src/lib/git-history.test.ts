@@ -15,7 +15,7 @@ const fakeStore = {
   }),
   save: vi.fn(async () => {}),
 }
-vi.mock("@tauri-apps/plugin-store", () => ({ load: vi.fn(async () => fakeStore) }))
+vi.mock("@/lib/project-store", () => ({ getStore: vi.fn(async () => fakeStore) }))
 vi.mock("@tauri-apps/plugin-dialog", () => ({ ask: vi.fn() }))
 
 import { ask } from "@tauri-apps/plugin-dialog"
@@ -89,7 +89,7 @@ describe("re-exports", () => {
 
 describe("resolveGitHistory", () => {
   it("git unavailable resolves to off", async () => {
-    vi.mocked(gitInfo).mockResolvedValue({ available: false, isRepo: false })
+    vi.mocked(gitInfo).mockResolvedValue({ available: false, isRepo: false, isRoot: false })
     const deps = makeDeps("ask")
     await expect(resolveGitHistory("p1", "/wiki", deps)).resolves.toBe(false)
     expect(deps.saveMode).not.toHaveBeenCalled()
@@ -97,8 +97,8 @@ describe("resolveGitHistory", () => {
     expect(gitInit).not.toHaveBeenCalled()
   })
 
-  it("ask mode in an existing repo saves on", async () => {
-    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true })
+  it("ask mode at the root of an existing repo saves on silently", async () => {
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: true })
     const deps = makeDeps("ask")
     await expect(resolveGitHistory("p1", "/wiki", deps)).resolves.toBe(true)
     expect(deps.askUser).not.toHaveBeenCalled()
@@ -106,8 +106,40 @@ describe("resolveGitHistory", () => {
     expect(deps.saveMode).toHaveBeenCalledWith("p1", "on")
   })
 
+  it("ask mode in a repo nested in a bigger one asks the same question", async () => {
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: false })
+    const deps = makeDeps("ask", true)
+    await resolveGitHistory("p1", "/big/wiki", deps)
+    expect(deps.askUser).toHaveBeenCalledTimes(1)
+    expect(deps.askUser).toHaveBeenCalledWith(ASK_MESSAGE)
+  })
+
+  it("ask mode yes in a nested repo uses the enclosing repo without gitInit", async () => {
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: false })
+    const deps = makeDeps("ask", true)
+    await expect(resolveGitHistory("p1", "/big/wiki", deps)).resolves.toBe(true)
+    expect(gitInit).not.toHaveBeenCalled()
+    expect(deps.saveMode).toHaveBeenCalledWith("p1", "on")
+  })
+
+  it("ask mode no in a nested repo saves off", async () => {
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: false })
+    const deps = makeDeps("ask", false)
+    await expect(resolveGitHistory("p1", "/big/wiki", deps)).resolves.toBe(false)
+    expect(gitInit).not.toHaveBeenCalled()
+    expect(deps.saveMode).toHaveBeenCalledWith("p1", "off")
+  })
+
+  it("on mode in a nested repo returns true without gitInit", async () => {
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: false })
+    const deps = makeDeps("on")
+    await expect(resolveGitHistory("p1", "/big/wiki", deps)).resolves.toBe(true)
+    expect(gitInit).not.toHaveBeenCalled()
+    expect(deps.askUser).not.toHaveBeenCalled()
+  })
+
   it("ask mode yes initializes", async () => {
-    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: false })
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: false, isRoot: false })
     vi.mocked(gitInit).mockResolvedValue()
     const deps = makeDeps("ask", true)
     await expect(resolveGitHistory("p1", "/wiki", deps)).resolves.toBe(true)
@@ -117,7 +149,7 @@ describe("resolveGitHistory", () => {
   })
 
   it("ask mode no saves off", async () => {
-    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: false })
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: false, isRoot: false })
     const deps = makeDeps("ask", false)
     await expect(resolveGitHistory("p1", "/wiki", deps)).resolves.toBe(false)
     expect(gitInit).not.toHaveBeenCalled()
@@ -125,7 +157,7 @@ describe("resolveGitHistory", () => {
   })
 
   it("on mode in an existing repo returns true without asking", async () => {
-    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true })
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: true })
     const deps = makeDeps("on")
     await expect(resolveGitHistory("p1", "/wiki", deps)).resolves.toBe(true)
     expect(gitInit).not.toHaveBeenCalled()
@@ -134,7 +166,7 @@ describe("resolveGitHistory", () => {
   })
 
   it("on mode re-initializes a missing repo", async () => {
-    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: false })
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: false, isRoot: false })
     vi.mocked(gitInit).mockResolvedValue()
     const deps = makeDeps("on")
     await expect(resolveGitHistory("p1", "/wiki", deps)).resolves.toBe(true)
@@ -143,7 +175,7 @@ describe("resolveGitHistory", () => {
   })
 
   it("off mode returns false without asking or initializing", async () => {
-    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true })
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: true })
     const deps = makeDeps("off")
     await expect(resolveGitHistory("p1", "/wiki", deps)).resolves.toBe(false)
     expect(gitInit).not.toHaveBeenCalled()
@@ -152,7 +184,7 @@ describe("resolveGitHistory", () => {
   })
 
   it("caches per project", async () => {
-    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true })
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: true })
     const deps = makeDeps("on")
     await resolveGitHistory("p1", "/wiki", deps)
     await resolveGitHistory("p1", "/wiki", deps)
@@ -164,7 +196,7 @@ describe("resolveGitHistory", () => {
   })
 
   it("asks only once when two ingests resolve at the same time", async () => {
-    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: false })
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: false, isRoot: false })
     vi.mocked(gitInit).mockResolvedValue()
     const deps = makeDeps("ask", true)
     const [a, b] = await Promise.all([
@@ -176,8 +208,21 @@ describe("resolveGitHistory", () => {
     expect(gitInit).toHaveBeenCalledTimes(1)
   })
 
+  it("resetGitHistoryCache(projectId) forgets only that project", async () => {
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: true })
+    const deps = makeDeps("on")
+    await resolveGitHistory("p1", "/wiki", deps)
+    await resolveGitHistory("p2", "/other", deps)
+    expect(gitInfo).toHaveBeenCalledTimes(2)
+
+    resetGitHistoryCache("p1")
+    await resolveGitHistory("p1", "/wiki", deps)
+    await resolveGitHistory("p2", "/other", deps)
+    expect(gitInfo).toHaveBeenCalledTimes(3)
+  })
+
   it("resetGitHistoryCache forgets cached results", async () => {
-    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true })
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: true })
     const deps = makeDeps("on")
     await resolveGitHistory("p1", "/wiki", deps)
     resetGitHistoryCache()
@@ -187,7 +232,7 @@ describe("resolveGitHistory", () => {
 
   it("resolves to off, warns, and does not cache when git fails", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
-    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: false })
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: false, isRoot: false })
     vi.mocked(gitInit).mockRejectedValueOnce(new Error("boom")).mockResolvedValue()
     const deps = makeDeps("ask", true)
 

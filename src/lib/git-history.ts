@@ -1,6 +1,6 @@
-import { load } from "@tauri-apps/plugin-store"
 import { ask } from "@tauri-apps/plugin-dialog"
 import { gitCommitAll, gitInfo, gitInit, gitRestoreDir } from "@/commands/git"
+import { getStore } from "@/lib/project-store"
 import { buildActionCommitMessage } from "./commit-message"
 
 export { buildActionCommitMessage, titleFromSourcePath } from "./commit-message"
@@ -14,9 +14,6 @@ export interface GitHistoryDeps {
   askUser(message: string): Promise<boolean>
 }
 
-// Same store file as project-store.ts (`app-state.json`); it is opened here so
-// this feature does not need an edit in that upstream file.
-const STORE_NAME = "app-state.json"
 const MODE_KEY_PREFIX = "gitHistoryMode:"
 
 const ASK_MESSAGE =
@@ -29,12 +26,12 @@ function modeKey(projectId: string): string {
 
 export const defaultGitHistoryDeps: GitHistoryDeps = {
   async loadMode(projectId) {
-    const store = await load(STORE_NAME, { autoSave: true, defaults: {} })
+    const store = await getStore()
     const saved = await store.get<string>(modeKey(projectId))
     return saved === "on" || saved === "off" ? saved : "ask"
   },
   async saveMode(projectId, mode) {
-    const store = await load(STORE_NAME, { autoSave: true, defaults: {} })
+    const store = await getStore()
     await store.set(modeKey(projectId), mode)
     await store.save()
   },
@@ -47,9 +44,10 @@ export const defaultGitHistoryDeps: GitHistoryDeps = {
 // boolean, so two ingests starting together share one prompt.
 const resolved = new Map<string, Promise<boolean>>()
 
-/** Forget every cached answer. For tests. */
-export function resetGitHistoryCache(): void {
-  resolved.clear()
+/** Forget the cached answer for one project, or for every project when no id is given. */
+export function resetGitHistoryCache(projectId?: string): void {
+  if (projectId === undefined) resolved.clear()
+  else resolved.delete(projectId)
 }
 
 async function decide(
@@ -68,12 +66,14 @@ async function decide(
   }
 
   // mode === "ask"
-  if (info.isRepo) {
+  if (info.isRepo && info.isRoot) {
     await deps.saveMode(projectId, "on")
     return true
   }
   if (await deps.askUser(ASK_MESSAGE)) {
-    await gitInit(projectPath)
+    // A project nested in a bigger repo uses that repo: commits stay limited to
+    // the project folder, so no new repository is created here.
+    if (!info.isRepo) await gitInit(projectPath)
     await deps.saveMode(projectId, "on")
     return true
   }

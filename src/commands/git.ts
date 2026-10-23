@@ -3,9 +3,11 @@ import { invoke } from "@tauri-apps/api/core"
 export interface GitInfo {
   available: boolean
   isRepo: boolean
+  /** The project folder is the top of its repository, not nested in a bigger one. */
+  isRoot: boolean
 }
 
-/** Whether git is runnable and whether `projectPath` is inside a work tree. */
+/** Whether git is runnable, whether `projectPath` is inside a work tree, and whether it is that work tree's root. */
 export async function gitInfo(projectPath: string): Promise<GitInfo> {
   return invoke<GitInfo>("git_info", { projectPath })
 }

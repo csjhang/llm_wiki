@@ -6,6 +6,7 @@ export type CommitPrefix = "ingest" | "fuse" | "recut" | "lint"
 
 const MAX_SUBJECT_LENGTH = 72
 const ELLIPSIS = "…"
+const UNTITLED = "untitled"
 
 function isHighSurrogate(code: number): boolean {
   return code >= 0xd800 && code <= 0xdbff
@@ -23,7 +24,7 @@ export function buildActionCommitMessage(
 ): string {
   const head = `${prefix}: `
   const tail = ` (${files.length} pages)`
-  const collapsed = title.replace(/\s+/g, " ").trim()
+  const collapsed = title.replace(/\s+/g, " ").trim() || UNTITLED
 
   const room = MAX_SUBJECT_LENGTH - head.length - tail.length
   let shownTitle = collapsed
@@ -40,9 +41,10 @@ export function buildActionCommitMessage(
   return `${subject}\n\n${body}`
 }
 
-/** File name without its last extension (`raw/sources/a.md` becomes `a`). */
+/** File name without its last extension (`raw/sources/a.md` becomes `a`); `untitled` when there is no file name. */
 export function titleFromSourcePath(sourcePath: string): string {
   const name = sourcePath.replace(/\\/g, "/").split("/").pop() ?? sourcePath
   const lastDot = name.lastIndexOf(".")
-  return lastDot > 0 ? name.slice(0, lastDot) : name
+  const stem = lastDot > 0 ? name.slice(0, lastDot) : name
+  return stem || UNTITLED
 }
