@@ -1,11 +1,12 @@
 //! Git-backed version history for wiki projects.
 //!
-//! Every successful ingest becomes one commit in the project folder, and a
-//! failed or cancelled ingest restores `wiki/` to the last commit. These
-//! commands shell out to the user's `git`; none of them ever writes to the
-//! user's git config.
+//! Every successful ingest becomes one commit that holds only the paths that
+//! ingest wrote, and a failed or cancelled ingest restores only those paths to
+//! the last commit. These commands shell out to the user's `git`; none of them
+//! ever writes to the user's git config.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
@@ -23,9 +24,12 @@ const REQUIRED_GITIGNORE_LINES: [&str; 3] = [
     "agent-workspace/",
 ];
 const LLM_WIKI_IGNORE_LINE: &str = ".llm-wiki/";
-/// Top-level folders `git_restore_dir` refuses: sources and secrets/caches.
-const PROTECTED_TOP_LEVEL_DIRS: [&str; 2] = ["raw", ".llm-wiki"];
+/// Top-level folders `git_commit_paths` refuses: secrets/caches and git itself.
+const NEVER_COMMITTED_TOP_LEVEL_DIRS: [&str; 2] = [".llm-wiki", ".git"];
+/// The only top-level folder `git_restore_paths` touches.
+const RESTORABLE_TOP_LEVEL_DIR: &str = "wiki";
 const INIT_COMMIT_MESSAGE: &str = "chore: start version history";
+const UNTRACK_LLM_WIKI_MESSAGE: &str = "chore: stop tracking .llm-wiki";
 const FALLBACK_NAME: &str = "LLM Wiki";
 const FALLBACK_EMAIL: &str = "llm-wiki@localhost";
 /// Candidates tried after `git` on PATH: desktop apps often do not inherit the
@@ -43,6 +47,20 @@ pub struct GitInfo {
     pub is_repo: bool,
     /// The project folder is the top of its repository (not nested in a bigger one).
     pub is_root: bool,
+    /// The top folder of the repository the project is in, as git prints it.
+    /// `None` outside a repository.
+    pub top_level: Option<String>,
+}
+
+impl GitInfo {
+    fn unavailable() -> Self {
+        GitInfo {
+            available: false,
+            is_repo: false,
+            is_root: false,
+            top_level: None,
+        }
+    }
 }
 
 struct GitOutput {
@@ -112,12 +130,14 @@ fn resolve_git() -> Option<PathBuf> {
     Some(found)
 }
 
-/// Run `git -C <project_path> <args...>` with extra environment variables.
-/// `LC_ALL=C` keeps git's messages stable so they can be matched.
-fn run_git_with_env(
+/// Run `git -C <project_path> <args...>` with extra environment variables and,
+/// when given, `input` on stdin. `LC_ALL=C` keeps git's messages stable so they
+/// can be matched.
+fn run_git_with_input(
     project_path: &str,
     args: &[&str],
     envs: &[(&str, &str)],
+    input: Option<&[u8]>,
 ) -> Result<GitOutput, String> {
     let git = resolve_git().ok_or_else(|| "git is not installed or not runnable".to_string())?;
     let mut cmd = Command::new(git);
@@ -126,12 +146,28 @@ fn run_git_with_env(
         .arg(project_path)
         .args(args)
         .env("LC_ALL", "C")
-        .stdin(Stdio::null());
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(if input.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
     for (key, value) in envs {
         cmd.env(key, value);
     }
-    let output = cmd
-        .output()
+    let mut child = cmd
+        .spawn()
+        .map_err(|error| format!("Failed to run git: {error}"))?;
+    if let Some(bytes) = input {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(bytes)
+                .map_err(|error| format!("Failed to write to git: {error}"))?;
+        }
+    }
+    let output = child
+        .wait_with_output()
         .map_err(|error| format!("Failed to run git: {error}"))?;
     Ok(GitOutput {
         success: output.status.success(),
@@ -139,6 +175,14 @@ fn run_git_with_env(
         stdout: String::from_utf8_lossy(&output.stdout).to_string(),
         stderr: String::from_utf8_lossy(&output.stderr).to_string(),
     })
+}
+
+fn run_git_with_env(
+    project_path: &str,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<GitOutput, String> {
+    run_git_with_input(project_path, args, envs, None)
 }
 
 fn run_git(project_path: &str, args: &[&str]) -> Result<GitOutput, String> {
@@ -159,42 +203,70 @@ fn run_git_ok(
     }
 }
 
+/// Run `git <prefix...> -- <paths...>` and fail like `run_git_ok`.
+fn run_git_paths_ok(
+    project_path: &str,
+    prefix: &[&str],
+    paths: &[String],
+    envs: &[(&str, &str)],
+) -> Result<GitOutput, String> {
+    let mut args: Vec<&str> = prefix.to_vec();
+    args.push("--");
+    args.extend(paths.iter().map(String::as_str));
+    run_git_ok(project_path, &args, envs)
+}
+
+/// Split NUL-separated git output (`-z`) into its entries.
+fn nul_entries(output: &str) -> Vec<String> {
+    output
+        .split('\0')
+        .filter(|entry| !entry.is_empty())
+        .map(String::from)
+        .collect()
+}
+
 fn git_info_inner(project_path: &str) -> GitInfo {
     if resolve_git().is_none() {
-        return GitInfo {
-            available: false,
-            is_repo: false,
-            is_root: false,
-        };
+        return GitInfo::unavailable();
     }
     let is_repo = run_git(project_path, &["rev-parse", "--is-inside-work-tree"])
         .map(|output| output.success && output.stdout.trim() == "true")
         .unwrap_or(false);
+    let top_level = if is_repo {
+        show_top_level(project_path)
+    } else {
+        None
+    };
+    let is_root = match &top_level {
+        Some(top) => same_folder(top, project_path),
+        None => false,
+    };
     GitInfo {
         available: true,
         is_repo,
-        is_root: is_repo && is_repo_root(project_path),
+        is_root,
+        top_level,
     }
 }
 
-/// Whether the work tree's top-level folder is the project folder itself.
-/// Both sides are canonicalised so symlinks and `\\?\` prefixes compare equal.
-fn is_repo_root(project_path: &str) -> bool {
-    let Ok(output) = run_git(project_path, &["rev-parse", "--show-toplevel"]) else {
-        return false;
-    };
+/// The work tree's top-level folder as `git rev-parse --show-toplevel` prints it.
+fn show_top_level(project_path: &str) -> Option<String> {
+    let output = run_git(project_path, &["rev-parse", "--show-toplevel"]).ok()?;
     if !output.success {
-        return false;
+        return None;
     }
     let top_level = output.stdout.trim();
     if top_level.is_empty() {
-        return false;
+        None
+    } else {
+        Some(top_level.to_string())
     }
-    match (
-        fs::canonicalize(top_level),
-        fs::canonicalize(project_path),
-    ) {
-        (Ok(top), Ok(project)) => top == project,
+}
+
+/// Both sides are canonicalised so symlinks and `\\?\` prefixes compare equal.
+fn same_folder(a: &str, b: &str) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
         _ => false,
     }
 }
@@ -263,71 +335,28 @@ fn ensure_llm_wiki_ignored(project_path: &str, envs: &[(&str, &str)]) -> Result<
     }
 }
 
-/// Ignoring `.llm-wiki/` does not untrack files an older commit already
-/// recorded, and a path-limited `commit -- .` takes such a file's current
-/// content from disk, so it would keep committing the secret. Drop the files
-/// from the index (they stay on disk). Returns true when `.llm-wiki` is in the
-/// index or in HEAD, i.e. when this commit has to carry its removal.
-fn untrack_llm_wiki(project_path: &str, envs: &[(&str, &str)]) -> Result<bool, String> {
-    let in_index = !run_git_ok(project_path, &["ls-files", "--", ".llm-wiki"], envs)?
-        .stdout
-        .trim()
-        .is_empty();
-    let has_head =
-        run_git_with_env(project_path, &["rev-parse", "--verify", "-q", "HEAD"], envs)?.success;
-    let in_head = has_head
-        && !run_git_ok(
-            project_path,
-            &["ls-tree", "-r", "--name-only", "HEAD", "--", ".llm-wiki"],
-            envs,
-        )?
-        .stdout
-        .trim()
-        .is_empty();
-    if !in_index && !in_head {
-        return Ok(false);
-    }
-    // The removal is committed without a pathspec (see `git_commit_all_with_env`),
-    // which takes the whole index: refuse rather than sweep in staged changes
-    // that belong to the repository outside this project folder.
-    let outside_args = ["diff", "--cached", "--quiet", "--", ":(top)", ":(exclude)."];
-    let outside = run_git_with_env(project_path, &outside_args, envs)?;
-    match outside.code {
-        Some(0) => {}
-        Some(1) => return Err(
-            "Cannot stop tracking .llm-wiki/ while changes outside this project folder are staged"
-                .to_string(),
-        ),
-        _ => return Err(outside.failure_message(&outside_args)),
-    }
-    if in_index {
-        run_git_ok(
-            project_path,
-            &["rm", "-r", "--cached", "-q", "--", ".llm-wiki"],
-            envs,
-        )?;
-    }
-    Ok(true)
+fn has_head(project_path: &str, envs: &[(&str, &str)]) -> Result<bool, String> {
+    Ok(run_git_with_env(project_path, &["rev-parse", "--verify", "-q", "HEAD"], envs)?.success)
 }
 
-fn git_commit_all_with_env(
+fn head_sha(project_path: &str, envs: &[(&str, &str)]) -> Result<String, String> {
+    Ok(run_git_ok(project_path, &["rev-parse", "HEAD"], envs)?
+        .stdout
+        .trim()
+        .to_string())
+}
+
+/// Commit with the flags every app-made commit uses: no hooks, no signing,
+/// and the fallback identity for whatever part the user has not configured.
+/// `global` goes before `commit` (for example `--literal-pathspecs`); a
+/// non-empty `paths` makes the commit path-limited. Returns the new HEAD.
+fn commit_as_app(
     project_path: &str,
     message: &str,
+    global: &[&str],
+    paths: &[String],
     envs: &[(&str, &str)],
-) -> Result<Option<String>, String> {
-    ensure_llm_wiki_ignored(project_path, envs)?;
-    let carries_llm_wiki_removal = untrack_llm_wiki(project_path, envs)?;
-    run_git_ok(project_path, &["add", "-A", "--", "."], envs)?;
-
-    let diff_args = ["diff", "--cached", "--quiet", "--", "."];
-    let diff = run_git_with_env(project_path, &diff_args, envs)?;
-    match diff.code {
-        Some(0) => return Ok(None),
-        Some(1) => {}
-        _ => return Err(diff.failure_message(&diff_args)),
-    }
-
-    // Use the fallback identity only for the parts the user has not configured.
+) -> Result<String, String> {
     // Signing and hooks are the user's own commit habits; an automated history
     // commit must not depend on a gpg agent or on a hook that may refuse it.
     let mut args: Vec<String> = vec!["-c".to_string(), "commit.gpgsign=false".to_string()];
@@ -339,16 +368,117 @@ fn git_commit_all_with_env(
         args.push("-c".to_string());
         args.push(format!("user.email={FALLBACK_EMAIL}"));
     }
-    args.extend(["commit", "--no-verify", "-m", message].map(String::from));
-    if !carries_llm_wiki_removal {
-        // Path-limited: keeps staged changes outside a nested project folder out.
-        args.extend(["--", "."].map(String::from));
+    args.extend(global.iter().map(|arg| arg.to_string()));
+    args.extend(["commit", "--no-verify", "--quiet", "-m", message].map(String::from));
+    if !paths.is_empty() {
+        args.push("--".to_string());
+        args.extend(paths.iter().cloned());
     }
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     run_git_ok(project_path, &arg_refs, envs)?;
+    head_sha(project_path, envs)
+}
 
-    let head = run_git_ok(project_path, &["rev-parse", "HEAD"], envs)?;
-    Ok(Some(head.stdout.trim().to_string()))
+/// Ignoring `.llm-wiki/` does not untrack files an older commit recorded, and
+/// a path-limited commit takes such a file's current content from disk, so it
+/// would keep committing the secret. When HEAD has `.llm-wiki` files, record
+/// their removal as its own `chore: stop tracking .llm-wiki` commit, built in a
+/// temporary index from HEAD so it holds nothing else: no staged change of the
+/// user and nothing outside a nested project folder. Then drop the files from
+/// the real index (they stay on disk). Returns true when it made that commit.
+fn untrack_llm_wiki(project_path: &str, envs: &[(&str, &str)]) -> Result<bool, String> {
+    let in_index = !run_git_ok(project_path, &["ls-files", "--", ".llm-wiki"], envs)?
+        .stdout
+        .trim()
+        .is_empty();
+    let in_head = has_head(project_path, envs)?
+        && !run_git_ok(
+            project_path,
+            &["ls-tree", "-r", "--name-only", "HEAD", "--", ".llm-wiki"],
+            envs,
+        )?
+        .stdout
+        .trim()
+        .is_empty();
+
+    if in_head {
+        let git_dir = run_git_ok(project_path, &["rev-parse", "--absolute-git-dir"], envs)?
+            .stdout
+            .trim()
+            .to_string();
+        let temp_index =
+            Path::new(&git_dir).join(format!("llm-wiki-untrack-{}.index", std::process::id()));
+        let temp_index_str = temp_index.to_string_lossy().to_string();
+        let mut temp_envs: Vec<(&str, &str)> = envs.to_vec();
+        temp_envs.push(("GIT_INDEX_FILE", temp_index_str.as_str()));
+        let committed = run_git_ok(project_path, &["read-tree", "HEAD"], &temp_envs)
+            .and_then(|_| {
+                run_git_ok(
+                    project_path,
+                    &["rm", "-r", "--cached", "-f", "-q", "--", ".llm-wiki"],
+                    &temp_envs,
+                )
+            })
+            .and_then(|_| {
+                commit_as_app(project_path, UNTRACK_LLM_WIKI_MESSAGE, &[], &[], &temp_envs)
+            });
+        let _ = fs::remove_file(&temp_index);
+        committed?;
+    }
+    if in_index {
+        // `-f`: with `--cached` it only touches the index, and it lets git drop
+        // a staged copy that differs from both HEAD and the file on disk.
+        run_git_ok(
+            project_path,
+            &[
+                "rm",
+                "-r",
+                "--cached",
+                "-f",
+                "-q",
+                "--ignore-unmatch",
+                "--",
+                ".llm-wiki",
+            ],
+            envs,
+        )?;
+    }
+    Ok(in_head)
+}
+
+/// The new HEAD when `moved`, else `None`: what a commit call returns when it
+/// had nothing of its own to commit.
+fn head_if(
+    moved: bool,
+    project_path: &str,
+    envs: &[(&str, &str)],
+) -> Result<Option<String>, String> {
+    if moved {
+        head_sha(project_path, envs).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+fn git_commit_all_with_env(
+    project_path: &str,
+    message: &str,
+    envs: &[(&str, &str)],
+) -> Result<Option<String>, String> {
+    ensure_llm_wiki_ignored(project_path, envs)?;
+    let untracked = untrack_llm_wiki(project_path, envs)?;
+    run_git_ok(project_path, &["add", "-A", "--", "."], envs)?;
+
+    let diff_args = ["diff", "--cached", "--quiet", "--", "."];
+    let diff = run_git_with_env(project_path, &diff_args, envs)?;
+    match diff.code {
+        Some(0) => return head_if(untracked, project_path, envs),
+        Some(1) => {}
+        _ => return Err(diff.failure_message(&diff_args)),
+    }
+
+    // Path-limited: keeps staged changes outside a nested project folder out.
+    commit_as_app(project_path, message, &[], &[".".to_string()], envs).map(Some)
 }
 
 /// True when `git config <key>` prints a non-empty value.
@@ -361,87 +491,330 @@ fn git_commit_all_inner(project_path: &str, message: &str) -> Result<Option<Stri
     git_commit_all_with_env(project_path, message, &[])
 }
 
-/// Accept only a relative path that names a folder inside the project and is
-/// not the whole project, `raw/` or `.llm-wiki/` (a failed ingest never
-/// touches those). Both `/` and `\\` count as separators so the check holds on
-/// every platform, and `.` / empty segments are ignored.
-fn validate_relative_dir(relative_dir: &str) -> Result<(), String> {
-    let invalid = || format!("Invalid directory: {relative_dir:?}");
-    if relative_dir.trim().is_empty() {
+/// A checked project-relative path, rebuilt with `/` separators.
+#[derive(Debug, Clone)]
+struct ProjectPath {
+    /// The path without a trailing `/`, for example `wiki/media/s`.
+    rel: String,
+    /// The caller named a folder (the path ended in `/`).
+    is_dir: bool,
+}
+
+/// Check one project-relative path: not empty, not absolute, no `..`, no
+/// leading `:` (git pathspec magic such as `:(top)`), and not the project
+/// itself. Both `/` and `\\` count as separators so the check holds on every
+/// platform; `.` and empty segments are dropped.
+fn parse_project_path(raw: &str) -> Result<(ProjectPath, Vec<String>), String> {
+    let invalid = || format!("Invalid path: {raw:?}");
+    if raw.trim().is_empty() {
         return Err(invalid());
     }
-    let looks_absolute = relative_dir.starts_with('/')
-        || relative_dir.starts_with('\\')
-        || Path::new(relative_dir).is_absolute()
-        || relative_dir.as_bytes().get(1) == Some(&b':');
-    // A leading ':' would be read as git pathspec magic such as `:(top)`.
-    if looks_absolute || relative_dir.starts_with(':') {
+    let looks_absolute = raw.starts_with('/')
+        || raw.starts_with('\\')
+        || Path::new(raw).is_absolute()
+        || raw.as_bytes().get(1) == Some(&b':');
+    if looks_absolute || raw.starts_with(':') {
         return Err(invalid());
     }
-    let segments: Vec<&str> = relative_dir
+    let segments: Vec<String> = raw
         .split(['/', '\\'])
         .filter(|segment| !segment.is_empty() && *segment != ".")
+        .map(String::from)
         .collect();
-    if segments.contains(&"..") {
+    if segments.is_empty() || segments.iter().any(|segment| segment == "..") {
         return Err(invalid());
     }
-    // `.` / `./` would restore and clean the whole project.
-    let Some(first) = segments.first() else {
-        return Err(invalid());
+    let path = ProjectPath {
+        rel: segments.join("/"),
+        is_dir: raw.ends_with('/') || raw.ends_with('\\'),
     };
-    if PROTECTED_TOP_LEVEL_DIRS
+    Ok((path, segments))
+}
+
+/// Paths `git_restore_paths` accepts: inside `wiki/`, never `wiki/` itself.
+fn parse_restore_paths(paths: &[String]) -> Result<Vec<ProjectPath>, String> {
+    paths
         .iter()
-        .any(|protected| first.eq_ignore_ascii_case(protected))
-    {
-        return Err(format!(
-            "Refusing to restore {relative_dir:?}: {first} is never touched"
-        ));
+        .map(|raw| {
+            let (path, segments) = parse_project_path(raw)?;
+            if segments.len() < 2 || segments[0] != RESTORABLE_TOP_LEVEL_DIR {
+                return Err(format!(
+                    "Refusing to restore {raw:?}: only paths inside wiki/ are restored"
+                ));
+            }
+            Ok(path)
+        })
+        .collect()
+}
+
+/// Paths `git_commit_paths` accepts: anything in the project except
+/// `.llm-wiki/` and `.git/`.
+fn parse_commit_paths(paths: &[String]) -> Result<Vec<ProjectPath>, String> {
+    paths
+        .iter()
+        .map(|raw| {
+            let (path, segments) = parse_project_path(raw)?;
+            if NEVER_COMMITTED_TOP_LEVEL_DIRS
+                .iter()
+                .any(|never| segments[0].eq_ignore_ascii_case(never))
+            {
+                return Err(format!(
+                    "Refusing to commit {raw:?}: {} is never committed",
+                    segments[0]
+                ));
+            }
+            Ok(path)
+        })
+        .collect()
+}
+
+fn rels(paths: &[ProjectPath]) -> Vec<String> {
+    paths.iter().map(|path| path.rel.clone()).collect()
+}
+
+/// Whether one of `entries` (paths relative to the project, as git prints
+/// them) is `path` or, for a folder, lies inside it.
+fn covers(path: &ProjectPath, entries: &[String]) -> bool {
+    let prefix = format!("{}/", path.rel);
+    entries
+        .iter()
+        .any(|entry| *entry == path.rel || entry.starts_with(&prefix))
+}
+
+/// Index entries at or under `paths`, relative to the project folder.
+fn index_entries(
+    project_path: &str,
+    paths: &[String],
+    envs: &[(&str, &str)],
+) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let output = run_git_paths_ok(
+        project_path,
+        &["--literal-pathspecs", "ls-files", "-z", "--cached"],
+        paths,
+        envs,
+    )?;
+    Ok(nul_entries(&output.stdout))
+}
+
+/// HEAD entries at or under `paths`, relative to the project folder. Empty
+/// before the first commit.
+fn head_entries(
+    project_path: &str,
+    paths: &[String],
+    envs: &[(&str, &str)],
+) -> Result<Vec<String>, String> {
+    if paths.is_empty() || !has_head(project_path, envs)? {
+        return Ok(Vec::new());
+    }
+    let output = run_git_paths_ok(
+        project_path,
+        &[
+            "--literal-pathspecs",
+            "ls-tree",
+            "-r",
+            "-z",
+            "--name-only",
+            "HEAD",
+        ],
+        paths,
+        envs,
+    )?;
+    Ok(nul_entries(&output.stdout))
+}
+
+/// Which of `paths` git ignores (`.gitignore` and friends).
+fn ignored_paths(
+    project_path: &str,
+    paths: &[String],
+    envs: &[(&str, &str)],
+) -> Result<Vec<String>, String> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path.as_bytes());
+        input.push(0);
+    }
+    let args = ["check-ignore", "--stdin", "-z"];
+    let output = run_git_with_input(project_path, &args, envs, Some(&input))?;
+    match output.code {
+        // 0: some are ignored; 1: none is.
+        Some(0) | Some(1) => Ok(nul_entries(&output.stdout)),
+        _ => Err(output.failure_message(&args)),
+    }
+}
+
+fn exists_on_disk(project_path: &str, rel: &str) -> bool {
+    fs::symlink_metadata(Path::new(project_path).join(rel)).is_ok()
+}
+
+fn git_commit_paths_with_env(
+    project_path: &str,
+    paths: &[String],
+    message: &str,
+    envs: &[(&str, &str)],
+) -> Result<Option<String>, String> {
+    let paths = parse_commit_paths(paths)?;
+    ensure_llm_wiki_ignored(project_path, envs)?;
+    let untracked = untrack_llm_wiki(project_path, envs)?;
+
+    let all = rels(&paths);
+    let in_index = index_entries(project_path, &all, envs)?;
+    let in_head = head_entries(project_path, &all, envs)?;
+    let known = |path: &ProjectPath| covers(path, &in_index) || covers(path, &in_head);
+    // `git add` refuses an ignored path and a path that is neither on disk
+    // nor in the index; leave those out instead of failing the commit.
+    let new_on_disk: Vec<String> = paths
+        .iter()
+        .filter(|path| !known(path) && exists_on_disk(project_path, &path.rel))
+        .map(|path| path.rel.clone())
+        .collect();
+    let ignored = ignored_paths(project_path, &new_on_disk, envs)?;
+    let to_add: Vec<String> = paths
+        .iter()
+        .filter(|path| {
+            covers(path, &in_index)
+                || (exists_on_disk(project_path, &path.rel) && !ignored.contains(&path.rel))
+        })
+        .map(|path| path.rel.clone())
+        .collect();
+    if !to_add.is_empty() {
+        run_git_paths_ok(
+            project_path,
+            &["--literal-pathspecs", "add", "-A"],
+            &to_add,
+            envs,
+        )?;
+    }
+    // A path only HEAD knows (its deletion is already staged) can still be
+    // committed, though `git add` would not take it.
+    let to_commit: Vec<String> = paths
+        .iter()
+        .filter(|path| to_add.contains(&path.rel) || covers(path, &in_head))
+        .map(|path| path.rel.clone())
+        .collect();
+    if to_commit.is_empty() {
+        return head_if(untracked, project_path, envs);
+    }
+
+    let mut diff_args: Vec<&str> = vec!["--literal-pathspecs", "diff", "--cached", "--quiet", "--"];
+    diff_args.extend(to_commit.iter().map(String::as_str));
+    let diff = run_git_with_env(project_path, &diff_args, envs)?;
+    match diff.code {
+        Some(0) => return head_if(untracked, project_path, envs),
+        Some(1) => {}
+        _ => return Err(diff.failure_message(&diff_args)),
+    }
+
+    // Path-limited: staged changes to any other path stay staged, uncommitted.
+    commit_as_app(
+        project_path,
+        message,
+        &["--literal-pathspecs"],
+        &to_commit,
+        envs,
+    )
+    .map(Some)
+}
+
+fn git_commit_paths_inner(
+    project_path: &str,
+    paths: &[String],
+    message: &str,
+) -> Result<Option<String>, String> {
+    git_commit_paths_with_env(project_path, paths, message, &[])
+}
+
+/// Put `paths` (inside `wiki/`) back as they are in HEAD and touch nothing
+/// else. A path HEAD or the index knows is restored from HEAD (index and work
+/// tree; a staged new file is removed). A file git does not know is deleted.
+/// A folder (a path ending in `/`) gets its known files restored and only its
+/// untracked files deleted. Ignored files are never deleted: the baseline
+/// commit could not record them, so they may predate the ingest.
+fn git_restore_paths_inner(project_path: &str, paths: &[String]) -> Result<(), String> {
+    let paths = parse_restore_paths(paths)?;
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let all = rels(&paths);
+    let in_index = index_entries(project_path, &all, &[])?;
+    let in_head = head_entries(project_path, &all, &[])?;
+    let root = Path::new(project_path);
+
+    // Tell the file watcher these changes come from the app, so a deleted
+    // page is not handled as an external delete.
+    for path in &paths {
+        crate::commands::file_sync::mark_app_write_path(&root.join(&path.rel));
+    }
+
+    let known: Vec<String> = paths
+        .iter()
+        .filter(|path| covers(path, &in_index) || covers(path, &in_head))
+        .map(|path| path.rel.clone())
+        .collect();
+    if !known.is_empty() {
+        if !has_head(project_path, &[])? {
+            return Err("There is no commit to restore from".to_string());
+        }
+        run_git_paths_ok(
+            project_path,
+            &[
+                "--literal-pathspecs",
+                "restore",
+                "--source=HEAD",
+                "--staged",
+                "--worktree",
+            ],
+            &known,
+            &[],
+        )?;
+    }
+
+    let unknown_files: Vec<String> = paths
+        .iter()
+        .filter(|path| !path.is_dir && !known.contains(&path.rel))
+        .filter(|path| {
+            fs::symlink_metadata(root.join(&path.rel))
+                .map(|meta| !meta.is_dir())
+                .unwrap_or(false)
+        })
+        .map(|path| path.rel.clone())
+        .collect();
+    let ignored = ignored_paths(project_path, &unknown_files, &[])?;
+    for rel in unknown_files.iter().filter(|rel| !ignored.contains(rel)) {
+        fs::remove_file(root.join(rel))
+            .map_err(|error| format!("Failed to delete {rel}: {error}"))?;
+    }
+
+    let dirs: Vec<String> = paths
+        .iter()
+        .filter(|path| path.is_dir && root.join(&path.rel).is_dir())
+        .map(|path| path.rel.clone())
+        .collect();
+    if !dirs.is_empty() {
+        // No `-x`: ignored files (such as editor or OS state) are kept.
+        run_git_paths_ok(
+            project_path,
+            &["--literal-pathspecs", "clean", "-f", "-d", "-q"],
+            &dirs,
+            &[],
+        )?;
     }
     Ok(())
 }
 
-fn git_restore_dir_inner(project_path: &str, relative_dir: &str) -> Result<(), String> {
-    validate_relative_dir(relative_dir)?;
-    let dir_existed = Path::new(project_path).join(relative_dir).is_dir();
-
-    // `--literal-pathspecs`: the directory is a plain path, never a glob.
-    let restore_args = [
-        "--literal-pathspecs",
-        "restore",
-        "--source=HEAD",
-        "--staged",
-        "--worktree",
-        "--",
-        relative_dir,
-    ];
-    let restore = run_git(project_path, &restore_args)?;
-    // A folder holding only new, untracked files has nothing in HEAD to
-    // restore; git reports that as an error but the clean below finishes it.
-    if !restore.success
-        && !restore
-            .stderr
-            .contains("did not match any file(s) known to git")
-    {
-        return Err(restore.failure_message(&restore_args));
+/// The full sha of HEAD, or `None` before the first commit.
+fn git_head_inner(project_path: &str) -> Result<Option<String>, String> {
+    run_git_ok(project_path, &["rev-parse", "--git-dir"], &[])?;
+    if has_head(project_path, &[])? {
+        head_sha(project_path, &[]).map(Some)
+    } else {
+        Ok(None)
     }
-
-    // No `-x`: ignored files (such as Obsidian workspace state) are kept.
-    run_git_ok(
-        project_path,
-        &["--literal-pathspecs", "clean", "-fd", "--", relative_dir],
-        &[],
-    )?;
-
-    // `clean -d` removes a folder that held only untracked files; put the
-    // empty folder back so later writes into it still work.
-    if dir_existed {
-        let dir = Path::new(project_path).join(relative_dir);
-        if !dir.exists() {
-            fs::create_dir_all(&dir)
-                .map_err(|error| format!("Failed to recreate {relative_dir}: {error}"))?;
-        }
-    }
-    Ok(())
 }
 
 async fn run_blocking<T, F>(label: &str, work: F) -> Result<T, String>
@@ -458,11 +831,7 @@ where
 pub async fn git_info(project_path: String) -> GitInfo {
     tauri::async_runtime::spawn_blocking(move || git_info_inner(&project_path))
         .await
-        .unwrap_or(GitInfo {
-            available: false,
-            is_repo: false,
-            is_root: false,
-        })
+        .unwrap_or_else(|_| GitInfo::unavailable())
 }
 
 #[tauri::command]
@@ -482,11 +851,28 @@ pub async fn git_commit_all(
 }
 
 #[tauri::command]
-pub async fn git_restore_dir(project_path: String, relative_dir: String) -> Result<(), String> {
-    run_blocking("Git restore", move || {
-        git_restore_dir_inner(&project_path, &relative_dir)
+pub async fn git_commit_paths(
+    project_path: String,
+    paths: Vec<String>,
+    message: String,
+) -> Result<Option<String>, String> {
+    run_blocking("Git commit", move || {
+        git_commit_paths_inner(&project_path, &paths, &message)
     })
     .await
+}
+
+#[tauri::command]
+pub async fn git_restore_paths(project_path: String, paths: Vec<String>) -> Result<(), String> {
+    run_blocking("Git restore", move || {
+        git_restore_paths_inner(&project_path, &paths)
+    })
+    .await
+}
+
+#[tauri::command]
+pub async fn git_head(project_path: String) -> Result<Option<String>, String> {
+    run_blocking("Git head", move || git_head_inner(&project_path)).await
 }
 
 #[cfg(test)]
@@ -578,6 +964,32 @@ mod tests {
         let json = serde_json::to_value(git_info_inner(&path_str(&dir))).unwrap();
         assert_eq!(json["isRoot"], serde_json::Value::Bool(true));
         assert_eq!(json["isRepo"], serde_json::Value::Bool(true));
+        assert!(json["topLevel"].is_string(), "json: {json}");
+    }
+
+    #[test]
+    fn info_names_the_enclosing_repository_of_a_nested_project() {
+        let root = temp_dir();
+        init_repo_with_identity(&root);
+        let project = root.join("wiki-p");
+        fs::create_dir_all(&project).unwrap();
+
+        let top_level = git_info_inner(&path_str(&project))
+            .top_level
+            .expect("a nested project names its repository");
+
+        assert_eq!(
+            fs::canonicalize(top_level).unwrap(),
+            fs::canonicalize(&root).unwrap()
+        );
+    }
+
+    #[test]
+    fn info_has_no_top_level_outside_a_repo() {
+        let info = git_info_inner(&path_str(&temp_dir()));
+        assert_eq!(info.top_level, None);
+        let json = serde_json::to_value(info).unwrap();
+        assert!(json["topLevel"].is_null(), "json: {json}");
     }
 
     #[test]
@@ -788,143 +1200,661 @@ mod tests {
         assert!(git_commit_all_inner(&path_str(&dir), "first").is_err());
     }
 
+    fn strings(paths: &[&str]) -> Vec<String> {
+        paths.iter().map(|path| path.to_string()).collect()
+    }
+
+    /// The files changed by `HEAD`, one per line, sorted.
+    fn head_files(dir: &Path) -> Vec<String> {
+        let mut files: Vec<String> = git(dir, &["show", "--name-only", "--format=", "HEAD"])
+            .lines()
+            .filter(|line| !line.is_empty())
+            .map(String::from)
+            .collect();
+        files.sort();
+        files
+    }
+
+    fn read(dir: &Path, rel: &str) -> String {
+        fs::read_to_string(dir.join(rel)).unwrap()
+    }
+
+    /// A repo whose last commit holds `.gitignore`, `wiki/a.md` and `wiki/b.md`.
     fn repo_with_committed_wiki() -> PathBuf {
         let dir = temp_dir();
         init_repo_with_identity(&dir);
         write(&dir, ".gitignore", ".llm-wiki/\n");
-        write(&dir, "wiki/a.md", "committed text");
+        write(&dir, "wiki/a.md", "a committed");
+        write(&dir, "wiki/b.md", "b committed");
         git_commit_all_inner(&path_str(&dir), "chore: start").unwrap();
         dir
     }
 
+    // ── git_restore_paths ────────────────────────────────────────────────
+
     #[test]
-    fn restore_dir_reverts_modified_and_removes_new_files() {
+    fn restore_paths_restores_only_the_files_of_the_failed_run() {
         let dir = repo_with_committed_wiki();
-        write(&dir, "wiki/a.md", "changed by a failed ingest");
-        write(&dir, "wiki/b.md", "new file");
-        write(&dir, "wiki/sub/c.md", "new nested file");
+        // The failing run edits a tracked page and creates a new one.
+        write(&dir, "wiki/a.md", "a edited by the failed run");
+        write(&dir, "wiki/concepts/new.md", "new page of the failed run");
+        // Another feature writes during the run.
+        write(&dir, "wiki/queries/r.md", "research page");
+        write(&dir, "wiki/b.md", "b edited by another feature");
 
-        git_restore_dir_inner(&path_str(&dir), "wiki").unwrap();
+        git_restore_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/a.md", "wiki/concepts/new.md"]),
+        )
+        .unwrap();
 
-        assert_eq!(
-            fs::read_to_string(dir.join("wiki/a.md")).unwrap(),
-            "committed text"
-        );
-        assert!(!dir.join("wiki/b.md").exists());
-        assert!(!dir.join("wiki/sub").exists());
+        assert_eq!(read(&dir, "wiki/a.md"), "a committed");
+        assert!(!dir.join("wiki/concepts/new.md").exists());
+        assert_eq!(read(&dir, "wiki/queries/r.md"), "research page");
+        assert_eq!(read(&dir, "wiki/b.md"), "b edited by another feature");
     }
 
     #[test]
-    fn restore_dir_brings_back_deleted_files() {
+    fn restore_paths_brings_back_a_deleted_tracked_file() {
         let dir = repo_with_committed_wiki();
         fs::remove_file(dir.join("wiki/a.md")).unwrap();
 
-        git_restore_dir_inner(&path_str(&dir), "wiki").unwrap();
+        git_restore_paths_inner(&path_str(&dir), &strings(&["wiki/a.md"])).unwrap();
 
-        assert_eq!(
-            fs::read_to_string(dir.join("wiki/a.md")).unwrap(),
-            "committed text"
-        );
+        assert_eq!(read(&dir, "wiki/a.md"), "a committed");
     }
 
     #[test]
-    fn restore_dir_unstages_staged_changes() {
+    fn restore_paths_unstages_staged_changes() {
         let dir = repo_with_committed_wiki();
         write(&dir, "wiki/a.md", "staged change");
-        write(&dir, "wiki/b.md", "staged new file");
+        write(&dir, "wiki/new.md", "staged new file");
         git(&dir, &["add", "-A"]);
 
-        git_restore_dir_inner(&path_str(&dir), "wiki").unwrap();
+        git_restore_paths_inner(&path_str(&dir), &strings(&["wiki/a.md", "wiki/new.md"])).unwrap();
 
-        assert_eq!(
-            fs::read_to_string(dir.join("wiki/a.md")).unwrap(),
-            "committed text"
-        );
-        assert!(!dir.join("wiki/b.md").exists());
+        assert_eq!(read(&dir, "wiki/a.md"), "a committed");
+        assert!(!dir.join("wiki/new.md").exists());
         assert_eq!(git(&dir, &["status", "--porcelain"]).trim(), "");
     }
 
     #[test]
-    fn restore_dir_handles_a_folder_with_only_new_untracked_files() {
-        let dir = temp_dir();
-        init_repo_with_identity(&dir);
-        write(&dir, ".gitignore", ".llm-wiki/\n");
-        write(&dir, "raw/sources/seed.md", "seed");
-        git_commit_all_inner(&path_str(&dir), "chore: start").unwrap();
-        // `wiki/` holds nothing tracked: `git restore` reports "pathspec did not match".
-        write(&dir, "wiki/new.md", "new");
-        write(&dir, "wiki/deep/new2.md", "new");
-
-        git_restore_dir_inner(&path_str(&dir), "wiki").unwrap();
-
-        assert!(!dir.join("wiki/new.md").exists());
-        assert!(!dir.join("wiki/deep").exists());
-        assert!(
-            dir.join("wiki").is_dir(),
-            "the wiki folder itself must remain"
+    fn restore_paths_restores_a_folder_and_deletes_only_its_untracked_files() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/media/s/1.png", "one");
+        write(&dir, "wiki/media/other/x.png", "x");
+        git_commit_all_inner(&path_str(&dir), "chore: media").unwrap();
+        write(&dir, "wiki/media/s/1.png", "one changed");
+        write(&dir, "wiki/media/s/2.png", "two");
+        write(&dir, "wiki/media/s/deep/3.png", "three");
+        write(&dir, "wiki/media/other/y.png", "y");
+        write(
+            &dir,
+            "wiki/media/s-2/z.png",
+            "a folder whose name starts the same",
         );
-        assert!(dir.join("raw/sources/seed.md").exists());
+
+        git_restore_paths_inner(&path_str(&dir), &strings(&["wiki/media/s/"])).unwrap();
+
+        assert_eq!(read(&dir, "wiki/media/s/1.png"), "one");
+        assert!(!dir.join("wiki/media/s/2.png").exists());
+        assert!(!dir.join("wiki/media/s/deep").exists());
+        assert!(dir.join("wiki/media/other/y.png").exists());
+        assert!(dir.join("wiki/media/s-2/z.png").exists());
     }
 
     #[test]
-    fn restore_dir_leaves_other_folders_alone() {
+    fn restore_paths_removes_a_folder_that_only_the_run_created() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/media/new/1.png", "one");
+
+        git_restore_paths_inner(&path_str(&dir), &strings(&["wiki/media/new/"])).unwrap();
+
+        assert!(!dir.join("wiki/media/new").exists());
+        assert!(dir.join("wiki/a.md").exists());
+    }
+
+    #[test]
+    fn restore_paths_accepts_paths_that_do_not_exist() {
+        let dir = repo_with_committed_wiki();
+        git_restore_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/never-written.md", "wiki/media/none/"]),
+        )
+        .unwrap();
+        assert_eq!(git(&dir, &["status", "--porcelain"]).trim(), "");
+    }
+
+    #[test]
+    fn restore_paths_keeps_ignored_files() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, ".gitignore", ".llm-wiki/\nwiki/private/\n*.tmp\n");
+        git_commit_all_inner(&path_str(&dir), "chore: ignore").unwrap();
+        write(
+            &dir,
+            "wiki/private/notes.md",
+            "the user's own ignored notes",
+        );
+        write(&dir, "wiki/media/s/cache.tmp", "ignored");
+        write(&dir, "wiki/media/s/1.png", "untracked");
+
+        git_restore_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/private/notes.md", "wiki/media/s/"]),
+        )
+        .unwrap();
+
+        assert_eq!(
+            read(&dir, "wiki/private/notes.md"),
+            "the user's own ignored notes"
+        );
+        assert!(dir.join("wiki/media/s/cache.tmp").exists());
+        assert!(!dir.join("wiki/media/s/1.png").exists());
+    }
+
+    #[test]
+    fn restore_paths_never_touches_raw_or_llm_wiki() {
         let dir = repo_with_committed_wiki();
         write(&dir, "raw/sources/new.md", "new source");
         write(&dir, ".llm-wiki/cache.json", "{}");
-        write(&dir, "wiki/b.md", "new file");
+        write(&dir, "wiki/new.md", "new file");
 
-        git_restore_dir_inner(&path_str(&dir), "wiki").unwrap();
+        git_restore_paths_inner(&path_str(&dir), &strings(&["wiki/new.md"])).unwrap();
 
         assert!(dir.join("raw/sources/new.md").exists());
         assert!(dir.join(".llm-wiki/cache.json").exists());
-        assert!(!dir.join("wiki/b.md").exists());
+        assert!(!dir.join("wiki/new.md").exists());
     }
 
     #[test]
-    fn restore_dir_rejects_unsafe_paths() {
+    fn restore_paths_rejects_paths_outside_wiki() {
         let dir = repo_with_committed_wiki();
+        write(&dir, "raw/sources/s.md", "source committed");
+        git_commit_all_inner(&path_str(&dir), "chore: raw").unwrap();
+        write(&dir, "raw/sources/s.md", "source edited");
+        write(&dir, "wiki/a.md", "a edited");
         let p = path_str(&dir);
+
         for bad in [
+            "",
+            ".",
+            "./",
+            "wiki",
+            "wiki/",
+            "./wiki",
+            "wiki/.",
+            "WIKI/a.md",
+            "raw",
+            "raw/sources/s.md",
+            ".llm-wiki/cache.json",
+            ".gitignore",
             "../x",
             "/abs",
-            "wiki/../..",
-            "wiki\\..\\..",
             "C:\\abs",
             "\\abs",
-            "",
-            ":(top)wiki",
+            ":(top)wiki/a.md",
+            "wiki/../raw/sources/s.md",
+            "wiki\\..\\raw\\sources\\s.md",
         ] {
             assert!(
-                git_restore_dir_inner(&p, bad).is_err(),
+                git_restore_paths_inner(&p, &strings(&[bad])).is_err(),
                 "expected {bad:?} to be rejected"
             );
         }
+        // One bad path rejects the whole call before anything changes.
+        assert!(git_restore_paths_inner(&p, &strings(&["wiki/a.md", "raw/sources/s.md"])).is_err());
+
+        assert_eq!(read(&dir, "raw/sources/s.md"), "source edited");
+        assert_eq!(read(&dir, "wiki/a.md"), "a edited");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_paths_reads_paths_literally() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/a.md", "a edited");
+        write(&dir, "wiki/*.md", "a page whose name is a glob");
+
+        git_restore_paths_inner(&path_str(&dir), &strings(&["wiki/*.md"])).unwrap();
+
+        assert!(!dir.join("wiki/*.md").exists());
+        assert_eq!(read(&dir, "wiki/a.md"), "a edited");
     }
 
     #[test]
-    fn restore_dir_stays_inside_a_nested_project_folder() {
+    fn restore_paths_stays_inside_a_nested_project_folder() {
         let root = temp_dir();
         init_repo_with_identity(&root);
         let project = root.join("wiki-p");
         write(&project, ".gitignore", ".llm-wiki/\n");
         write(&project, "wiki/a.md", "committed text");
-        write(&root, "wiki/outer.md", "outer");
+        write(&root, "wiki/a.md", "outer");
         git(&root, &["add", "-A"]);
         git(&root, &["commit", "-m", "seed"]);
-
         write(&project, "wiki/a.md", "changed");
-        write(&root, "wiki/outer.md", "outer changed");
+        write(&root, "wiki/a.md", "outer changed");
 
-        git_restore_dir_inner(&path_str(&project), "wiki").unwrap();
+        git_restore_paths_inner(&path_str(&project), &strings(&["wiki/a.md"])).unwrap();
+
+        assert_eq!(read(&project, "wiki/a.md"), "committed text");
+        assert_eq!(read(&root, "wiki/a.md"), "outer changed");
+    }
+
+    #[test]
+    fn restore_paths_tells_the_file_watcher_that_the_app_changed_them() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/a.md", "a edited");
+        write(&dir, "wiki/new.md", "new");
+        write(&dir, "wiki/media/s/1.png", "one");
+
+        git_restore_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/a.md", "wiki/new.md", "wiki/media/s/"]),
+        )
+        .unwrap();
+
+        use crate::commands::file_sync::is_app_write_ignored;
+        assert!(is_app_write_ignored(&dir.join("wiki/a.md")));
+        assert!(is_app_write_ignored(&dir.join("wiki/new.md")));
+        assert!(is_app_write_ignored(&dir.join("wiki/media/s/1.png")));
+        assert!(!is_app_write_ignored(&dir.join("wiki/b.md")));
+    }
+
+    // ── git_commit_paths ─────────────────────────────────────────────────
+
+    #[test]
+    fn commit_paths_commits_only_the_given_paths() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/a.md", "a edited by the ingest");
+        write(&dir, "wiki/concepts/new.md", "new page of the ingest");
+        // A research page written by another feature during the run.
+        write(&dir, "wiki/queries/r.md", "research page");
+
+        let sha = git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/a.md", "wiki/concepts/new.md"]),
+            "ingest: A (2 pages)\n\n- wiki/a.md\n- wiki/concepts/new.md",
+        )
+        .unwrap()
+        .expect("a commit sha");
+
+        assert!(is_sha(&sha), "not a full sha: {sha}");
+        assert_eq!(git(&dir, &["rev-parse", "HEAD"]).trim(), sha);
+        assert_eq!(head_files(&dir), vec!["wiki/a.md", "wiki/concepts/new.md"]);
+        assert_eq!(
+            git(&dir, &["log", "-1", "--format=%s"]).trim(),
+            "ingest: A (2 pages)"
+        );
+        assert!(git(&dir, &["status", "--porcelain"]).contains("?? wiki/queries/"));
+
+        // The next baseline records the research page.
+        git_commit_all_inner(&path_str(&dir), "chore: save changes before ingest").unwrap();
+        assert_eq!(head_files(&dir), vec!["wiki/queries/r.md"]);
+    }
+
+    #[test]
+    fn commit_paths_records_a_deleted_path() {
+        let dir = repo_with_committed_wiki();
+        fs::remove_file(dir.join("wiki/a.md")).unwrap();
+
+        let sha = git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/a.md"]),
+            "ingest: A (1 pages)",
+        )
+        .unwrap();
+
+        assert!(sha.is_some());
+        assert!(!git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).contains("wiki/a.md"));
+    }
+
+    #[test]
+    fn commit_paths_returns_none_when_its_paths_did_not_change() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/b.md", "b edited by someone else");
+
+        let result = git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/a.md"]),
+            "ingest: A (1 pages)",
+        )
+        .unwrap();
+
+        assert_eq!(result, None);
+        assert_eq!(git(&dir, &["rev-list", "--count", "HEAD"]).trim(), "1");
+        assert!(git(&dir, &["status", "--porcelain"]).contains("wiki/b.md"));
+    }
+
+    #[test]
+    fn commit_paths_skips_missing_and_ignored_paths() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, ".gitignore", ".llm-wiki/\nraw/assets/\n");
+        git_commit_all_inner(&path_str(&dir), "chore: ignore").unwrap();
+        write(&dir, "wiki/new.md", "new page");
+        write(&dir, "raw/assets/big.bin", "ignored");
+
+        let sha = git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&[
+                "wiki/new.md",
+                "raw/parsed/never-written.pdf.md",
+                "raw/assets/big.bin",
+                "raw/assets/",
+                "wiki/media/none/",
+                ".gitignore",
+            ]),
+            "ingest: New (1 pages)",
+        )
+        .unwrap();
+
+        assert!(sha.is_some());
+        assert_eq!(head_files(&dir), vec!["wiki/new.md"]);
+    }
+
+    #[test]
+    fn commit_paths_commits_a_folder() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/media/s/1.png", "one");
+        write(&dir, "wiki/media/s/deep/2.png", "two");
+        write(
+            &dir,
+            "wiki/media/s-2/x.png",
+            "a folder whose name starts the same",
+        );
+
+        git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/media/s/"]),
+            "ingest: S (0 pages)",
+        )
+        .unwrap()
+        .expect("a commit");
 
         assert_eq!(
-            fs::read_to_string(project.join("wiki/a.md")).unwrap(),
-            "committed text"
+            head_files(&dir),
+            vec!["wiki/media/s/1.png", "wiki/media/s/deep/2.png"]
+        );
+    }
+
+    #[test]
+    fn commit_paths_leaves_other_staged_changes_staged() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/b.md", "staged by the user");
+        git(&dir, &["add", "wiki/b.md"]);
+        write(&dir, "wiki/a.md", "a edited by the ingest");
+
+        git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/a.md"]),
+            "ingest: A (1 pages)",
+        )
+        .unwrap()
+        .expect("a commit");
+
+        assert_eq!(head_files(&dir), vec!["wiki/a.md"]);
+        assert_eq!(
+            git(&dir, &["diff", "--cached", "--name-only"]).trim(),
+            "wiki/b.md"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_paths_reads_paths_literally() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/a.md", "a edited");
+        write(&dir, "wiki/*.md", "a page whose name is a glob");
+
+        git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/*.md"]),
+            "ingest: G (1 pages)",
+        )
+        .unwrap()
+        .expect("a commit");
+
+        assert_eq!(head_files(&dir), vec!["wiki/*.md"]);
+        assert!(git(&dir, &["status", "--porcelain"]).contains("wiki/a.md"));
+    }
+
+    #[test]
+    fn commit_paths_rejects_unsafe_paths() {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/a.md", "a edited");
+        let p = path_str(&dir);
+        for bad in [
+            "",
+            ".",
+            "./",
+            "../x",
+            "/abs",
+            "C:\\abs",
+            "\\abs",
+            ":(top)wiki/a.md",
+            "wiki/../../x",
+            ".llm-wiki",
+            ".llm-wiki/secret",
+            "./.llm-wiki/secret",
+            ".LLM-WIKI/secret",
+            ".git/config",
+        ] {
+            assert!(
+                git_commit_paths_inner(&p, &strings(&["wiki/a.md", bad]), "ingest: A (1 pages)")
+                    .is_err(),
+                "expected {bad:?} to be rejected"
+            );
+        }
+        assert_eq!(git(&dir, &["rev-list", "--count", "HEAD"]).trim(), "1");
+    }
+
+    #[test]
+    fn commit_paths_never_commits_llm_wiki_even_when_gitignore_lacks_it() {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        write(&dir, ".llm-wiki/secret", "api-key");
+        write(&dir, "wiki/a.md", "# A");
+
+        git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/a.md", ".gitignore"]),
+            "ingest: A (1 pages)",
+        )
+        .unwrap()
+        .expect("a commit");
+
+        let tracked = git(&dir, &["ls-files"]);
+        assert!(!tracked.contains(".llm-wiki"), "tracked: {tracked}");
+        assert_eq!(head_files(&dir), vec![".gitignore", "wiki/a.md"]);
+        assert_eq!(read(&dir, ".gitignore"), ".llm-wiki/\n");
+    }
+
+    #[test]
+    fn commit_paths_stops_tracking_llm_wiki_in_its_own_commit() {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        write(&dir, ".gitignore", ".llm-wiki/\n");
+        write(&dir, ".llm-wiki/secret", "v1");
+        write(&dir, "wiki/a.md", "# A");
+        git(&dir, &["add", "-f", "-A"]);
+        git(&dir, &["commit", "-m", "old commit that tracked .llm-wiki"]);
+        write(&dir, ".llm-wiki/secret", "v2 changed since");
+        write(&dir, "wiki/b.md", "staged by the user");
+        git(&dir, &["add", "wiki/b.md"]);
+        write(&dir, "wiki/a.md", "# A changed by the ingest");
+
+        git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/a.md"]),
+            "ingest: A (1 pages)",
+        )
+        .unwrap()
+        .expect("a commit");
+
+        assert_eq!(
+            git(&dir, &["log", "-1", "--format=%s", "HEAD"]).trim(),
+            "ingest: A (1 pages)"
+        );
+        assert_eq!(head_files(&dir), vec!["wiki/a.md"]);
+        assert_eq!(
+            git(&dir, &["log", "-1", "--format=%s", "HEAD~1"]).trim(),
+            "chore: stop tracking .llm-wiki"
         );
         assert_eq!(
-            fs::read_to_string(root.join("wiki/outer.md")).unwrap(),
-            "outer changed"
+            git(&dir, &["show", "--name-status", "--format=", "HEAD~1"]).trim(),
+            "D\t.llm-wiki/secret"
         );
+        assert_eq!(git(&dir, &["ls-files", ".llm-wiki"]).trim(), "");
+        assert_eq!(read(&dir, ".llm-wiki/secret"), "v2 changed since");
+        assert_eq!(
+            git(&dir, &["diff", "--cached", "--name-only"]).trim(),
+            "wiki/b.md"
+        );
+    }
+
+    #[test]
+    fn commit_paths_stays_inside_a_nested_project_folder() {
+        let root = temp_dir();
+        init_repo_with_identity(&root);
+        let project = root.join("wiki-p");
+        write(&project, ".gitignore", ".llm-wiki/\n");
+        write(&project, "wiki/seed.md", "seed");
+        git_commit_all_inner(&path_str(&project), "chore: start").unwrap();
+        write(&root, "other.txt", "outside the project");
+        write(&project, "wiki/a.md", "# A");
+
+        git_commit_paths_inner(
+            &path_str(&project),
+            &strings(&["wiki/a.md"]),
+            "ingest: A (1 pages)",
+        )
+        .unwrap()
+        .expect("a commit");
+
+        assert_eq!(head_files(&root), vec!["wiki-p/wiki/a.md"]);
+        assert!(git(&root, &["status", "--porcelain"]).contains("other.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn commit_paths_ignores_gpgsign_and_failing_pre_commit_hook() {
+        let dir = repo_with_committed_wiki();
+        git(&dir, &["config", "commit.gpgsign", "true"]);
+        git(&dir, &["config", "gpg.format", "openpgp"]);
+        git(&dir, &["config", "gpg.program", "false"]);
+        write_failing_pre_commit_hook(&dir);
+        write(&dir, "wiki/a.md", "# A changed");
+
+        let sha = git_commit_paths_inner(
+            &path_str(&dir),
+            &strings(&["wiki/a.md"]),
+            "ingest: A (1 pages)",
+        )
+        .unwrap();
+
+        assert!(sha.is_some());
+    }
+
+    #[test]
+    fn commit_paths_uses_fallback_identity() {
+        let dir = temp_dir();
+        git(&dir, &["init"]);
+        write(&dir, "wiki/a.md", "# A");
+        let empty_home = temp_dir();
+        let home = path_str(&empty_home);
+
+        git_commit_paths_with_env(
+            &path_str(&dir),
+            &strings(&["wiki/a.md"]),
+            "ingest: A (1 pages)",
+            &[
+                ("HOME", home.as_str()),
+                ("USERPROFILE", home.as_str()),
+                ("XDG_CONFIG_HOME", home.as_str()),
+                ("GIT_CONFIG_NOSYSTEM", "1"),
+            ],
+        )
+        .unwrap()
+        .expect("a commit");
+
+        assert_eq!(
+            git(&dir, &["log", "-1", "--format=%an <%ae>"]).trim(),
+            "LLM Wiki <llm-wiki@localhost>"
+        );
+    }
+
+    // ── .llm-wiki untracking (git_commit_all) ────────────────────────────
+
+    #[test]
+    fn commit_all_stops_tracking_llm_wiki_in_its_own_commit() {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        write(&dir, ".llm-wiki/secret", "v1");
+        write(&dir, "wiki/a.md", "# A");
+        git(&dir, &["add", "-A"]);
+        git(&dir, &["commit", "-m", "old commit that tracked .llm-wiki"]);
+        write(&dir, "wiki/a.md", "# A changed");
+
+        git_commit_all_inner(&path_str(&dir), "chore: save changes before ingest")
+            .unwrap()
+            .expect("a commit");
+
+        assert_eq!(
+            git(&dir, &["log", "-1", "--format=%s", "HEAD~1"]).trim(),
+            "chore: stop tracking .llm-wiki"
+        );
+        assert_eq!(
+            git(&dir, &["show", "--name-status", "--format=", "HEAD~1"]).trim(),
+            "D\t.llm-wiki/secret"
+        );
+        let last = head_files(&dir);
+        assert!(
+            !last.iter().any(|f| f.starts_with(".llm-wiki")),
+            "last commit: {last:?}"
+        );
+        assert!(last.contains(&"wiki/a.md".to_string()));
+    }
+
+    #[test]
+    fn commit_all_untracks_llm_wiki_when_its_staged_copy_was_edited_again() {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        write(&dir, ".gitignore", ".llm-wiki/\n");
+        write(&dir, ".llm-wiki/secret", "v1");
+        write(&dir, "wiki/a.md", "# A");
+        git(&dir, &["add", "-f", "-A"]);
+        git(&dir, &["commit", "-m", "old commit that tracked .llm-wiki"]);
+        // Staged content differs from both HEAD and the file on disk:
+        // `git rm --cached` without `-f` refuses this.
+        write(&dir, ".llm-wiki/secret", "v2 staged");
+        git(&dir, &["add", "-f", ".llm-wiki/secret"]);
+        write(&dir, ".llm-wiki/secret", "v3 on disk");
+
+        let sha =
+            git_commit_all_inner(&path_str(&dir), "chore: save changes before ingest").unwrap();
+
+        assert!(sha.is_some());
+        assert_eq!(git(&dir, &["ls-files", ".llm-wiki"]).trim(), "");
+        assert!(!git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).contains(".llm-wiki/"));
+        assert_eq!(read(&dir, ".llm-wiki/secret"), "v3 on disk");
+    }
+
+    // ── git_head ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn head_is_none_before_the_first_commit_and_the_sha_after() {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        assert_eq!(git_head_inner(&path_str(&dir)).unwrap(), None);
+
+        write(&dir, "wiki/a.md", "# A");
+        let sha = git_commit_all_inner(&path_str(&dir), "chore: start").unwrap();
+
+        assert_eq!(git_head_inner(&path_str(&dir)).unwrap(), sha);
+    }
+
+    #[test]
+    fn head_errors_outside_a_repo() {
+        assert!(git_head_inner(&path_str(&temp_dir())).is_err());
     }
 
     #[cfg(unix)]
@@ -1043,81 +1973,6 @@ mod tests {
         assert!(!git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).contains(".llm-wiki/"));
     }
 
-    #[test]
-    fn restore_dir_rejects_unsafe_paths_in_a_nested_project() {
-        let root = temp_dir();
-        init_repo_with_identity(&root);
-        let project = root.join("p");
-        write(&project, ".gitignore", ".llm-wiki/\n");
-        write(&project, "wiki/a.md", "committed");
-        write(&root, "outer/o.md", "outer committed");
-        git(&root, &["add", "-A"]);
-        git(&root, &["commit", "-m", "seed"]);
-        write(&root, "outer/o.md", "outer edited, uncommitted");
-        write(&root, "outer/new.md", "outer untracked");
-
-        let outer_abs = path_str(&root.join("outer"));
-        for bad in ["../outer", outer_abs.as_str(), "wiki/../../outer"] {
-            assert!(
-                git_restore_dir_inner(&path_str(&project), bad).is_err(),
-                "expected {bad:?} to be rejected"
-            );
-        }
-
-        assert_eq!(
-            fs::read_to_string(root.join("outer/o.md")).unwrap(),
-            "outer edited, uncommitted"
-        );
-        assert!(root.join("outer/new.md").exists());
-    }
-
-    #[test]
-    fn restore_dir_refuses_the_whole_project_raw_and_llm_wiki() {
-        let dir = repo_with_committed_wiki();
-        write(&dir, "raw/sources/s.md", "source committed");
-        git(&dir, &["add", "-A"]);
-        git(&dir, &["commit", "-m", "add raw"]);
-        write(&dir, "raw/sources/s.md", "source edited");
-        write(&dir, "raw/sources/untracked.md", "untracked source");
-        write(&dir, ".llm-wiki/cache.json", "{}");
-        write(&dir, "wiki/a.md", "edited wiki");
-        let p = path_str(&dir);
-
-        for bad in [
-            ".",
-            "./",
-            "./.",
-            "raw",
-            "raw/",
-            "raw/sources",
-            "./raw",
-            "RAW",
-            ".llm-wiki",
-            ".llm-wiki/cache.json",
-            "./.llm-wiki",
-            "raw\\sources",
-        ] {
-            assert!(
-                git_restore_dir_inner(&p, bad).is_err(),
-                "expected {bad:?} to be rejected"
-            );
-        }
-
-        assert_eq!(
-            fs::read_to_string(dir.join("raw/sources/s.md")).unwrap(),
-            "source edited"
-        );
-        assert!(dir.join("raw/sources/untracked.md").exists());
-        assert!(dir.join(".llm-wiki/cache.json").exists());
-        assert_eq!(
-            fs::read_to_string(dir.join("wiki/a.md")).unwrap(),
-            "edited wiki"
-        );
-        // Folders that merely contain the words are still fine.
-        git_restore_dir_inner(&p, "wiki").unwrap();
-        git_restore_dir_inner(&p, "wiki/raw").unwrap();
-    }
-
     /// An index path git cannot write to: every `add` / `commit` fails.
     fn broken_index_env() -> String {
         path_str(&temp_dir().join("missing-dir").join("index"))
@@ -1180,7 +2035,7 @@ mod tests {
     }
 
     #[test]
-    fn commit_all_refuses_to_untrack_llm_wiki_over_staged_changes_outside_the_project() {
+    fn commit_all_untracks_llm_wiki_without_committing_staged_changes_outside_the_project() {
         let root = temp_dir();
         init_repo_with_identity(&root);
         let project = root.join("p");
@@ -1192,16 +2047,17 @@ mod tests {
         write(&project, ".llm-wiki/secret", "v2 changed since");
         write(&root, "outer/o.md", "outer staged by the user");
         git(&root, &["add", "outer/o.md"]);
-        let head_before = git(&root, &["rev-parse", "HEAD"]);
 
-        let result = git_commit_all_inner(&path_str(&project), "ingest: A (1 pages)");
+        git_commit_all_inner(&path_str(&project), "chore: save changes before ingest").unwrap();
 
-        assert!(result.is_err());
-        assert_eq!(git(&root, &["rev-parse", "HEAD"]), head_before);
-        assert!(git(&root, &["show", "HEAD:p/.llm-wiki/secret"]).contains("v1"));
+        let head_tree = git(&root, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(!head_tree.contains("p/.llm-wiki/"), "tree: {head_tree}");
+        // The user's staged change outside the project stays staged and uncommitted.
+        assert_eq!(git(&root, &["show", "HEAD:outer/o.md"]), "outer");
         assert_eq!(
-            fs::read_to_string(project.join(".llm-wiki/secret")).unwrap(),
-            "v2 changed since"
+            git(&root, &["diff", "--cached", "--name-only"]).trim(),
+            "outer/o.md"
         );
+        assert_eq!(read(&project, ".llm-wiki/secret"), "v2 changed since");
     }
 }

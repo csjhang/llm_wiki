@@ -1463,7 +1463,7 @@ fn is_content_change_event(kind: &EventKind) -> bool {
     }
 }
 
-fn is_app_write_ignored(path: &Path) -> bool {
+pub(crate) fn is_app_write_ignored(path: &Path) -> bool {
     let key = path_key(path);
     let now = now_ms();
     let mut ignores = APP_WRITE_IGNORES
