@@ -233,7 +233,7 @@
 | 來源 | `raw/sources/` 裡的一個檔案 |
 | 原文 | 外部作者寫的來源。它是證據 |
 | 想法 | 使用者自己寫的來源。它是觀點 |
-| 領域 | `domains.yaml` 裡的一條路徑，例如 `hardware/async-circuits` |
+| 領域 | `domains.yaml` 裡的一條路徑，例如 `hardware/async-circuits`。對索引、健檢與 Heptabase 來說，假說頁的領域是 `to_domain` |
 | 透鏡 | 一份檔案。它說明機制的每個欄位在某個領域裡是什麼意思，以及這個領域的證據標準 |
 | 機制 | 一種跨領域重複出現的結構。它只寫組成、流動、約束與取捨、為什麼有效、失效條件 |
 | 實例 | 某個領域裡符合某個機制的具體東西 |
@@ -241,8 +241,8 @@
 | 假說頁 | 融合的成品。它說明哪些部分套得上，哪些部分套不上，要驗證什麼 |
 | 關係 | 兩個領域之間的關係。有兩種：類比、堆疊 |
 | 類比 | 從一個領域借用機制到另一個領域 |
-| 堆疊 | 一個領域是另一個領域的底層 |
-| 類比強度 | 三級：`surface`（字面相似）、`structural`（結構對應）、`mathematical`（數學同構） |
+| 堆疊 | 一個領域是另一個領域的底層（base layer）。另一個領域是上層（upper layer） |
+| 類比強度 | 三級：`surface`（字面相似）、`structural`（結構對應）、`mathematical`（數學同構）。堆疊時：`surface` 只知道有一般的依賴，`structural` 是上層每個組成都對應到底層的具名組件，`mathematical` 是底層的方程式或取捨曲線決定上層的行為 |
 | 複本卡片 | AI 從 wiki 頁面建立的 Heptabase 卡片。它在 `#wiki` tag 裡 |
 | 卡片對照表 | `heptabase-map.json`。它記錄頁面與卡片的對應，以及同步狀態 |
 | 審核佇列 | app 既有的 review 功能 |
@@ -255,7 +255,7 @@
 
 | repo | 公開或私人 | 內容 |
 |---|---|---|
-| 本 fork（模板） | 公開 | app 程式碼、Claude Code plugin `plugins/llm-wiki/`（skill）、`wiki-hepta` 工具、透鏡範本、wiki 模板、範例 wiki |
+| 本 fork（模板） | 公開 | app 程式碼、Claude Code plugin `plugins/llm-wiki/`（skill）、`wiki-tool` 工具（Heptabase 部分是 `hepta` 指令群）、透鏡範本、wiki 模板、範例 wiki |
 | 閱讀 wiki | 私人 | 原始資料、wiki、規則檔、Heptabase 設定、卡片對照表、機制庫 |
 | 工作 wiki | 私人 | 同上，但沒有機制庫。設定裡指向閱讀 wiki 的機制庫 |
 
@@ -362,7 +362,7 @@ domains:
 | `lenses` | 機制 | 是 | 這個機制目前用到的透鏡 |
 | `instances` | 機制 | 是 | 實例頁面的 slug |
 | `mechanism` | 假說 | 是 | 機制頁的引用。跨 wiki 時寫成 `reading:<slug>` |
-| `from_domain`、`to_domain` | 假說 | 是 | 來源領域與目標領域 |
+| `from_domain`、`to_domain` | 假說 | 是 | 來源領域與目標領域。堆疊時，來源是底層，目標是上層（R17）。索引、健檢與 Heptabase 以 `to_domain` 為假說頁的領域（R19） |
 | `relation` | 假說 | 是 | `analogy` 或 `stack` |
 | `strength` | 假說 | 是 | `surface`、`structural`、`mathematical` |
 | `status` | 假說 | 是 | `draft`、`testing`、`supported`、`refuted` |
@@ -374,7 +374,9 @@ domains:
 ### 5.5 防止不同領域混在同一頁
 
 - 概念頁與實體頁只屬於一個領域。
-- 兩個領域有同名概念時，拆成兩頁。檔名加上領域後綴，例如 `attention--ai`、`attention--cognition`。兩頁的開頭互相註明。
+- 兩個領域有同名概念時，拆成兩頁。只有新的同名頁加上後綴 `--<最後一段領域>`，既有檔名不改。例如 `attention` 已在 `ai`，新頁在 `cognition`，檔名是 `attention--cognition`。兩頁的開頭互相註明（R11）。
+- 後綴檔名已存在時，改用完整領域路徑，把領域裡的每個 `/` 換成 `--`。例如 `ai/architecture` 的 `attention` 寫成 `attention--ai--architecture`。
+- 收錄一次寫整個檔案，不能改名。幫舊頁補上後綴，屬於 `wiki-recut`（R11）。
 - 只有機制頁可以跨領域。機制頁不寫產業或領域的細節。實例只用連結。
 - 既有的收錄規則已要求「說法要留在它描述的主體上」。本設計把這條規則延伸到領域。
 
@@ -448,12 +450,20 @@ heptabase_whiteboard: <白板 ID>
 - 每個主張都要引用 wiki 頁面。
 - 引用不到頁面的主張，只能寫在「要驗證的事」。
 - 「怎樣算推翻」不能空白。
+- 堆疊（`relation: stack`）時，`from_domain` 是底層（base layer），`to_domain` 是上層（upper layer）（R17）。
+- `status` 的條件（R18）：
+  - `draft`：已寫成，尚未測試。
+  - `draft` 變 `testing`：「要驗證的事」至少有一列連到含證據的查詢頁。
+  - `supported`：每一列都由目標領域透鏡證據標準的前兩級證據解決，而且至少有一列。零列的頁面維持 `testing`。
+  - `refuted`：前兩級證據推翻其中一列。
+- 對索引、健檢與 Heptabase 來說，假說頁的領域是 `to_domain`（R19）。機制頁沒有單一領域，不套用這條。
 
 ### 5.9 目錄拆開
 
 - `wiki/index.md` 只列領域樹與每個領域的頁數。
 - `wiki/indexes/<領域>.md` 列這個領域的頁面。
 - 機制有自己的目錄 `wiki/indexes/_mechanisms.md`。
+- 假說頁列在 `to_domain` 的領域目錄（R19）。
 - 收錄時，提示詞只放「相關領域的目錄」加「機制目錄」。理由：`boundWikiIndexForPrompt` 有 32,000 字的上限。
 - 修改點：`ingest.ts` 的 `updateWikiIndexDeterministically`。新邏輯放在新檔案 `src/lib/domain-index.ts`。
 
@@ -561,14 +571,14 @@ app 既有的去重只比對同一個檔名的內容。它抓不到「同一篇�
 | 部分 | 位置 | 負責 |
 |---|---|---|
 | `wiki-sync` skill | 本 fork 的 Claude Code plugin | 呼叫 Heptabase MCP，執行計畫 |
-| `wiki-hepta` 工具 | `tools/wiki-hepta/`（Node + TypeScript） | 產生同步計畫、格式轉換、連結轉換、更新對照表 |
+| `wiki-tool` 工具 | `tools/wiki-tool/`（Node + TypeScript） | 產生同步計畫、格式轉換、連結轉換、更新對照表。Heptabase 部分是 `hepta` 指令群 |
 | 設定與對照表 | 各 wiki 的 `heptabase.yaml`、`heptabase-map.json` | 設定，以及同步狀態 |
 
 流程是「規劃、執行、記錄」：
 
-1. `wiki-hepta plan` 產生計畫檔。
+1. `wiki-tool hepta plan` 產生計畫檔。
 2. skill 照計畫呼叫 MCP。
-3. 每完成一個動作，skill 馬上執行 `wiki-hepta record`。
+3. 每完成一個動作，skill 馬上執行 `wiki-tool hepta record`。
 
 理由：中途失敗時，重跑會從斷掉的地方繼續。「放上白板」重試會重複，所以一定要先記錄再重試。
 
@@ -599,7 +609,7 @@ properties:                   # #wiki 的欄位 ID
 
 白板類型：`topic`（主題）、`source`（來源）、`project`（專案）、`archive`（封存，不參與同步）。
 
-`wiki-hepta init` 讀取使用者的 tag 與欄位，產生這份檔案的初稿。
+`wiki-tool hepta init` 讀取使用者的 tag 與欄位，產生這份檔案的初稿。
 
 ### 7.4 往下：wiki → Heptabase
 
@@ -608,7 +618,7 @@ properties:                   # #wiki 的欄位 ID
 3. 新頁面：
    1. 建立卡片。
    2. 加進 `#wiki`。
-   3. 填欄位：`domain`、`page type`、`wiki`、`status`、`wiki page`、`last synced`。假說另外填 `hypothesis status`、`strength`。
+   3. 填欄位：`domain`、`page type`、`wiki`、`status`、`wiki page`、`last synced`。假說的 `domain` 填 `to_domain`（R19）。假說另外填 `hypothesis status`、`strength`。
    4. 記錄。
    5. 互相連結的新頁面分兩輪：先全部建立，再補連結。
 4. 有變動的頁面：
@@ -690,9 +700,9 @@ properties:                   # #wiki 的欄位 ID
    - 使用者的卡片：查對照表的 `sources`，再找它產生的頁面。
    - 沒收錄的卡片：問使用者要不要先收錄。
 3. 找出來源那一側的機制。找不到時，抽出一個候選機制，送出 `new-mechanism` 審核項目。
-4. 判斷關係：類比或堆疊。
+4. 判斷關係：類比或堆疊。堆疊時，來源領域是底層（base layer），目標領域是上層（upper layer）（R17）。
 5. 逐一套用：機制的每個組成、流動、約束，在目標領域找對應。參考機制頁的「失效條件」。
-6. 判斷類比強度。依照目標領域透鏡的證據標準。
+6. 判斷類比強度。`strength` 依目標領域透鏡的「強度規則」（Strength rules）決定。它衡量的是對應的種類。證據只決定角色對照表的「套得上嗎」欄與 `status`，不決定 `strength`（R16）。
 7. 寫假說頁到目標 wiki 的 `wiki/hypotheses/`。git commit：`fuse: <標題>`。
 8. 建立假說卡片，加進 `#wiki`，放到這張工作白板上，記錄進對照表。
 
@@ -717,7 +727,7 @@ properties:                   # #wiki 的欄位 ID
 1. 假說頁「要驗證的事」的每一項，都可以觸發深度研究。
 2. 研究結果先寫到 `.llm-wiki/research-staging/`，送出 `research-result` 審核項目。
 3. 使用者核准後，才寫進 `wiki/queries/`，並連到假說頁。
-4. `/wiki-fuse --update <假說>` 讀新的查詢頁，重新評估，更新 `status`。
+4. `/wiki-fuse --update <假說>` 讀新的查詢頁，重新評估，依 5.8 的條件更新 `status`（R18）。
 
 ### 8.4 跨 wiki 規則
 
@@ -740,7 +750,7 @@ properties:                   # #wiki 的欄位 ID
 | 4 跨領域 | 不做 | — | 只透過第 3 層 |
 
 - 第 1 層的門檻預設值：假說停在 `draft` 超過 30 天、領域超過 200 頁、領域少於 3 頁。門檻寫在 `schema.md`，使用者可以調整。
-- 第 1 層：每次收錄後自動執行。
+- 第 1 層：每次收錄後自動執行。計算領域頁數時，假說頁算在 `to_domain`（R19）。
 - 第 2、3 層：使用者按按鈕或執行 `/wiki-lint`。距離上次語意健檢累積 10 次收錄時，提醒使用者。
 - 平常只檢查上次健檢後有變動的領域，用 git 紀錄判斷。也可以手動要求全部檢查。
 - 一個領域的內容一次放不下時，依頁面類型分批。
@@ -784,7 +794,7 @@ properties:                   # #wiki 的欄位 ID
 - **背景**：app 用既有的 `claude_cli.rs` 執行 `claude -p`。進度顯示在活動面板。
 - **開啟對話**：app 開一個終端機視窗，執行互動式 Claude Code，並帶好指令。理由：背景模式不能停下來問使用者問題。
 - 白板選單：讀對照表的 `whiteboards_cache`。app 本身連不到 Heptabase。
-- 權限：wiki 模板附 `.claude/settings.json`，只允許 Heptabase MCP 工具、llm_wiki MCP 工具、`wiki-hepta`。
+- 權限：wiki 模板附 `.claude/settings.json`，只允許 Heptabase MCP 工具、llm_wiki MCP 工具、`wiki-tool`。
 
 ### 10.3 app 介面的其他修改
 
@@ -804,7 +814,7 @@ properties:                   # #wiki 的欄位 ID
 | 來源指紋 | 同一篇文章的兩種格式判定重複。不同文章不誤判 |
 | git 紀錄 | 收錄成功、收錄失敗還原、退回。在暫存 repo 裡執行 |
 | 結構健檢 | 每個新項目各有一個會被抓到的案例 |
-| `wiki-hepta` | markdown 與 Hepta Markdown 互轉、連結轉換、同步計畫、偵測使用者修改、中斷後繼續 |
+| `wiki-tool hepta` | markdown 與 Hepta Markdown 互轉、連結轉換、同步計畫、偵測使用者修改、中斷後繼續 |
 | Heptabase 回應 | 用真實回應格式做測試資料。去掉白板名稱、卡片標題與 ID |
 
 CI 目前只檢查建置（`vite build`、`cargo build`）。本設計不改 CI。測試在本機執行。
@@ -845,7 +855,7 @@ CI 目前只檢查建置（`vite build`、`cargo build`）。本設計不改 CI�
 | 0 | 模板骨架 | plugin 骨架 `plugins/llm-wiki/`、`docs/glossary.md`、`schema/`、`domains.yaml` 與 `heptabase.yaml` 的格式與驗證、`CLAUDE.md` 入口、範例 wiki、專案模板 | 無 |
 | 1 | git 紀錄 | 每次收錄一個 commit、失敗還原、`wiki-undo` | 0 |
 | 2 | 機制層收錄 | 領域判斷、機制抽取、頁面類型、分領域目錄、來源指紋、新審核類型、深度研究暫存 | 0、1 |
-| 3 | Heptabase 接口 | `wiki-hepta` 工具、`wiki-sync` skill | 2 |
+| 3 | Heptabase 接口 | `wiki-tool` 工具（`hepta` 指令群）、`wiki-sync` skill | 2 |
 | 4 | 融合 | `wiki-fuse` skill（指定、發散、更新） | 2、3 |
 | 5 | 健檢與切分 | 第 1–3 層健檢、`wiki-lint`、`wiki-recut` | 2 |
 | 6 | Skill 面板 | 面板、`panel.yaml`、`wiki` 總選單、編輯器唯讀 | 3、4、5 |
@@ -876,6 +886,6 @@ CI 目前只檢查建置（`vite build`、`cargo build`）。本設計不改 CI�
 | 兩個 AI 寫 wiki（app 收錄、Claude Code 融合） | 兩邊共用同一份規則檔與頁面類型規則 |
 | app 沒開時收錄不會發生 | 開機自動啟動。skill 開始前檢查 |
 | 功能變多，跟上游合併變難 | 新功能放新檔案。上游檔案只改最小接點 |
-| Heptabase MCP 的權限可能改變 | 7.1 記錄查證日期。`wiki-hepta` 把 MCP 呼叫集中在 skill，格式轉換集中在工具 |
+| Heptabase MCP 的權限可能改變 | 7.1 記錄查證日期。設計把 MCP 呼叫集中在 skill，格式轉換集中在 `wiki-tool hepta` |
 | 複本卡片累積成孤兒 | 停用標記，健檢列出，使用者手動刪除 |
 | 新領域要手動加下拉選項 | skill 會提醒。使用者也可以把 `domain` 改成文字欄位，換取全自動 |
