@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
 import { describe, it, expect } from "vitest"
 import {
   OPTIONAL_PROPERTY_KEYS,
@@ -18,31 +20,10 @@ function pathsOf<T>(result: ParseResult<T>): string[] {
   return result.issues.map((issue: ConfigIssue) => issue.path)
 }
 
-// Same content as templates/mechanism-wiki/heptabase.example.yaml (Task 3).
-const EXAMPLE = `# Example only. wiki-hepta init writes the real heptabase.yaml.
-version: 1
-wiki_id: reading
-mechanism_library: null
-roots:
-  - ${id(1)}
-whiteboards:
-  ${id(2)}: { kind: topic }
-  ${id(3)}: { kind: source, auto_ingest: false }
-  ${id(4)}: { kind: project }
-  ${id(5)}: { kind: archive }
-tags:
-  ingest: ${id(6)}
-  mirror: ${id(7)}
-properties:
-  domain: ${id(8)}
-  page_type: ${id(9)}
-  wiki: ${id(10)}
-  status: ${id(11)}
-  wiki_page: ${id(12)}
-  last_synced: ${id(13)}
-  hypothesis_status: ${id(14)}
-  strength: ${id(15)}
-`
+const EXAMPLE = readFileSync(
+  fileURLToPath(new URL("../../../templates/mechanism-wiki/heptabase.example.yaml", import.meta.url)),
+  "utf8",
+)
 
 /** A minimal valid file; each test overrides one part. */
 function build(

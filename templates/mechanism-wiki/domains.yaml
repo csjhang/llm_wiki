@@ -1,0 +1,13 @@
+# Domain list. An AI agent picks the domain of each page only from this list.
+# A domain name uses lowercase letters, digits, "-", and "/" between levels.
+# The lens of a domain must be one of: business, physics, hardware, ai.
+# The app adds a domain here after you approve a new-domain review item.
+version: 1
+domains: {}
+
+# Example entry. To use it, delete "domains: {}" above and remove the leading "# " below.
+# domains:
+#   hardware/async-circuits:
+#     lens: hardware
+#     description: Digital circuits without a global clock
+#     whiteboards: []   # Optional. Heptabase whiteboard IDs. Hints only.
