@@ -1,3 +1,5 @@
+import { mechanismTemplate } from "@/lib/mechanism-template"
+
 export interface WikiTemplate {
   id: string
   name: string
@@ -6,6 +8,8 @@ export interface WikiTemplate {
   schema: string
   purpose: string
   extraDirs: string[]
+  /** Extra files to write into the project, keyed by path relative to the project root. */
+  files?: Record<string, string>
 }
 
 const BASE_SCHEMA_TYPES = `| entity | wiki/entities/ | Named things (people, tools, organizations, datasets) |
@@ -643,6 +647,7 @@ export const templates: WikiTemplate[] = [
   personalTemplate,
   businessTemplate,
   generalTemplate,
+  mechanismTemplate,
 ]
 
 export function getTemplate(id: string): WikiTemplate {
