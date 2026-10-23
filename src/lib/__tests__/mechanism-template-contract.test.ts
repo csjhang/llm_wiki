@@ -6,12 +6,12 @@
  * real files, that the config examples parse, and that sentences stay short.
  * Later sub-project 0 tasks add more checks to this file.
  */
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { findLongSentences } from "@/test-helpers/ste-check"
-import { parseDomainsYaml } from "@/lib/wiki-config/domains"
+import { KNOWN_LENSES, parseDomainsYaml } from "@/lib/wiki-config/domains"
 import { parseHeptabaseYaml } from "@/lib/wiki-config/heptabase-config"
 import {
   HYPOTHESIS_SECTIONS,
@@ -73,6 +73,18 @@ const COUNTING_SENTENCE =
 /** The exact form of a known-instance line, in every language. Controller ruling R13. */
 const INSTANCE_LINE_FORM = "`- [[<slug>]] (<domain>): <local term>`"
 
+/** The four lens files, one per known lens. */
+const LENS_FILES = KNOWN_LENSES.map((id) => `lenses/${id}.md`)
+
+/** The `## ` sections of a lens file, in order. */
+const LENS_SECTIONS = ["Purpose", "Fields", "Evidence standard", "Strength rules", "Example"] as const
+
+/** A lens explains every mechanism section except Known instances. These are the `###` headings of its Fields section. */
+const LENS_FIELDS = MECHANISM_SECTIONS.filter((section) => section.key !== "instances").map((section) => section.en)
+
+/** The three analogy strength levels, in the order of the lens Strength rules section. */
+const STRENGTH_LEVELS = ["surface", "structural", "mathematical"] as const
+
 /** Files written for AI agents. Every sentence in them must stay short. */
 const AI_FACING_FILES = [
   "CLAUDE.md",
@@ -81,6 +93,7 @@ const AI_FACING_FILES = [
   "docs/glossary.md",
   "schema/writing-rules.md",
   ...RULE_FILES,
+  ...LENS_FILES,
 ]
 
 function readTemplate(relativePath: string): string {
@@ -150,6 +163,28 @@ describe("mechanism template: glossary", () => {
   })
 })
 
+describe("mechanism template: term alignment", () => {
+  it("glossary Mechanism and schema.md Mechanisms name the sections with the heading words, in order", () => {
+    const names = LENS_FIELDS.map((field) => field.toLowerCase())
+    expect(names).toEqual(["parts", "flows", "constraints and trade-offs", "why it works", "failure conditions"])
+    const cases: Array<[label: string, body: string]> = [
+      ["docs/glossary.md Mechanism", sectionBody(readTemplate("docs/glossary.md"), "Mechanism")],
+      ["schema.md Mechanisms", sectionBody(readTemplate("schema.md"), "Mechanisms")],
+    ]
+    for (const [label, body] of cases) {
+      let from = 0
+      for (const name of names) {
+        const at = body.indexOf(name, from)
+        expect(at, `${label} names "${name}" after the previous section`).toBeGreaterThanOrEqual(0)
+        from = at + name.length
+      }
+      // One term, one meaning: the old words "components" and "flow" are gone.
+      expect(body, label).not.toMatch(/\bcomponents?\b/i)
+      expect(body, label).not.toMatch(/\bflow\b/i)
+    }
+  })
+})
+
 describe("mechanism template: entry files", () => {
   it("CLAUDE.md read order points to real files", () => {
     const items = numberedItems(sectionBody(readTemplate("CLAUDE.md"), "Read order"))
@@ -163,12 +198,24 @@ describe("mechanism template: entry files", () => {
       "lenses/<lens>.md",
       "heptabase.yaml",
     ])
-    // Only concrete paths are checked. A path with <...> names a folder that a
-    // later task creates, and heptabase.yaml is optional: wiki-hepta init writes it.
+    // Only concrete paths are checked here. A path with <...> is checked by the
+    // placeholder test below, and heptabase.yaml is optional: wiki-hepta init writes it.
     const concrete = items.filter((item) => !item.path.includes("<") && !/\(optional\)/i.test(item.line))
     expect(concrete.length).toBeGreaterThanOrEqual(5)
     for (const item of concrete) {
       expect(existsSync(join(TEMPLATE_DIR, item.path)), item.path).toBe(true)
+    }
+  })
+
+  it("every <...> placeholder path in the CLAUDE.md read order names a folder that exists in the template", () => {
+    const items = numberedItems(sectionBody(readTemplate("CLAUDE.md"), "Read order"))
+    const placeholders = items.filter((item) => item.path.includes("<"))
+    expect(placeholders.map((item) => item.path)).toEqual(["schema/page-types/<type>.md", "lenses/<lens>.md"])
+    for (const item of placeholders) {
+      // The folder is everything before the path segment that holds the placeholder.
+      const folder = item.path.slice(0, Math.max(0, item.path.lastIndexOf("/", item.path.indexOf("<"))))
+      const directory = join(TEMPLATE_DIR, folder)
+      expect(existsSync(directory) && statSync(directory).isDirectory(), `${item.path} needs the folder ${folder}/`).toBe(true)
     }
   })
 
@@ -327,11 +374,15 @@ interface ExamplePage {
 }
 
 function parseExample(type: string): ExamplePage {
-  const example = sectionBody(readTemplate(`schema/page-types/${type}.md`), "Example")
+  return parseExampleBlock(type, sectionBody(readTemplate(`schema/page-types/${type}.md`), "Example"))
+}
+
+/** Parse the `## Example` body of a rule file or a lens file. `label` names the file in error messages. */
+function parseExampleBlock(label: string, example: string): ExamplePage {
   const fenced = /^```markdown\r?\n([\s\S]*?)\r?\n```/m.exec(example)
-  if (fenced === null) throw new Error(`${type}: Example has no markdown fence`)
+  if (fenced === null) throw new Error(`${label}: Example has no markdown fence`)
   const parts = /^---\r?\n([\s\S]*?)\r?\n---\r?\n([\s\S]*)$/.exec(fenced[1])
-  if (parts === null) throw new Error(`${type}: Example has no frontmatter`)
+  if (parts === null) throw new Error(`${label}: Example has no frontmatter`)
   const [, frontmatter, body] = parts
   const sourcesLine = /^sources: \[(.*)\]$/m.exec(frontmatter)?.[1] ?? ""
   const sourceFiles = [...sourcesLine.matchAll(/"([^"]+)"/g)].map((match) => match[1])
@@ -355,6 +406,41 @@ function linkSlugs(text: string): string[] {
 /** True when `text` links at least one source page, that is, a page named after a file in `sourceFiles`. */
 function linksASourcePage(text: string, sourceFiles: string[]): boolean {
   return linkSlugs(text).some((slug) => sourceFiles.includes(`${slug}.md`))
+}
+
+/** The Parts and Flows rules of mechanism.md, checked on one example page. */
+function expectPartsAndFlowsFollowRules(label: string, page: ExamplePage): void {
+  const parts = findSection(page.body, MECHANISM_SECTIONS[0]) ?? ""
+  const flows = findSection(page.body, MECHANISM_SECTIONS[1]) ?? ""
+  const partRows = parts.split(/\r?\n/).filter((line) => line.startsWith("- ")).map((line) => line.slice(2).split("："))
+  const names = partRows.map(([name]) => name)
+  expect(names.length, `${label} parts`).toBeGreaterThanOrEqual(3)
+  for (const [name, role] of partRows) {
+    // A part line gives the role of one part. It does not name the other parts.
+    for (const other of names.filter((candidate) => candidate !== name)) {
+      expect(role, `${label}: role of ${name} must not name ${other}`).not.toContain(other)
+    }
+  }
+  const flowLines = flows.split(/\r?\n/).filter((line) => line.startsWith("- "))
+  expect(flowLines.length, `${label} flows`).toBeGreaterThan(0)
+  for (const line of flowLines) {
+    // A flow line names at least one part with the name that Parts uses.
+    expect(names.some((name) => line.includes(name)), `${label}: flow line "${line}"`).toBe(true)
+  }
+}
+
+/** The known-instance line form of mechanism.md, checked on one example page. */
+function expectInstanceLinesFollowForm(label: string, page: ExamplePage): void {
+  const instances = findSection(page.body, MECHANISM_SECTIONS[5]) ?? ""
+  const lines = instances.split(/\r?\n/).filter((line) => line.trim() !== "")
+  expect(lines.length, `${label} instance lines`).toBeGreaterThan(0)
+  for (const line of lines) {
+    // ASCII punctuation only around the link, the domain, and the colon.
+    expect(line, `${label}: ${line}`).toMatch(/^- \[\[[a-z0-9-]+\]\] \([a-z0-9-]+(?:\/[a-z0-9-]+)*\): \S.*$/)
+  }
+  const slugs = linkSlugs(instances)
+  const frontmatterSlugs = /^instances: \[(.*)\]$/m.exec(page.frontmatter)?.[1].split(",").map((slug) => slug.trim()) ?? []
+  expect([...slugs].sort(), `${label} instances equal the frontmatter`).toEqual([...frontmatterSlugs].sort())
 }
 
 describe("mechanism template: page-type rule files", () => {
@@ -520,39 +606,12 @@ describe("mechanism template: page-type rule files", () => {
     const rules = readTemplate("schema/page-types/mechanism.md")
     expect(rules).toMatch(/Parts: Name each part and its role in one line\./)
     expect(rules).toMatch(/Flows: .*Name the parts by the names that Parts uses\./)
-    const page = parseExample("mechanism")
-    const parts = findSection(page.body, MECHANISM_SECTIONS[0]) ?? ""
-    const flows = findSection(page.body, MECHANISM_SECTIONS[1]) ?? ""
-    const partRows = parts.split(/\r?\n/).filter((line) => line.startsWith("- ")).map((line) => line.slice(2).split("："))
-    const names = partRows.map(([name]) => name)
-    expect(names.length).toBeGreaterThanOrEqual(3)
-    for (const [name, role] of partRows) {
-      // A part line gives the role of one part. It does not name the other parts.
-      for (const other of names.filter((candidate) => candidate !== name)) {
-        expect(role, `role of ${name} must not name ${other}`).not.toContain(other)
-      }
-    }
-    const flowLines = flows.split(/\r?\n/).filter((line) => line.startsWith("- "))
-    expect(flowLines.length).toBeGreaterThan(0)
-    for (const line of flowLines) {
-      // A flow line names at least one part with the name that Parts uses.
-      expect(names.some((name) => line.includes(name)), `flow line "${line}"`).toBe(true)
-    }
+    expectPartsAndFlowsFollowRules("mechanism", parseExample("mechanism"))
   })
 
   it("mechanism.md fixes the known-instance line form", () => {
     expect(readTemplate("schema/page-types/mechanism.md")).toContain(INSTANCE_LINE_FORM)
-    const page = parseExample("mechanism")
-    const instances = findSection(page.body, MECHANISM_SECTIONS[5]) ?? ""
-    const lines = instances.split(/\r?\n/).filter((line) => line.trim() !== "")
-    expect(lines.length).toBeGreaterThan(0)
-    for (const line of lines) {
-      // ASCII punctuation only around the link, the domain, and the colon.
-      expect(line, line).toMatch(/^- \[\[[a-z0-9-]+\]\] \([a-z0-9-]+(?:\/[a-z0-9-]+)*\): \S.*$/)
-    }
-    const slugs = linkSlugs(instances)
-    const frontmatterSlugs = /^instances: \[(.*)\]$/m.exec(page.frontmatter)?.[1].split(",").map((slug) => slug.trim()) ?? []
-    expect([...slugs].sort()).toEqual([...frontmatterSlugs].sort())
+    expectInstanceLinesFollowForm("mechanism", parseExample("mechanism"))
   })
 
   it("mechanism.md and hypothesis.md explain which heading language each output language uses", () => {
@@ -604,6 +663,138 @@ describe("mechanism template: page-type rule files", () => {
     expect(hypothesis).toContain("reading:<slug>")
     expect(hypothesis).toMatch(/lens of `to_domain`/)
     expect(hypothesis).toMatch(/lens of `from_domain`/)
+  })
+})
+
+/** Text of every `### ` heading in `body`, in order. */
+function thirdLevelHeadings(body: string): string[] {
+  return body
+    .split(/\r?\n/)
+    .filter((line) => /^### /.test(line))
+    .map((line) => line.slice(4).trim())
+}
+
+/** The non-empty lines under each `### ` heading of a Fields section. Lines above the first heading are skipped. */
+function fieldEntries(fields: string): Array<{ heading: string; lines: string[] }> {
+  const entries: Array<{ heading: string; lines: string[] }> = []
+  for (const line of fields.split(/\r?\n/)) {
+    if (/^### /.test(line)) entries.push({ heading: line.slice(4).trim(), lines: [] })
+    else if (line.trim() !== "" && entries.length > 0) entries[entries.length - 1].lines.push(line)
+  }
+  return entries
+}
+
+describe("mechanism template: lens files", () => {
+  it("every known lens has a file, and there are no extra files", () => {
+    const files = readdirSync(join(TEMPLATE_DIR, "lenses")).sort()
+    expect(files).toEqual(KNOWN_LENSES.map((id) => `${id}.md`).sort())
+  })
+
+  it("lens files have the required structure", () => {
+    for (const id of KNOWN_LENSES) {
+      const text = readTemplate(`lenses/${id}.md`)
+      expect(text.split(/\r?\n/)[0], `${id} title`).toBe(`# Lens: ${id}`)
+      expect(secondLevelHeadings(text), id).toEqual([...LENS_SECTIONS])
+      expect(sectionBody(text, "Purpose").trim().length, `${id} Purpose`).toBeGreaterThan(0)
+      expect(thirdLevelHeadings(sectionBody(text, "Fields")), `${id} Fields`).toEqual(LENS_FIELDS)
+      const items = sectionBody(text, "Evidence standard")
+        .split(/\r?\n/)
+        .filter((line) => /^\d+\. /.test(line))
+      expect(items.length, `${id} evidence items`).toBeGreaterThanOrEqual(3)
+      // The list is ordered: it counts 1, 2, 3, and so on.
+      expect(items.map((line) => Number.parseInt(line, 10)), `${id} evidence numbering`).toEqual(items.map((_, i) => i + 1))
+    }
+  })
+
+  it("each lens field has one Write line and one Do not write line", () => {
+    for (const id of KNOWN_LENSES) {
+      const entries = fieldEntries(sectionBody(readTemplate(`lenses/${id}.md`), "Fields"))
+      expect(entries.map((entry) => entry.heading), id).toEqual(LENS_FIELDS)
+      for (const entry of entries) {
+        expect(entry.lines.length, `${id} ${entry.heading} lines`).toBe(2)
+        expect(entry.lines[0], `${id} ${entry.heading}`).toMatch(/^Write: \S/)
+        expect(entry.lines[1], `${id} ${entry.heading}`).toMatch(/^Do not write: \S/)
+      }
+    }
+  })
+
+  it("lens Strength rules share the level rules and add one domain sentence", () => {
+    const shared: string[][] = []
+    const domainSentences: string[] = []
+    for (const id of KNOWN_LENSES) {
+      const lines = sectionBody(readTemplate(`lenses/${id}.md`), "Strength rules")
+        .split(/\r?\n/)
+        .filter((line) => line.trim() !== "")
+      // One lead-in line, one line for each level, and one domain sentence.
+      expect(lines.length, `${id} Strength rules lines`).toBe(5)
+      expect(lines[0], `${id} lead-in`).not.toMatch(/^- /)
+      STRENGTH_LEVELS.forEach((level, index) => {
+        expect(lines[index + 1], `${id} ${level}`).toMatch(new RegExp(`^- \`${level}\`: \\S`))
+      })
+      expect(lines[2], `${id} structural`).toMatch(/one[- ]to[- ]one/)
+      expect(lines[3], `${id} mathematical`).toContain("same equations")
+      expect(lines[3], `${id} mathematical`).toContain("same trade-off curve")
+      expect(lines[4], `${id} domain sentence`).not.toMatch(/^- /)
+      shared.push(lines.slice(0, 4))
+      domainSentences.push(lines[4])
+    }
+    // The four lenses use the same level rules. Only the domain sentence differs.
+    for (const lines of shared) expect(lines).toEqual(shared[0])
+    expect(new Set(domainSentences).size, "domain sentences differ").toBe(KNOWN_LENSES.length)
+  })
+
+  it("every lens Example starts with a line about Latin slugs and CJK file names", () => {
+    for (const id of KNOWN_LENSES) {
+      const example = sectionBody(readTemplate(`lenses/${id}.md`), "Example")
+      const firstLine = example.split(/\r?\n/).find((line) => line.trim() !== "") ?? ""
+      expect(firstLine, id).toContain("Latin")
+      expect(firstLine, id).toContain("CJK")
+      expect(firstLine, id).toContain("`schema.md`")
+    }
+  })
+
+  it("every lens Example is one fenced Traditional Chinese mechanism page that follows mechanism.md", () => {
+    const hanLetter = /[\u4e00-\u9fff]/
+    /** Number of list lines in the section at `index` of MECHANISM_SECTIONS. */
+    const listLines = (page: ExamplePage, index: number): number =>
+      (findSection(page.body, MECHANISM_SECTIONS[index]) ?? "").split(/\r?\n/).filter((line) => line.startsWith("- ")).length
+    const within = (label: string, count: number, min: number, max: number): void => {
+      expect(count, label).toBeGreaterThanOrEqual(min)
+      expect(count, label).toBeLessThanOrEqual(max)
+    }
+    for (const id of KNOWN_LENSES) {
+      const example = sectionBody(readTemplate(`lenses/${id}.md`), "Example")
+      expect(example, `${id} language`).toMatch(hanLetter)
+      expect(example.split(/\r?\n/).filter((line) => /^\s*(```|~~~)/.test(line)).length, `${id} fences`).toBe(2)
+      const page = parseExampleBlock(id, example)
+      expect(page.frontmatter, `${id} type`).toMatch(/^type: mechanism$/m)
+      expect(page.frontmatter, `${id} lenses`).toMatch(new RegExp(`^lenses: \\[${id}\\]$`, "m"))
+      expect(page.frontmatter, `${id} domain field`).not.toMatch(/^(domain|also):/m)
+      expect(page.sourceFiles.length, `${id} sources`).toBeGreaterThan(0)
+      expect(page.intro.startsWith("一句話："), `${id} one-line summary`).toBe(true)
+      // The six sections in order, with the Traditional Chinese headings.
+      expect(page.sections.map((section) => section.heading), `${id} headings`).toEqual(
+        MECHANISM_SECTIONS.map((section) => section.zhHant),
+      )
+      // Length rules of mechanism.md.
+      within(`${id} parts`, listLines(page, 0), 3, 7)
+      within(`${id} flows`, listLines(page, 1), 3, 7)
+      within(`${id} constraints`, listLines(page, 2), 2, 5)
+      within(`${id} failure conditions`, listLines(page, 4), 1, 5)
+      const why = findSection(page.body, MECHANISM_SECTIONS[3]) ?? ""
+      within(`${id} why sentences`, why.split("。").filter((sentence) => sentence.trim() !== "").length, 1, 5)
+      expectPartsAndFlowsFollowRules(id, page)
+      expectInstanceLinesFollowForm(id, page)
+      // Writing rule 5: a Chinese sentence has at most 40 characters. A link does not count.
+      for (const sentence of page.body.replace(/\[\[[^\]]+\]\]/g, "").split(/[。！？\n]/)) {
+        expect(sentence.trim().length, `${id}: "${sentence.trim()}"`).toBeLessThanOrEqual(40)
+      }
+      // Every section except Known instances links a source page.
+      for (const section of page.sections) {
+        if (section.heading === MECHANISM_SECTIONS[5].zhHant) continue
+        expect(linksASourcePage(section.body, page.sourceFiles), `${id} section ${section.heading}`).toBe(true)
+      }
+    }
   })
 })
 

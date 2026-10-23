@@ -36,7 +36,7 @@ A lens is one file in `lenses/`. It says what each part of a mechanism means in 
 
 ## Mechanism
 
-A mechanism is a structure that repeats across domains. A mechanism page states components, flow, constraints and trade-offs, why it works, and failure conditions. It states no domain detail. The term is used most in `schema/page-types/mechanism.md`.
+A mechanism is a structure that repeats across domains. A mechanism page states parts, flows, constraints and trade-offs, why it works, and failure conditions. It states no domain detail. The term is used most in `schema/page-types/mechanism.md`.
 
 ## Instance
 

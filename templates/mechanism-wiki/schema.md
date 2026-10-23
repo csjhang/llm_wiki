@@ -67,7 +67,7 @@ A mechanism is a structure that repeats across domains. The mechanism page state
 The mechanism library is the set of mechanism pages in `wiki/mechanisms/` of a reading wiki.
 Full rules are in `schema/page-types/mechanism.md`.
 
-- A mechanism page has these parts: components, flow, constraints and trade-offs, why it works, failure conditions, and known instances.
+- A mechanism page has six sections: parts, flows, constraints and trade-offs, why it works, failure conditions, and known instances.
 - The lens of a domain says what each part means in that domain.
 - List each instance as a link, with its domain and its local term. Put instance detail on the instance page.
 - A reading wiki writes mechanism pages. A work wiki does not.
