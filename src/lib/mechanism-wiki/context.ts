@@ -7,7 +7,7 @@
  * and what each page type looks like (`schema/page-types/*.md`). Ingest,
  * indexing, and review code call it once and pass the result along.
  */
-import { listDirectory, readFile } from "@/commands/fs"
+import { fileExists, listDirectory, readFile } from "@/commands/fs"
 import { isAbsolutePath, normalizePath } from "@/lib/path-utils"
 import { domainParent, KNOWN_LENSES, parseDomainsYaml } from "@/lib/wiki-config/domains"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
@@ -30,10 +30,19 @@ export interface LensDoc {
   promptText: string
 }
 
+/**
+ * How `wiki.yaml` loaded. `identity` is the default reading identity unless this is "ok".
+ * - ok: the file parsed with no issues.
+ * - missing: the file does not exist.
+ * - invalid: the file exists but cannot be read or does not parse.
+ */
+export type IdentityStatus = "ok" | "missing" | "invalid"
+
 export interface MechanismContext {
   /** The path the caller passed in. */
   projectPath: string
   identity: WikiIdentity
+  identityStatus: IdentityStatus
   domains: DomainsConfig
   /** Every `lenses/*.md` file. The key is the file stem. */
   lenses: Record<string, LensDoc>
@@ -52,23 +61,25 @@ const DOMAINS_FILE = "domains.yaml"
 const WIKI_FILE = "wiki.yaml"
 const LENSES_DIR = "lenses"
 const PAGE_TYPES_DIR = "schema/page-types"
+const UNREADABLE_MESSAGE = "could not read the file"
 
 /**
- * Load the mechanism context of a project. Returns null when the project has
- * no `domains.yaml`, which means it is not a mechanism wiki. A file that is
- * present but invalid does not throw: the problem goes to `configIssues` and
- * the value falls back to an empty or default one.
+ * Load the mechanism context of a project. Returns null when `domains.yaml`
+ * does not exist, which means the project is not a mechanism wiki. A file that
+ * exists but is unreadable or invalid does not throw and does not make the
+ * project a plain wiki: the problem goes to `configIssues` and the value falls
+ * back to an empty or default one.
  */
 export async function loadMechanismContext(projectPath: string): Promise<MechanismContext | null> {
   const base = normalizePath(projectPath).replace(/\/+$/, "")
   const at = (relative: string): string => `${base}/${relative}`
 
-  const domainsText = await readOptional(at(DOMAINS_FILE))
-  if (domainsText === null) return null
+  if (!(await pathExists(at(DOMAINS_FILE)))) return null
 
   const configIssues: ConfigIssue[] = []
-  const [wikiText, lensFiles, pageTypeFiles] = await Promise.all([
-    readOptional(at(WIKI_FILE)),
+  const [domainsText, wiki, lensFiles, pageTypeFiles] = await Promise.all([
+    readOptional(at(DOMAINS_FILE)),
+    readWikiFile(at(WIKI_FILE)),
     listMarkdownFiles(at(LENSES_DIR)),
     listMarkdownFiles(at(PAGE_TYPES_DIR)),
   ])
@@ -77,7 +88,7 @@ export async function loadMechanismContext(projectPath: string): Promise<Mechani
     readAll(pageTypeFiles, PAGE_TYPES_DIR, configIssues),
   ])
 
-  const identity = resolveIdentity(wikiText, configIssues)
+  const { identity, status: identityStatus } = resolveIdentity(wiki, configIssues)
 
   const lenses = Object.fromEntries(
     lensTexts.map(({ stem, text }) => [stem, buildLensDoc(stem, text, configIssues)]),
@@ -93,6 +104,7 @@ export async function loadMechanismContext(projectPath: string): Promise<Mechani
   return {
     projectPath,
     identity,
+    identityStatus,
     domains,
     lenses,
     pageTypeRules,
@@ -118,6 +130,16 @@ export function lensForDomain(ctx: MechanismContext, domain: string): LensDoc | 
   return null
 }
 
+/**
+ * True when this wiki may hold mechanism pages: it is a reading wiki, and its
+ * `wiki.yaml` is not broken. A broken `wiki.yaml` reads as the default reading
+ * identity, which could be a work wiki in disguise, so it blocks writing.
+ * A missing `wiki.yaml` is a plain reading wiki and does not.
+ */
+export function canWriteMechanismPages(ctx: MechanismContext): boolean {
+  return ctx.identity.role === "reading" && ctx.identityStatus !== "invalid"
+}
+
 /** The `promptText` of a lens file. Exported for tests. */
 export function extractLensPromptText(markdown: string): string {
   const picked: string[] = []
@@ -133,12 +155,33 @@ export function extractLensPromptText(markdown: string): string {
 
 // --- files -------------------------------------------------------------
 
+/** True when the path exists. A failed check counts as absent. */
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    return await fileExists(path)
+  } catch {
+    return false
+  }
+}
+
+/** The text of a file, or null when the read fails. */
 async function readOptional(path: string): Promise<string | null> {
   try {
     return await readFile(path)
   } catch {
     return null
   }
+}
+
+/** `wiki.yaml` as found: absent, present but unreadable (text null), or present with its text. */
+interface WikiFile {
+  exists: boolean
+  text: string | null
+}
+
+async function readWikiFile(path: string): Promise<WikiFile> {
+  if (!(await pathExists(path))) return { exists: false, text: null }
+  return { exists: true, text: await readOptional(path) }
 }
 
 interface MarkdownFile {
@@ -172,7 +215,7 @@ async function readAll(
   const loaded: { stem: string; text: string }[] = []
   for (const { file, text } of results) {
     if (text === null) {
-      issues.push({ path: `${dirName}/${file.stem}.md`, message: "could not read the file" })
+      issues.push({ path: `${dirName}/${file.stem}.md`, message: UNREADABLE_MESSAGE })
     } else {
       loaded.push({ stem: file.stem, text })
     }
@@ -190,25 +233,36 @@ function fileIssue(file: string, issue: ConfigIssue): ConfigIssue {
   return { path: issue.path === "" ? file : `${file}:${issue.path}`, message: issue.message }
 }
 
-function resolveIdentity(text: string | null, issues: ConfigIssue[]): WikiIdentity {
-  if (text === null) {
+function resolveIdentity(
+  wiki: WikiFile,
+  issues: ConfigIssue[],
+): { identity: WikiIdentity; status: IdentityStatus } {
+  if (!wiki.exists) {
     issues.push({
       path: WIKI_FILE,
       message: 'the file is missing; treating this wiki as a reading wiki with id "reading"',
     })
-    return defaultIdentity()
+    return { identity: defaultIdentity(), status: "missing" }
   }
-  const parsed = parseWikiYaml(text)
-  if (parsed.ok) return parsed.value
+  if (wiki.text === null) {
+    issues.push({ path: WIKI_FILE, message: UNREADABLE_MESSAGE })
+    return { identity: defaultIdentity(), status: "invalid" }
+  }
+  const parsed = parseWikiYaml(wiki.text)
+  if (parsed.ok) return { identity: parsed.value, status: "ok" }
   issues.push(...parsed.issues.map((issue) => fileIssue(WIKI_FILE, issue)))
-  return defaultIdentity()
+  return { identity: defaultIdentity(), status: "invalid" }
 }
 
 function resolveDomains(
-  text: string,
+  text: string | null,
   knownLenses: readonly string[],
   issues: ConfigIssue[],
 ): DomainsConfig {
+  if (text === null) {
+    issues.push({ path: DOMAINS_FILE, message: UNREADABLE_MESSAGE })
+    return { version: 1, domains: {} }
+  }
   const parsed = parseDomainsYaml(text, knownLenses)
   if (parsed.ok) return parsed.value
   issues.push(...parsed.issues.map((issue) => fileIssue(DOMAINS_FILE, issue)))

@@ -6,14 +6,20 @@ import type { FileNode } from "@/types/wiki"
 import { materializeSampleWiki } from "@/test-helpers/sample-wiki"
 
 /** In-memory project tree. Keys are absolute paths with "/" separators. */
-const tree = vi.hoisted(() => ({ files: new Map<string, string>() }))
+const tree = vi.hoisted(() => ({
+  files: new Map<string, string>(),
+  /** Paths that exist and are listed, but whose read rejects (for example a UTF-16 file). */
+  unreadable: new Set<string>(),
+}))
 
 vi.mock("@/commands/fs", () => ({
   readFile: vi.fn(async (path: string) => {
     const text = tree.files.get(path)
     if (text === undefined) throw new Error(`No such file: ${path}`)
+    if (tree.unreadable.has(path)) throw new Error(`stream did not contain valid UTF-8: ${path}`)
     return text
   }),
+  fileExists: vi.fn(async (path: string) => tree.files.has(path)),
   // Lists the direct children of a directory, like the real command with maxDepth 1.
   listDirectory: vi.fn(async (path: string) => {
     const prefix = `${path.replace(/\/$/, "")}/`
@@ -35,7 +41,12 @@ vi.mock("@/commands/fs", () => ({
   }),
 }))
 
-import { lensForDomain, loadMechanismContext, extractLensPromptText } from "./context"
+import {
+  canWriteMechanismPages,
+  extractLensPromptText,
+  lensForDomain,
+  loadMechanismContext,
+} from "./context"
 
 const PROJECT = "/projects/reading"
 
@@ -65,6 +76,11 @@ function removeFile(relative: string, root: string = PROJECT): void {
   tree.files.delete(`${root}/${relative}`)
 }
 
+/** The file stays in the tree, so it exists and is listed, but reading it fails. */
+function makeUnreadable(relative: string, root: string = PROJECT): void {
+  tree.unreadable.add(`${root}/${relative}`)
+}
+
 beforeAll(async () => {
   sampleDir = await mkdtemp(join(tmpdir(), "mechanism-context-"))
   await materializeSampleWiki(sampleDir)
@@ -76,6 +92,7 @@ afterAll(async () => {
 })
 
 beforeEach(() => {
+  tree.unreadable.clear()
   mountSample()
 })
 
@@ -92,6 +109,7 @@ describe("loadMechanismContext", () => {
     expect(ctx.configIssues).toEqual([])
     expect(ctx.projectPath).toBe(PROJECT)
     expect(ctx.identity).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null })
+    expect(ctx.identityStatus).toBe("ok")
     expect(ctx.mechanismLibraryPath).toBe(PROJECT)
     expect(Object.keys(ctx.domains.domains).sort()).toEqual([
       "ai/architecture",
@@ -194,15 +212,43 @@ describe("loadMechanismContext", () => {
     expect(ctx!.configIssues[0].path).toBe("domains.yaml")
   })
 
+  it("unreadable domains.yaml records an issue", async () => {
+    makeUnreadable("domains.yaml")
+
+    const ctx = await loadMechanismContext(PROJECT)
+
+    // The file exists, so this is still a mechanism wiki, with no domains.
+    if (ctx === null) throw new Error("expected a context")
+    expect(ctx.domains).toEqual({ version: 1, domains: {} })
+    expect(ctx.configIssues).toEqual([{ path: "domains.yaml", message: "could not read the file" }])
+    // The other files still load.
+    expect(ctx.identityStatus).toBe("ok")
+    expect(Object.keys(ctx.lenses)).toHaveLength(4)
+    expect(Object.keys(ctx.pageTypeRules)).toHaveLength(7)
+  })
+
   it("missing wiki.yaml defaults to reading", async () => {
     removeFile("wiki.yaml")
 
     const ctx = await loadMechanismContext(PROJECT)
 
     expect(ctx!.identity).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null })
+    expect(ctx!.identityStatus).toBe("missing")
     expect(ctx!.mechanismLibraryPath).toBe(PROJECT)
     expect(ctx!.configIssues).toHaveLength(1)
     expect(ctx!.configIssues[0].path).toBe("wiki.yaml")
+    expect(ctx!.configIssues[0].message).toContain("missing")
+  })
+
+  it("unreadable wiki.yaml is invalid", async () => {
+    makeUnreadable("wiki.yaml")
+
+    const ctx = await loadMechanismContext(PROJECT)
+
+    expect(ctx!.identity).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null })
+    expect(ctx!.identityStatus).toBe("invalid")
+    expect(ctx!.configIssues).toEqual([{ path: "wiki.yaml", message: "could not read the file" }])
+    expect(canWriteMechanismPages(ctx!)).toBe(false)
   })
 
   it("invalid wiki.yaml records issues and defaults to reading", async () => {
@@ -211,6 +257,7 @@ describe("loadMechanismContext", () => {
     const ctx = await loadMechanismContext(PROJECT)
 
     expect(ctx!.identity).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null })
+    expect(ctx!.identityStatus).toBe("invalid")
     expect(ctx!.configIssues.length).toBeGreaterThanOrEqual(2)
     for (const issue of ctx!.configIssues) expect(issue.path.startsWith("wiki.yaml")).toBe(true)
   })
@@ -292,6 +339,48 @@ describe("loadMechanismContext", () => {
     expect(Object.keys(ctx!.lenses).sort()).toEqual(["ai", "business", "hardware", "physics"])
   })
 
+  it("records an issue for a listed lens file that cannot be read, which still counts as a known lens", async () => {
+    setFile("lenses/chemistry.md", "# Lens: chemistry\n\n## Fields\n\nWrite: species.\n")
+    makeUnreadable("lenses/chemistry.md")
+    setFile(
+      "domains.yaml",
+      [
+        "version: 1",
+        "domains:",
+        "  chemistry/catalysis:",
+        "    lens: chemistry",
+        "    description: Reactions sped up by a catalyst",
+        "",
+      ].join("\n"),
+    )
+
+    const ctx = await loadMechanismContext(PROJECT)
+
+    // One issue, for the file. The domain is valid because the stem is a known lens.
+    expect(ctx!.configIssues).toEqual([{ path: "lenses/chemistry.md", message: "could not read the file" }])
+    expect(Object.keys(ctx!.domains.domains)).toEqual(["chemistry/catalysis"])
+    expect(Object.keys(ctx!.lenses).sort()).toEqual(["ai", "business", "hardware", "physics"])
+    expect(lensForDomain(ctx!, "chemistry/catalysis")).toBeNull()
+  })
+
+  it("records an issue for a page-type file that cannot be read and leaves it out", async () => {
+    makeUnreadable("schema/page-types/mechanism.md")
+
+    const ctx = await loadMechanismContext(PROJECT)
+
+    expect(ctx!.configIssues).toEqual([
+      { path: "schema/page-types/mechanism.md", message: "could not read the file" },
+    ])
+    expect(Object.keys(ctx!.pageTypeRules).sort()).toEqual([
+      "comparison",
+      "concept",
+      "entity",
+      "hypothesis",
+      "query",
+      "source",
+    ])
+  })
+
   it("records an issue for a lens file with none of the prompt sections", async () => {
     setFile("lenses/empty.md", "# Lens: empty\n\n## Purpose\n\nNothing else.\n")
 
@@ -300,6 +389,44 @@ describe("loadMechanismContext", () => {
     expect(ctx!.lenses.empty.promptText).toBe("")
     expect(ctx!.configIssues).toHaveLength(1)
     expect(ctx!.configIssues[0].path).toBe("lenses/empty.md")
+  })
+})
+
+describe("canWriteMechanismPages", () => {
+  it("sample reading wiki can write mechanism pages", async () => {
+    const ctx = await loadMechanismContext(PROJECT)
+
+    expect(canWriteMechanismPages(ctx!)).toBe(true)
+  })
+
+  it("missing wiki.yaml can write mechanism pages", async () => {
+    removeFile("wiki.yaml")
+
+    const ctx = await loadMechanismContext(PROJECT)
+
+    expect(ctx!.identityStatus).toBe("missing")
+    expect(canWriteMechanismPages(ctx!)).toBe(true)
+  })
+
+  it("invalid wiki.yaml cannot write mechanism pages", async () => {
+    // A work wiki with a broken file would otherwise read as a reading wiki.
+    setFile("wiki.yaml", "version: 1\nid: work\nrole: work\n")
+
+    const ctx = await loadMechanismContext(PROJECT)
+
+    expect(ctx!.identityStatus).toBe("invalid")
+    expect(ctx!.identity.role).toBe("reading")
+    expect(canWriteMechanismPages(ctx!)).toBe(false)
+  })
+
+  it("work wiki cannot write mechanism pages", async () => {
+    setFile("wiki.yaml", "version: 1\nid: work\nrole: work\nmechanism_library: ../reading\n")
+
+    const ctx = await loadMechanismContext(PROJECT)
+
+    expect(ctx!.identityStatus).toBe("ok")
+    expect(ctx!.identity.role).toBe("work")
+    expect(canWriteMechanismPages(ctx!)).toBe(false)
   })
 })
 
