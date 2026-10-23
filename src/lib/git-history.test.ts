@@ -24,6 +24,8 @@ import {
   buildActionCommitMessage,
   commitIngest,
   defaultGitHistoryDeps,
+  getCachedGitHistory,
+  isGitHistoryOnCached,
   prepareIngestBaseline,
   resetGitHistoryCache,
   resolveGitHistory,
@@ -243,6 +245,58 @@ describe("resolveGitHistory", () => {
 
     await expect(resolveGitHistory("p1", "/wiki", deps)).resolves.toBe(true)
     warn.mockRestore()
+  })
+})
+
+describe("isGitHistoryOnCached", () => {
+  it("reflects the last resolve", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: true })
+    expect(isGitHistoryOnCached("p1")).toBe(false) // never resolved
+
+    expect(getCachedGitHistory("p1")).toBeUndefined()
+
+    const pending = resolveGitHistory("p1", "/wiki", makeDeps("on"))
+    expect(isGitHistoryOnCached("p1")).toBe(false) // still pending
+    expect(getCachedGitHistory("p1")).toBeUndefined()
+    await pending
+    expect(isGitHistoryOnCached("p1")).toBe(true)
+    expect(getCachedGitHistory("p1")).toBe(true)
+    expect(isGitHistoryOnCached("p2")).toBe(false) // per project
+
+    await resolveGitHistory("p2", "/other", makeDeps("off"))
+    expect(isGitHistoryOnCached("p2")).toBe(false) // resolved off
+    expect(getCachedGitHistory("p2")).toBe(false) // settled, unlike a project never asked about
+
+    resetGitHistoryCache("p1")
+    expect(isGitHistoryOnCached("p1")).toBe(false)
+    expect(getCachedGitHistory("p1")).toBeUndefined()
+
+    await resolveGitHistory("p1", "/wiki", makeDeps("on"))
+    resetGitHistoryCache()
+    expect(isGitHistoryOnCached("p1")).toBe(false)
+    expect(getCachedGitHistory("p2")).toBeUndefined()
+
+    // A failed resolve is not cached, so it never reads as on.
+    vi.mocked(gitInfo).mockRejectedValueOnce(new Error("boom"))
+    await resolveGitHistory("p3", "/third", makeDeps("on"))
+    expect(isGitHistoryOnCached("p3")).toBe(false)
+    expect(getCachedGitHistory("p3")).toBeUndefined()
+    warn.mockRestore()
+  })
+
+  it("ignores an answer that arrives after the cache was reset", async () => {
+    let release!: (info: { available: boolean; isRepo: boolean; isRoot: boolean }) => void
+    vi.mocked(gitInfo).mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = resolve
+      }),
+    )
+    const stale = resolveGitHistory("p1", "/wiki", makeDeps("on"))
+    resetGitHistoryCache("p1")
+    release({ available: true, isRepo: true, isRoot: true })
+    await stale
+    expect(isGitHistoryOnCached("p1")).toBe(false)
   })
 })
 

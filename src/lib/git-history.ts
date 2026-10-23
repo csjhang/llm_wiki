@@ -43,11 +43,31 @@ export const defaultGitHistoryDeps: GitHistoryDeps = {
 // One answer per project for the whole session. The promise is cached, not the
 // boolean, so two ingests starting together share one prompt.
 const resolved = new Map<string, Promise<boolean>>()
+// The settled answers, kept beside the promises so sync callers can read them.
+const decisions = new Map<string, boolean>()
 
 /** Forget the cached answer for one project, or for every project when no id is given. */
 export function resetGitHistoryCache(projectId?: string): void {
-  if (projectId === undefined) resolved.clear()
-  else resolved.delete(projectId)
+  if (projectId === undefined) {
+    resolved.clear()
+    decisions.clear()
+  } else {
+    resolved.delete(projectId)
+    decisions.delete(projectId)
+  }
+}
+
+/**
+ * The settled answer for this project, read without waiting. `undefined` while
+ * the answer is still pending, was never asked for, or could not be resolved.
+ */
+export function getCachedGitHistory(projectId: string): boolean | undefined {
+  return decisions.get(projectId)
+}
+
+/** Whether version history is known to be on for this project. `false` when off or not settled yet. */
+export function isGitHistoryOnCached(projectId: string): boolean {
+  return decisions.get(projectId) === true
 }
 
 async function decide(
@@ -94,11 +114,17 @@ export function resolveGitHistory(
   const cached = resolved.get(projectId)
   if (cached) return cached
 
-  const pending = decide(projectId, projectPath, deps).catch((err: unknown) => {
-    console.warn("[git-history] could not resolve version history:", err)
-    resolved.delete(projectId)
-    return false
-  })
+  const pending: Promise<boolean> = decide(projectId, projectPath, deps)
+    .then((on) => {
+      // A reset while the answer was in flight drops it.
+      if (resolved.get(projectId) === pending) decisions.set(projectId, on)
+      return on
+    })
+    .catch((err: unknown) => {
+      console.warn("[git-history] could not resolve version history:", err)
+      resolved.delete(projectId)
+      return false
+    })
   resolved.set(projectId, pending)
   return pending
 }

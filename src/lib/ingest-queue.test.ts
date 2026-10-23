@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from "vitest"
-import { createDeferred, flushMicrotasks, waitFor } from "@/test-helpers/deferred"
+import { createDeferred, flushIO, flushMicrotasks, waitFor } from "@/test-helpers/deferred"
 
 // Mock autoIngest so tests control success/failure timing.
 vi.mock("./ingest", () => ({
@@ -28,6 +28,20 @@ vi.mock("@/lib/wiki-page-delete", () => ({
   cascadeDeleteWikiPage: (projectPath: string, filePath: string) =>
     cascadeDeleteWikiPageMock(projectPath, filePath),
 }))
+
+// Mock git history so no test touches Tauri. History is off unless a test turns it on.
+vi.mock("@/lib/git-history", async () => {
+  const { titleFromSourcePath } = await import("./commit-message")
+  return {
+    resolveGitHistory: vi.fn(),
+    getCachedGitHistory: vi.fn(),
+    isGitHistoryOnCached: vi.fn(),
+    prepareIngestBaseline: vi.fn(),
+    commitIngest: vi.fn(),
+    restoreFailedIngest: vi.fn(),
+    titleFromSourcePath,
+  }
+})
 
 // Mock project-identity — tests don't hit Tauri plugin-store. Maps the
 // test UUIDs defined below back to their assigned paths.
@@ -78,6 +92,14 @@ import {
   subscribeIngestQueue,
 } from "./ingest-queue"
 import { autoIngest } from "./ingest"
+import {
+  commitIngest,
+  getCachedGitHistory,
+  isGitHistoryOnCached,
+  prepareIngestBaseline,
+  resolveGitHistory,
+  restoreFailedIngest,
+} from "@/lib/git-history"
 import { deleteFile, readFile, writeFile } from "@/commands/fs"
 import { sweepResolvedReviews } from "./sweep-reviews"
 import { useWikiStore } from "@/stores/wiki-store"
@@ -87,6 +109,12 @@ const mockReadFile = vi.mocked(readFile)
 const mockWriteFile = vi.mocked(writeFile)
 const mockDeleteFile = vi.mocked(deleteFile)
 const mockSweep = vi.mocked(sweepResolvedReviews)
+const mockResolveGitHistory = vi.mocked(resolveGitHistory)
+const mockGetCachedGitHistory = vi.mocked(getCachedGitHistory)
+const mockIsGitHistoryOnCached = vi.mocked(isGitHistoryOnCached)
+const mockPrepareBaseline = vi.mocked(prepareIngestBaseline)
+const mockCommitIngest = vi.mocked(commitIngest)
+const mockRestoreFailedIngest = vi.mocked(restoreFailedIngest)
 
 /** Simulate the app having opened `TEST_ID` at `TEST_PATH` so the queue
  *  module's `currentProjectId` / `currentProjectPath` are set. Most
@@ -110,6 +138,20 @@ beforeEach(async () => {
     const { deleteFile } = await import("@/commands/fs")
     await deleteFile(filePath)
   })
+
+  // Default: git history is settled as off for every project.
+  mockResolveGitHistory.mockReset()
+  mockResolveGitHistory.mockResolvedValue(false)
+  mockGetCachedGitHistory.mockReset()
+  mockGetCachedGitHistory.mockReturnValue(false)
+  mockIsGitHistoryOnCached.mockReset()
+  mockIsGitHistoryOnCached.mockReturnValue(false)
+  mockPrepareBaseline.mockReset()
+  mockPrepareBaseline.mockResolvedValue(undefined)
+  mockCommitIngest.mockReset()
+  mockCommitIngest.mockResolvedValue("a".repeat(40))
+  mockRestoreFailedIngest.mockReset()
+  mockRestoreFailedIngest.mockResolvedValue(undefined)
 
   // Default: persisted queue file doesn't exist
   mockReadFile.mockRejectedValue(new Error("ENOENT"))
@@ -1592,5 +1634,308 @@ describe("cleanupWrittenFiles — page cascade", () => {
       "C:/proj",
       "C:/proj/wiki\\concepts\\rope.md",
     )
+  })
+})
+
+describe("ingest-queue — git history", () => {
+  /**
+   * Fake the module's cache: nothing is known until the first resolve lands,
+   * which takes `delayTicks` trips through the event loop, as when git has to
+   * be probed or the user has to answer a question.
+   */
+  function fakeHistory(answer: boolean, delayTicks = 0): void {
+    let settled: boolean | undefined
+    mockResolveGitHistory.mockImplementation(async () => {
+      if (delayTicks > 0) await flushIO(delayTicks)
+      settled = answer
+      return answer
+    })
+    mockGetCachedGitHistory.mockImplementation(() => settled)
+    mockIsGitHistoryOnCached.mockImplementation(() => settled === true)
+  }
+  const turnHistoryOn = (delayTicks = 0): void => fakeHistory(true, delayTicks)
+
+  it("commits after a successful ingest", async () => {
+    turnHistoryOn()
+    const order: string[] = []
+    mockPrepareBaseline.mockImplementation(async () => {
+      order.push("baseline")
+    })
+    mockAutoIngest.mockImplementation(async () => {
+      order.push("autoIngest")
+      return ["wiki/sources/report.md", "wiki/concepts/rope.md"]
+    })
+    mockCommitIngest.mockImplementation(async () => {
+      order.push("commit")
+      return "b".repeat(40)
+    })
+
+    await enqueueIngest(TEST_ID, "raw/sources/report.pdf")
+    await waitFor(() => getQueue().length === 0)
+
+    expect(mockResolveGitHistory).toHaveBeenCalledWith(TEST_ID, TEST_PATH)
+    expect(mockPrepareBaseline).toHaveBeenCalledTimes(1)
+    expect(mockPrepareBaseline).toHaveBeenCalledWith(TEST_PATH)
+    expect(mockCommitIngest).toHaveBeenCalledTimes(1)
+    expect(mockCommitIngest).toHaveBeenCalledWith(TEST_PATH, "report", [
+      "wiki/sources/report.md",
+      "wiki/concepts/rope.md",
+    ])
+    expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
+    expect(order).toEqual(["baseline", "autoIngest", "commit"])
+  })
+
+  it("does not commit an ingest that wrote no files", async () => {
+    turnHistoryOn()
+    mockAutoIngest.mockResolvedValue([])
+
+    await enqueueIngest(TEST_ID, "raw/sources/empty.md")
+    await waitFor(() => mockRestoreFailedIngest.mock.calls.length >= 1)
+
+    expect(mockCommitIngest).not.toHaveBeenCalled()
+  })
+
+  it("restores after a failed ingest", async () => {
+    turnHistoryOn()
+    mockAutoIngest.mockRejectedValue(new Error("boom"))
+
+    await enqueueIngest(TEST_ID, "raw/sources/broken.md")
+    await waitFor(() => mockRestoreFailedIngest.mock.calls.length >= 1)
+
+    expect(mockRestoreFailedIngest).toHaveBeenCalledWith(TEST_PATH)
+    expect(mockCommitIngest).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [
+      "a task that is retried",
+      () => new Error("boom"),
+    ],
+    [
+      "a failure that is not retried",
+      () => Object.assign(new Error("unsupported"), { nonRetryable: true }),
+    ],
+    [
+      "a provider usage limit",
+      () => new Error("429 usage limit exceeded"),
+    ],
+  ])("restores wiki/ before saving the queue for %s", async (_label, makeError) => {
+    turnHistoryOn()
+    const restoreDone = createDeferred<void>()
+    mockRestoreFailedIngest.mockImplementation(() => restoreDone.promise)
+    mockAutoIngest.mockRejectedValue(makeError())
+
+    await enqueueIngest(TEST_ID, "raw/sources/broken.md")
+    await waitFor(() => mockRestoreFailedIngest.mock.calls.length === 1)
+    const task = getQueue()[0]
+    // The task is still "processing" until the restore has finished.
+    expect(task.status).toBe("processing")
+    const writesBefore = mockWriteFile.mock.calls.length
+
+    restoreDone.resolve()
+    await waitFor(() => task.status !== "processing")
+    await waitFor(() => mockWriteFile.mock.calls.length > writesBefore)
+    expect(mockCommitIngest).not.toHaveBeenCalled()
+  })
+
+  it("restores after cancel when the run rejects on abort", async () => {
+    turnHistoryOn()
+    mockAutoIngest.mockImplementation((_projectPath, _sourcePath, _config, signal) => {
+      const run = createDeferred<string[]>()
+      signal?.addEventListener("abort", () => run.reject(new Error("aborted")))
+      return run.promise
+    })
+
+    await enqueueIngest(TEST_ID, "raw/sources/cancelled.md")
+    await waitFor(() => mockAutoIngest.mock.calls.length === 1)
+    await cancelTask(getQueue()[0].id)
+    await waitFor(() => mockRestoreFailedIngest.mock.calls.length === 1)
+
+    expect(mockRestoreFailedIngest).toHaveBeenCalledWith(TEST_PATH)
+    expect(mockCommitIngest).not.toHaveBeenCalled()
+    expect(getQueue()[0].status).toBe("cancelled")
+  })
+
+  it("restores after cancel when the run finishes anyway", async () => {
+    turnHistoryOn()
+    const run = createDeferred<string[]>()
+    mockAutoIngest.mockImplementation(() => run.promise)
+
+    await enqueueIngest(TEST_ID, "raw/sources/cancelled.md")
+    await waitFor(() => mockAutoIngest.mock.calls.length === 1)
+    await cancelTask(getQueue()[0].id)
+    run.resolve(["wiki/sources/cancelled.md"])
+    await waitFor(() => mockRestoreFailedIngest.mock.calls.length === 1)
+
+    expect(mockRestoreFailedIngest).toHaveBeenCalledWith(TEST_PATH)
+    expect(mockCommitIngest).not.toHaveBeenCalled()
+    expect(getQueue()[0].status).toBe("cancelled")
+  })
+
+  it("restores when pausing returns a running task to pending", async () => {
+    turnHistoryOn()
+    mockAutoIngest.mockImplementation((_projectPath, _sourcePath, _config, signal) => {
+      const run = createDeferred<string[]>()
+      signal?.addEventListener("abort", () => run.reject(new Error("aborted")))
+      return run.promise
+    })
+
+    await enqueueIngest(TEST_ID, "raw/sources/paused.md")
+    await waitFor(() => mockAutoIngest.mock.calls.length === 1)
+    pauseProcessing()
+    await waitFor(() => mockRestoreFailedIngest.mock.calls.length === 1)
+
+    expect(getQueue()[0].status).toBe("pending")
+    expect(mockCommitIngest).not.toHaveBeenCalled()
+  })
+
+  it("does nothing when history is off", async () => {
+    fakeHistory(false)
+    mockAutoIngest
+      .mockResolvedValueOnce(["wiki/sources/ok.md"])
+      .mockRejectedValue(new Error("boom"))
+
+    await enqueueIngest(TEST_ID, "raw/sources/ok.md")
+    await waitFor(() => getQueue().length === 0)
+    await enqueueIngest(TEST_ID, "raw/sources/bad.md")
+    await waitFor(() => getQueue().some((task) => task.retryCount > 0))
+
+    expect(mockResolveGitHistory).toHaveBeenCalledWith(TEST_ID, TEST_PATH)
+    expect(mockPrepareBaseline).not.toHaveBeenCalled()
+    expect(mockCommitIngest).not.toHaveBeenCalled()
+    expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
+  })
+
+  it("makes no git calls after the project changed mid-run", async () => {
+    turnHistoryOn()
+    const run = createDeferred<string[]>()
+    mockAutoIngest.mockImplementation(() => run.promise)
+
+    await enqueueIngest(TEST_ID, "raw/sources/switching.md")
+    await waitFor(() => mockAutoIngest.mock.calls.length === 1)
+    await pauseQueue()
+    run.reject(new Error("boom"))
+    await flushMicrotasks(20)
+
+    expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
+    expect(mockCommitIngest).not.toHaveBeenCalled()
+  })
+
+  it("makes no commit when the project changed during a successful run", async () => {
+    turnHistoryOn()
+    const run = createDeferred<string[]>()
+    mockAutoIngest.mockImplementation(() => run.promise)
+
+    await enqueueIngest(TEST_ID, "raw/sources/switching.md")
+    await waitFor(() => mockAutoIngest.mock.calls.length === 1)
+    await pauseQueue()
+    run.resolve(["wiki/sources/switching.md"])
+    await flushMicrotasks(20)
+
+    expect(mockCommitIngest).not.toHaveBeenCalled()
+    expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
+  })
+
+  it("leaves the queue alone when the project changed while the commit ran", async () => {
+    turnHistoryOn()
+    const commit = createDeferred<string | null>()
+    mockCommitIngest.mockImplementation(() => commit.promise)
+    mockAutoIngest.mockResolvedValue(["wiki/sources/switching.md"])
+
+    await enqueueIngest(TEST_ID, "raw/sources/switching.md")
+    await waitFor(() => mockCommitIngest.mock.calls.length === 1)
+    await pauseQueue()
+    const writesBefore = mockWriteFile.mock.calls.length
+    commit.resolve("c".repeat(40))
+    await flushMicrotasks(20)
+
+    expect(mockWriteFile.mock.calls.length).toBe(writesBefore)
+    expect(getQueueSummary().completed).toBe(0)
+  })
+
+  it("leaves the queue alone when the project changed while wiki/ was restored", async () => {
+    turnHistoryOn()
+    const restore = createDeferred<void>()
+    mockRestoreFailedIngest.mockImplementation(() => restore.promise)
+    mockAutoIngest.mockRejectedValue(new Error("boom"))
+
+    await enqueueIngest(TEST_ID, "raw/sources/switching.md")
+    await waitFor(() => mockRestoreFailedIngest.mock.calls.length === 1)
+    await pauseQueue()
+    const writesBefore = mockWriteFile.mock.calls.length
+    restore.resolve()
+    await flushMicrotasks(20)
+
+    expect(mockWriteFile.mock.calls.length).toBe(writesBefore)
+  })
+
+  it("runs one task at a time when history is on", async () => {
+    setIngestWorkerLimit(3)
+    turnHistoryOn()
+    let inFlight = 0
+    let maxInFlight = 0
+    mockAutoIngest.mockImplementation(async (_projectPath, sourcePath) => {
+      inFlight++
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await flushMicrotasks(5)
+      inFlight--
+      return [`wiki/sources/${sourcePath}`]
+    })
+
+    await enqueueBatch(TEST_ID, [
+      { sourcePath: "a.md", folderContext: "" },
+      { sourcePath: "b.md", folderContext: "" },
+      { sourcePath: "c.md", folderContext: "" },
+    ])
+    await waitFor(() => getQueue().length === 0)
+
+    expect(mockAutoIngest).toHaveBeenCalledTimes(3)
+    expect(maxInFlight).toBe(1)
+    expect(mockCommitIngest).toHaveBeenCalledTimes(3)
+  })
+
+  it("runs one task at a time even before the first decision is cached", async () => {
+    setIngestWorkerLimit(3)
+    turnHistoryOn(2)
+    let inFlight = 0
+    let maxInFlight = 0
+    mockAutoIngest.mockImplementation(async (_projectPath, sourcePath) => {
+      inFlight++
+      maxInFlight = Math.max(maxInFlight, inFlight)
+      await flushIO(3)
+      inFlight--
+      return [`wiki/sources/${sourcePath}`]
+    })
+
+    await enqueueBatch(TEST_ID, [
+      { sourcePath: "a.md", folderContext: "" },
+      { sourcePath: "b.md", folderContext: "" },
+      { sourcePath: "c.md", folderContext: "" },
+    ])
+    await waitFor(() => getQueue().length === 0)
+
+    expect(mockAutoIngest).toHaveBeenCalledTimes(3)
+    expect(maxInFlight).toBe(1)
+  })
+
+  it("keeps the configured worker limit when history is off", async () => {
+    setIngestWorkerLimit(3)
+    const runs: Array<ReturnType<typeof createDeferred<string[]>>> = []
+    mockAutoIngest.mockImplementation(() => {
+      const run = createDeferred<string[]>()
+      runs.push(run)
+      return run.promise
+    })
+
+    await enqueueBatch(TEST_ID, [
+      { sourcePath: "a.md", folderContext: "" },
+      { sourcePath: "b.md", folderContext: "" },
+      { sourcePath: "c.md", folderContext: "" },
+    ])
+    await waitFor(() => mockAutoIngest.mock.calls.length === 3)
+
+    expect(getQueueSummary().processing).toBe(3)
+    for (const run of runs) run.resolve(["wiki/sources/x.md"])
+    await waitFor(() => getQueue().length === 0)
   })
 })

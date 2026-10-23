@@ -5,6 +5,15 @@ import { getProjectPathById } from "@/lib/project-identity"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { IngestCommitCoordinator } from "@/lib/ingest-commit-coordinator"
+import {
+  commitIngest,
+  getCachedGitHistory,
+  isGitHistoryOnCached,
+  prepareIngestBaseline,
+  resolveGitHistory,
+  restoreFailedIngest,
+  titleFromSourcePath,
+} from "@/lib/git-history"
 import { clampUserConcurrency } from "@/lib/concurrency-limits"
 
 // ── Types ─────────────────────────────────────────────────────────────────
@@ -114,6 +123,11 @@ export function setIngestWorkerLimit(limit: number): void {
 
 export function getIngestWorkerLimit(): number {
   return workerLimit
+}
+
+/** With version history on, one ingest at a time: each run is one commit and a failed run restores `wiki/`. */
+function effectiveWorkerLimit(projectId: string): number {
+  return isGitHistoryOnCached(projectId) ? 1 : workerLimit
 }
 
 // ── Persistence ───────────────────────────────────────────────────────────
@@ -1090,7 +1104,11 @@ async function runTask(
     if (!run.writtenFiles.includes(relativePath)) run.writtenFiles.push(relativePath)
   }
 
+  let historyOn = false
   try {
+    // startTask already settled it; awaiting only when it did not keeps the queue's timing.
+    historyOn = getCachedGitHistory(projectId) ?? await resolveGitHistory(projectId, projectPath)
+    if (historyOn) await prepareIngestBaseline(projectPath)
     const writtenFiles = await autoIngest(
       projectPath,
       fullSourcePath,
@@ -1108,11 +1126,17 @@ async function runTask(
       // Written paths may be pre-existing pages that were merged in place.
       // Without a reliable old-content snapshot, deleting them would be data
       // loss. Keep completed atomic writes and let a retry converge via merge.
+      // With version history on, wiki/ goes back to the last commit instead.
+      if (historyOn) await restoreFailedIngest(projectPath)
       await saveQueue(projectPath)
       return
     }
     if (writtenFiles.length === 0) throw new Error("Ingest produced no output files")
 
+    if (historyOn) {
+      await commitIngest(projectPath, titleFromSourcePath(task.sourcePath), writtenFiles)
+      if (currentProjectId !== projectId || run.epoch !== queueEpoch) return
+    }
     cancelledInFlightTaskIds.delete(task.id)
     queue = queue.filter((candidate) => candidate.id !== task.id)
     completedSinceIdle++
@@ -1121,6 +1145,11 @@ async function runTask(
     console.log(`[Ingest Queue] Done: ${task.sourcePath}`)
   } catch (err) {
     if (currentProjectId !== projectId || run.epoch !== queueEpoch) return
+    // Every branch below ends without success: put wiki/ back before saving.
+    if (historyOn) {
+      await restoreFailedIngest(projectPath)
+      if (currentProjectId !== projectId || run.epoch !== queueEpoch) return
+    }
     const currentTask = queue.find((candidate) => candidate.id === task.id)
     if (cancelledInFlightTaskIds.delete(task.id) || currentTask?.status === "cancelled") {
       await saveQueue(projectPath)
@@ -1215,6 +1244,8 @@ async function startTask(projectId: string, task: IngestTask): Promise<boolean> 
   task.status = "processing"
   activeRuns.set(task.id, run)
   await saveQueue(projectPath)
+  // Settle the history decision before processNext reads the worker limit again.
+  if (getCachedGitHistory(projectId) === undefined) await resolveGitHistory(projectId, projectPath)
   if (currentProjectId !== projectId || run.epoch !== queueEpoch) {
     run.controller.abort()
     reservation.release()
@@ -1246,7 +1277,7 @@ async function processNext(projectId: string): Promise<void> {
   const epoch = queueEpoch
   scheduling = true
   try {
-    while (activeRuns.size < workerLimit && currentProjectId === projectId && !paused && !blockedOnLlmConfig) {
+    while (activeRuns.size < effectiveWorkerLimit(projectId) && currentProjectId === projectId && !paused && !blockedOnLlmConfig) {
       const next = queue.find((task) =>
         task.projectId === projectId &&
         task.status === "pending" &&
@@ -1278,7 +1309,7 @@ async function processNext(projectId: string): Promise<void> {
       task.projectId === projectId && task.status === "pending"
     )
     const needsDrain = processedSinceDrain && activeRuns.size === 0 && !hasAnyPending
-    const hasWorkerCapacity = activeRuns.size < workerLimit
+    const hasWorkerCapacity = activeRuns.size < effectiveWorkerLimit(projectId)
     if (currentProjectId === projectId && !paused && !blockedOnLlmConfig && ((hasWorkerCapacity && hasRunnable) || needsDrain)) {
       queueMicrotask(() => void processNext(projectId))
     }
