@@ -8,7 +8,7 @@
 
 **Tech Stack:** TypeScript, rolldown (bundle), Node 20+, vitest, `js-yaml`.
 
-**Spec:** `docs/superpowers/specs/2026-10-23-mechanism-wiki-toolbase-design.md` (sections 7.1–7.7, 6.2, 12 row 3)
+**Spec:** `docs/superpowers/specs/2026-10-23-mechanism-wiki-heptabase-design.md` (sections 7.1–7.7, 6.2, 12 row 3)
 
 ## Global Constraints
 
@@ -20,7 +20,7 @@
 - Mirror footer, exactly two lines after a `---` line: `來源：<comma-separated card links, or "無">` and `由 wiki 產生，請勿直接編輯。`
 - Retired card: title prefix `🗄 已停用｜`, body `請看 → <link to replacement>` (or `此頁已從 wiki 移除。`).
 - Sync eligibility: `type` in `mechanism`, `hypothesis`, `comparison`, or `concept` with `sources` length ≥ 2.
-- Property values: `page type` = page `type`; `wiki` = `wiki.yaml` `id`; `status` = `active` or `retired`; `domain` = page `domain` (mechanism pages: omit); `wiki page` = project-relative path; `last synced` = `{ "start": "<YYYY-MM-DD>T00:00:00.000Z" }`; hypotheses add `hypothesis status` (= `status` field) and `strength`.
+- Property values: `page type` = page `type`; `wiki` = `wiki.yaml` `id`; `status` = `active` or `retired`; `domain` = page `domain` (mechanism pages: omit; hypothesis pages: `to_domain`, ruling R19); `wiki page` = project-relative path; `last synced` = `{ "start": "<YYYY-MM-DD>T00:00:00.000Z" }`; hypotheses add `hypothesis status` (= `status` field) and `strength`.
 - Snapshot path: `raw/sources/heptabase/<card-id>.md`; frontmatter keys `title`, `heptabase_card_id`, `heptabase_whiteboards` (titles), `card_updated_at`, `url` (or omitted), `source_kind`, `domain` (only when a whiteboard hint maps to exactly one listed domain).
 - Verification: `npm run test:mocks`, `npm run typecheck`, and `npm run build:wiki-tool` (the bundle test fails when the committed bundle is stale).
 - Commit trailer: your session's Co-Authored-By line plus `Claude-Session: https://claude.ai/code/session_013yG6txX1fFsHyk4VQiasu7`.

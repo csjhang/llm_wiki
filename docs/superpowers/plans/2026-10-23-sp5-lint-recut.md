@@ -13,6 +13,7 @@
 ## Global Constraints
 
 - Thresholds live in `wiki.yaml` under `lint:` with defaults `draft_days: 30`, `max_domain_pages: 200`, `min_domain_pages: 3`, `semantic_reminder_ingests: 10`. (Ruling: the spec put thresholds in `schema.md`, but prose is not machine-readable; `wiki.yaml` is the wiki-level config file. Update spec section 9.1.)
+- A hypothesis page has no `domain`: for every check it counts under its `to_domain` (ruling R19), and `domain-missing` does not apply to it. In a work wiki, `from_domain` and `to_domain` may be listed in this wiki's `domains.yaml` or in the reading wiki's; check both before reporting `domain-unknown`. `hypothesis-stale-draft` uses ruling R18 (draft → testing needs a verify row linked to a query page).
 - Layer-1 check ids: `domain-missing`, `domain-unknown`, `concept-cross-domain`, `mechanism-no-instance`, `mirror-retired`, `map-missing-page`, `hypothesis-stale-draft`, `domain-too-large`, `domain-too-small`.
 - Semantic lint findings are review items (`contradiction`, `duplicate`, `suggestion`, or `confirm`), never automatic edits.
 - Semantic lint marker: `.llm-wiki/semantic-lint.json` `{ "commit": "<sha>", "at": "<iso>" }`. "Changed domains" = domains of pages changed between that commit and `HEAD`, plus their `also` domains.

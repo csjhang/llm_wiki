@@ -43,6 +43,7 @@
 - Modify: `src/lib/wiki-config/heptabase-config.ts` and its test (remove `wiki_id`, `mechanism_library`; unknown-key rule now rejects them)
 - Create: `templates/mechanism-wiki/wiki.yaml`
 - Modify: `templates/mechanism-wiki/heptabase.example.yaml`, `templates/mechanism-wiki/CLAUDE.md` (read order adds `wiki.yaml` after `purpose.md`)
+- Modify: `templates/mechanism-wiki/schema.md`, `templates/mechanism-wiki/docs/glossary.md` (Reading wiki and Work wiki entries), `templates/mechanism-wiki/schema/page-types/mechanism.md` (Location), `templates/mechanism-wiki/schema/page-types/hypothesis.md` (`mechanism` field): each names the `role` field of `wiki.yaml` as the test for a reading wiki or a work wiki (final review of sub-project 0, Important 4)
 - Modify: `src/lib/__tests__/mechanism-template-contract.test.ts` (`wiki.yaml is valid`)
 - Modify: `docs/superpowers/specs/2026-10-23-mechanism-wiki-heptabase-design.md` sections 5.1 and 7.3 (record the move; force-add, `docs/` is git-ignored)
 - Test: `src/lib/wiki-page-types.test.ts` (extend if present, else create)
@@ -76,7 +77,7 @@
 - Consumes: `parseDomainsYaml`, `parseWikiYaml`, `KNOWN_LENSES`, `readFile`/`listDirectory` from `@/commands/fs`.
 - Produces:
   ```ts
-  export interface LensDoc { id: string; text: string }
+  export interface LensDoc { id: string; text: string; promptText: string } // promptText = the Fields, Evidence standard, and Strength rules sections only; extracted fence-aware (the Example fence contains `## ` lines, and its frontmatter and links look like real pages)
   export interface MechanismContext {
     projectPath: string
     identity: WikiIdentity
@@ -114,7 +115,7 @@
   export function buildGenerationAddendum(ctx: MechanismContext, decisions: AnalysisDecisions): string
   export function domainHintFromSource(sourceContent: string): string | null // frontmatter `domain`, if it is in the list
   ```
-  `buildAnalysisAddendum` contains: the domain list (name + description), an instruction to choose exactly one domain or propose one, the `## Decisions` line forms from Global Constraints, the mechanism skeleton (the six `MECHANISM_SECTIONS` en names with one-line meanings), the lens text for `hintDomain` (or the `## Fields` sections of all lenses when `hintDomain` is null), and the rule "a mechanism has no industry, vendor, or product detail".
+  `buildAnalysisAddendum` contains: the domain list (name + description), an instruction to choose exactly one domain or propose one, the `## Decisions` line forms from Global Constraints, the mechanism skeleton (the six `MECHANISM_SECTIONS` en names with one-line meanings), the lens `promptText` for `hintDomain` (or the `## Fields` sections of all lenses, extracted fence-aware, when `hintDomain` is null), and the rule "a mechanism has no industry, vendor, or product detail".
   `buildGenerationAddendum` contains: `domain: <chosen>` must appear on every non-mechanism page; mechanism page rules from `ctx.pageTypeRules.mechanism`; section headings via `headingFor(..., outputLanguage)`; for `role: work`, "do not write wiki/mechanisms/ files; write the mechanism as a REVIEW block of type new-mechanism"; for each `MECHANISM: existing:<slug>`, "update wiki/mechanisms/<slug>.md: add one line under the known-instances heading".
 - `ingest.ts` hook: load `mechanismCtx = await loadMechanismContext(pp)` next to the schema read. When non-null, append `buildAnalysisAddendum` to the analysis system prompt and `buildGenerationAddendum` to the generation system prompt, and pass the scoped index text instead of the full index. Keep the call order and arguments unchanged when null.
 
@@ -232,7 +233,7 @@
   export async function buildScopedIndexText(projectPath: string, ctx: MechanismContext, domain: string | null): Promise<string>
   export async function listMechanismSlugs(libraryPath: string): Promise<Set<string>>
   ```
-  Root index: `# Wiki Index`, then one line per domain in `domains.yaml` order sorted by path: `- [<domain>](indexes/<file>.md) — <N> pages`, then `- [Mechanisms](indexes/_mechanisms.md) — <N> pages`, then `- Unassigned — <N> pages` listing pages with no or unknown domain as `[[slug]]` lines. Domain index: `# <domain>` then `## <Type>` groups (fixed order: source, entity, concept, comparison, query, hypothesis) with `- [[slug]] — <title>` lines sorted by title. Mechanism index: one line per mechanism page. Output is deterministic (same input, same bytes). `rebuildDomainIndex` writes only files whose content changed. `buildScopedIndexText` = root index + mechanism index of `ctx.mechanismLibraryPath` + the domain index for `domain` when given.
+  Root index: `# Wiki Index`, then one line per domain in `domains.yaml` order sorted by path: `- [<domain>](indexes/<file>.md) — <N> pages`, then `- [Mechanisms](indexes/_mechanisms.md) — <N> pages`, then `- Unassigned — <N> pages` listing pages with no or unknown domain as `[[slug]]` lines. Domain index: `# <domain>` then `## <Type>` groups (fixed order: source, entity, concept, comparison, query, hypothesis) with `- [[slug]] — <title>` lines sorted by title. A hypothesis page has no `domain`; index it under its `to_domain` (ruling R19). A page whose `type` is not one of the seven types goes to the Unassigned list with its type in parentheses, so nothing is hidden. Mechanism index: one line per mechanism page. Output is deterministic (same input, same bytes). `rebuildDomainIndex` writes only files whose content changed. `buildScopedIndexText` = root index + mechanism index of `ctx.mechanismLibraryPath` + the domain index for `domain` when given.
 
 - [ ] **Step 1: Failing tests** — `renders root index with counts`; `groups domain index by type in fixed order`; `unassigned pages are listed`; `index path replaces slashes`; `deterministic output`; `writes only changed files`; `scoped text includes the library mechanisms for a work wiki`; `non-mechanism project keeps old index` (ingest.ts hook still calls `updateWikiIndexDeterministically` when the context is null).
 - [ ] **Step 2: Run** focused → FAIL
@@ -259,7 +260,7 @@
   export async function stageResearchResult(projectPath: string, fileName: string, content: string): Promise<Omit<ReviewItem, "id" | "resolved" | "createdAt">>
   ```
   Actions:
-  - `mech:approve-domain`: parse the `PROPOSAL:` line; append the domain to `domains.yaml` with js-yaml `dump` of the parsed file (keep `version`), re-validate with `parseDomainsYaml`, write, resolve as `Approved`. Invalid result → do not write; throw an error the view shows.
+  - `mech:approve-domain`: parse the `PROPOSAL:` line; append the new entry as text to `domains.yaml` (do not re-dump the file: `dump` deletes the template's and the user's comments; when the file has `domains: {}`, replace that one line with `domains:` first), re-validate the result with `parseDomainsYaml` using the lens file names in `lenses/` as known lenses, write, resolve as `Approved`. Invalid result → do not write; throw an error the view shows.
   - `mech:propose-mechanism`: write the proposal to `<mechanism_library>/raw/sources/proposals/<slug>.md` with frontmatter `source_kind: note`, `title`, `proposed_from: <wiki id>`; never include the original source path. Resolve as `Sent to reading wiki`. The reading wiki ingests it when that project is active.
   - `mech:replace-source`: overwrite the older raw source with the newer text, then resolve; the file watcher re-ingests it.
   - `mech:accept-research`: move `.llm-wiki/research-staging/<file>` to `wiki/queries/<file>`, resolve as `Saved`.

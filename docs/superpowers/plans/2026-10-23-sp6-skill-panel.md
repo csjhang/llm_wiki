@@ -84,6 +84,8 @@
 - Modify: the wiki page editor component: in a mechanism wiki, open pages under `wiki/` read-only with a one-line notice "此頁由 AI 維護。要修改，請在 Heptabase 寫一張想法卡片。"
 - Create: `templates/mechanism-wiki/.claude/settings.json`; modify `.gitignore` (exception); modify `src/lib/mechanism-template.ts` glob to include the dot folder
 - Modify: `plugins/llm-wiki/skills/wiki/SKILL.md` (list itself last; invoke the chosen skill with the Skill tool) — fixes deferred minor from sub-project 0
+- Modify: `src/i18n/*.json` (add `templates.mechanism.name` and `templates.mechanism.description`, so the template picker shows Chinese in the Chinese UI)
+- Modify: `src/lib/__tests__/plugin-contract.test.ts` (`no template file is git-ignored` checks every file under `templates/`, `examples/`, and `plugins/`)
 - Test: editor read-only test; template contract test for `settings.json` contents; `no template file is git-ignored` extended to `.claude/settings.json`
 - Plugin MCP tools in Claude Code are named `mcp__plugin_<plugin>_<server>__<tool>` (observed in this environment for other plugins). So the Heptabase tools are `mcp__plugin_heptabase_heptabase__*`. The llm_wiki MCP server is configured by the user, so its prefix depends on the server name they choose; the template allows `mcp__llm-wiki__*` and the README tells the user to name the server `llm-wiki`. Still confirm the Heptabase prefix in a real install when one is available, and record the result in the commit message.
 - [ ] Steps: failing tests → FAIL → implement → verification → commit `feat(panel): read-only pages and permission allowlist`
