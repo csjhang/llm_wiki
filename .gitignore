@@ -49,3 +49,7 @@ pnpm-debug.log*
 # Brainstorm assets (not tracked in source control)
 .superpowers/
 .claude/
+
+# Mechanism wiki template ships these files
+!/templates/mechanism-wiki/docs/
+!/templates/mechanism-wiki/AGENTS.md

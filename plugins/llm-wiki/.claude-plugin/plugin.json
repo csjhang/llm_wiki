@@ -1,0 +1,15 @@
+{
+  "name": "llm-wiki",
+  "displayName": "LLM Wiki (Mechanism)",
+  "version": "0.1.0",
+  "description": "Skills that build and maintain a mechanism wiki: ingest sources, query the wiki, and sync it with Heptabase.",
+  "license": "GPL-3.0-only",
+  "repository": "https://github.com/csjhang/llm_wiki",
+  "keywords": [
+    "llm-wiki",
+    "wiki",
+    "knowledge management",
+    "mechanism",
+    "heptabase"
+  ]
+}

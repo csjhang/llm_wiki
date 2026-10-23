@@ -1,0 +1,16 @@
+{
+  "name": "llm-wiki-mechanism",
+  "owner": {
+    "name": "csjhang"
+  },
+  "metadata": {
+    "description": "Claude Code plugins for the LLM Wiki mechanism wiki"
+  },
+  "plugins": [
+    {
+      "name": "llm-wiki",
+      "source": "./plugins/llm-wiki",
+      "description": "Build and maintain a mechanism wiki with Claude Code and Heptabase"
+    }
+  ]
+}
