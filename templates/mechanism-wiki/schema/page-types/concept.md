@@ -39,7 +39,7 @@ If the `--<last-domain-segment>` file name already exists, use the full domain p
 - If another domain has a concept with the same name, add `--<last-domain-segment>` to the new page only.
 - Put one line at the top of each of the two pages, directly under the title. Each line links to the other page.
 - Write a claim from a note as the view of the user.
-- When the idea is one instance of a mechanism, still write this concept page. Then write or update the mechanism page that lists it.
+- When the idea is one instance of a mechanism, still write this concept page. Then write or update the mechanism page that lists it. In a work wiki, send a `new-mechanism` review item instead.
 
 ### Do not
 

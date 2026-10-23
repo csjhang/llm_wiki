@@ -10,8 +10,8 @@ A mechanism page can start with one instance. Write the concept or entity page f
 ## Location
 
 Write the page in `wiki/mechanisms/`. Only a reading wiki writes mechanism pages.
-The `role` field of `wiki.yaml` says which wiki this is: `role: reading` is a reading wiki, and `role: work` is a work wiki.
 A work wiki does not write them. It sends a `new-mechanism` review item instead.
+The `role` field of `wiki.yaml` says which wiki this is. `role: reading` is a reading wiki. `role: work` is a work wiki.
 Before you write a page, search `wiki/indexes/_mechanisms.md` for the same mechanism. If a page exists, add one line to its Known instances section. Do not write a second page.
 
 ## Frontmatter
