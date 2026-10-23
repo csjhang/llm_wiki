@@ -57,16 +57,20 @@ function normalizeHeading(text: string): string {
  * Body of the level-2 section of `section` in `markdown`, or null when absent.
  *
  * A heading matches when its text equals the English, Traditional Chinese, or
- * Simplified Chinese variant after `normalizeHeading`. The body runs to the
- * next level-2 heading, or to the end of the text, and is trimmed.
+ * Simplified Chinese variant after `normalizeHeading`. The English variant
+ * ignores letter case ("## Why It Works" finds `why`). The two Chinese
+ * variants must match exactly. The body runs to the next level-2 heading, or
+ * to the end of the text, and is trimmed.
  */
 export function findSection(markdown: string, section: SectionHeading): string | null {
-  const variants = new Set([section.en, section.zhHant, section.zhHans])
+  const english = section.en.toLowerCase()
+  const matches = (heading: string): boolean => {
+    const text = normalizeHeading(heading)
+    return text.toLowerCase() === english || text === section.zhHant || text === section.zhHans
+  }
   const lines = markdown.split(/\r?\n/)
   const isLevelTwo = (line: string): boolean => /^##(?:[ \t]|$)/.test(line)
-  const start = lines.findIndex(
-    (line) => isLevelTwo(line) && variants.has(normalizeHeading(line.slice(2))),
-  )
+  const start = lines.findIndex((line) => isLevelTwo(line) && matches(line.slice(2)))
   if (start === -1) return null
   const rest = lines.slice(start + 1)
   const end = rest.findIndex(isLevelTwo)

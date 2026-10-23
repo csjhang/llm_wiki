@@ -117,7 +117,7 @@ export function CreateProjectDialog({ open: isOpen, onOpenChange, onCreated }: C
       const pp = normalizePath(project.path)
 
       const template = getTemplate(selectedTemplate)
-      await applyTemplate(pp, template, { writeFile, createDirectory })
+      await applyTemplate(pp, template, { writeFile, createDirectory }, { outputLanguage: language })
 
       // Persist the user's language choice. The store / disk
       // mirror is what the rest of the app reads via

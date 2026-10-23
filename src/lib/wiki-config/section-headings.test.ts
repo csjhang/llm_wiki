@@ -90,4 +90,21 @@ describe("section headings", () => {
   it("returns an empty string for a heading with no body", () => {
     expect(findSection("## Parts\n## Flows\nText.\n", PARTS)).toBe("")
   })
+
+  it("matches the English heading in any letter case, and keeps CJK matching exact", () => {
+    const WHY = MECHANISM_SECTIONS[3]
+    const CONSTRAINTS = MECHANISM_SECTIONS[2]
+    expect(findSection("## Why It Works\nText.\n", WHY)).toBe("Text.")
+    expect(findSection("## WHY IT WORKS:\nText.\n", WHY)).toBe("Text.")
+    expect(findSection("## why it works\nText.\n## Failure conditions\nOther.\n", WHY)).toBe("Text.")
+    expect(findSection("## Constraints And Trade-Offs\nText.\n", CONSTRAINTS)).toBe("Text.")
+    expect(findSection("## parts\nText.\n", PARTS)).toBe("Text.")
+    // A different word is still a different heading.
+    expect(findSection("## Why It Work\nText.\n", WHY)).toBeNull()
+    // CJK variants match as written. A Simplified Chinese heading does not match the Traditional one.
+    expect(findSection("## 為什麼有效\nText.\n", WHY)).toBe("Text.")
+    expect(findSection("## 为什么有效\nText.\n", WHY)).toBe("Text.")
+    expect(findSection("## 為什麼有效\nText.\n", PARTS)).toBeNull()
+    expect(findSection("## 為什么有效\nText.\n", WHY)).toBeNull()
+  })
 })

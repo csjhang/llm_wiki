@@ -132,3 +132,53 @@ describe("applyTemplate", () => {
     ])
   })
 })
+
+describe("applyTemplate output language", () => {
+  const PURPOSE = "# Purpose\n\nOutput language:\n<!-- Write the language here. -->\n\n## Goal\n"
+
+  const purposeWritten = async (outputLanguage?: string, purpose = PURPOSE): Promise<string> => {
+    const { fs, calls } = makeFakeFs()
+    await applyTemplate("/p", makeTemplate({ purpose }), fs, { outputLanguage })
+    const call = calls.find((c) => c.op === "writeFile" && c.path === "/p/purpose.md")
+    if (call?.op !== "writeFile") throw new Error("purpose.md was not written")
+    return call.content
+  }
+
+  it("fills the empty Output language line and keeps the hint under it", async () => {
+    expect(await purposeWritten("Traditional Chinese")).toBe(
+      "# Purpose\n\nOutput language: Traditional Chinese\n<!-- Write the language here. -->\n\n## Goal\n",
+    )
+  })
+
+  it("leaves purpose.md as it is for auto, an empty value, or no value", async () => {
+    expect(await purposeWritten("auto")).toBe(PURPOSE)
+    expect(await purposeWritten("")).toBe(PURPOSE)
+    expect(await purposeWritten("  ")).toBe(PURPOSE)
+    expect(await purposeWritten(undefined)).toBe(PURPOSE)
+    const { fs, calls } = makeFakeFs()
+    await applyTemplate("/p", makeTemplate({ purpose: PURPOSE }), fs)
+    expect(calls).toContainEqual({ op: "writeFile", path: "/p/purpose.md", content: PURPOSE })
+  })
+
+  it("keeps a line that already has a value, and a purpose with no such line", async () => {
+    const filled = "Output language: English\n"
+    expect(await purposeWritten("Japanese", filled)).toBe(filled)
+    expect(await purposeWritten("Japanese", "PURPOSE")).toBe("PURPOSE")
+  })
+
+  it("keeps CRLF line endings and does not treat $ in the value as a replacement pattern", async () => {
+    expect(await purposeWritten("A$&B", "Output language:\r\n<!-- hint -->\r\n")).toBe(
+      "Output language: A$&B\r\n<!-- hint -->\r\n",
+    )
+  })
+
+  it("fills the line of the real Mechanism Wiki template, and writes its other files unchanged", async () => {
+    const mechanism = getTemplate("mechanism")
+    const { fs, calls } = makeFakeFs()
+    await applyTemplate("/p", mechanism, fs, { outputLanguage: "Traditional Chinese" })
+    const purpose = calls.find((c) => c.op === "writeFile" && c.path === "/p/purpose.md")
+    expect(purpose?.op === "writeFile" ? purpose.content : "").toMatch(/^Output language: Traditional Chinese\r?$/m)
+    expect(calls).toContainEqual({ op: "writeFile", path: "/p/schema.md", content: mechanism.schema })
+    expect(calls).toContainEqual({ op: "writeFile", path: "/p/CLAUDE.md", content: mechanism.files?.["CLAUDE.md"] })
+  })
+})
