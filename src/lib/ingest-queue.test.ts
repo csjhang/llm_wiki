@@ -37,8 +37,10 @@ vi.mock("@/lib/git-history", async () => {
     getCachedGitHistory: vi.fn(),
     isGitHistoryOnCached: vi.fn(),
     prepareIngestBaseline: vi.fn(),
+    trackIngestPath: vi.fn(),
     commitIngest: vi.fn(),
     restoreFailedIngest: vi.fn(),
+    recoverInterruptedIngest: vi.fn(),
     titleFromSourcePath,
   }
 })
@@ -97,8 +99,10 @@ import {
   getCachedGitHistory,
   isGitHistoryOnCached,
   prepareIngestBaseline,
+  recoverInterruptedIngest,
   resolveGitHistory,
   restoreFailedIngest,
+  trackIngestPath,
 } from "@/lib/git-history"
 import { deleteFile, readFile, writeFile } from "@/commands/fs"
 import { sweepResolvedReviews } from "./sweep-reviews"
@@ -115,6 +119,8 @@ const mockIsGitHistoryOnCached = vi.mocked(isGitHistoryOnCached)
 const mockPrepareBaseline = vi.mocked(prepareIngestBaseline)
 const mockCommitIngest = vi.mocked(commitIngest)
 const mockRestoreFailedIngest = vi.mocked(restoreFailedIngest)
+const mockTrackIngestPath = vi.mocked(trackIngestPath)
+const mockRecoverInterruptedIngest = vi.mocked(recoverInterruptedIngest)
 
 /** Simulate the app having opened `TEST_ID` at `TEST_PATH` so the queue
  *  module's `currentProjectId` / `currentProjectPath` are set. Most
@@ -122,6 +128,11 @@ const mockRestoreFailedIngest = vi.mocked(restoreFailedIngest)
  *  projects. */
 async function activateProject(id: string = TEST_ID): Promise<void> {
   await restoreQueue(id, idToPath[id])
+}
+
+/** The run object the queue hands to git history for a task of this source. */
+function historyRun(sourcePath: string) {
+  return expect.objectContaining({ taskId: expect.any(String), sourcePath })
 }
 
 beforeEach(async () => {
@@ -147,7 +158,10 @@ beforeEach(async () => {
   mockIsGitHistoryOnCached.mockReset()
   mockIsGitHistoryOnCached.mockReturnValue(false)
   mockPrepareBaseline.mockReset()
-  mockPrepareBaseline.mockResolvedValue(undefined)
+  mockPrepareBaseline.mockResolvedValue(true)
+  mockTrackIngestPath.mockReset()
+  mockRecoverInterruptedIngest.mockReset()
+  mockRecoverInterruptedIngest.mockResolvedValue(undefined)
   mockCommitIngest.mockReset()
   mockCommitIngest.mockResolvedValue("a".repeat(40))
   mockRestoreFailedIngest.mockReset()
@@ -1655,11 +1669,152 @@ describe("ingest-queue — git history", () => {
   }
   const turnHistoryOn = (delayTicks = 0): void => fakeHistory(true, delayTicks)
 
+  it("restores only the files the failing run wrote", async () => {
+    turnHistoryOn()
+    mockAutoIngest.mockImplementation(
+      async (_projectPath, _sourcePath, _config, _signal, _folder, onFileWritten) => {
+        onFileWritten?.("wiki/concepts/new.md")
+        onFileWritten?.("wiki/index.md")
+        onFileWritten?.("wiki/concepts/new.md")
+        throw new Error("boom")
+      },
+    )
+
+    await enqueueIngest(TEST_ID, "raw/sources/broken.md")
+    await waitFor(() => mockRestoreFailedIngest.mock.calls.length >= 1)
+
+    expect(mockRestoreFailedIngest.mock.calls[0]).toEqual([
+      TEST_PATH,
+      ["wiki/concepts/new.md", "wiki/index.md"],
+      historyRun("raw/sources/broken.md"),
+    ])
+    // Each written path also reaches the in-flight record, once per run.
+    expect(mockTrackIngestPath.mock.calls.slice(0, 2).map((call) => call[2])).toEqual([
+      "wiki/concepts/new.md",
+      "wiki/index.md",
+    ])
+    expect(mockTrackIngestPath.mock.calls[0][0]).toBe(TEST_PATH)
+    expect(mockTrackIngestPath.mock.calls[0][1]).toBe(mockPrepareBaseline.mock.calls[0][1])
+  })
+
+  it("restores the union of tracked and returned files after a cancel that finished anyway", async () => {
+    turnHistoryOn()
+    const run = createDeferred<string[]>()
+    mockAutoIngest.mockImplementation(
+      (_projectPath, _sourcePath, _config, _signal, _folder, onFileWritten) => {
+        onFileWritten?.("wiki/sources/old-name.md")
+        return run.promise
+      },
+    )
+
+    await enqueueIngest(TEST_ID, "raw/sources/cancelled.md")
+    await waitFor(() => mockAutoIngest.mock.calls.length === 1)
+    await cancelTask(getQueue()[0].id)
+    run.resolve(["wiki/sources/cancelled.md"])
+    await waitFor(() => mockRestoreFailedIngest.mock.calls.length === 1)
+
+    expect(mockRestoreFailedIngest.mock.calls[0][1]).toEqual([
+      "wiki/sources/old-name.md",
+      "wiki/sources/cancelled.md",
+    ])
+  })
+
+  it("commits the tracked paths with the returned ones", async () => {
+    turnHistoryOn()
+    mockAutoIngest.mockImplementation(
+      async (_projectPath, _sourcePath, _config, _signal, _folder, onFileWritten) => {
+        onFileWritten?.("wiki/sources/old-name.md")
+        onFileWritten?.("wiki/sources/report.md")
+        return ["wiki/sources/report.md"]
+      },
+    )
+
+    await enqueueIngest(TEST_ID, "raw/sources/report.pdf")
+    await waitFor(() => getQueue().length === 0)
+
+    expect(mockCommitIngest).toHaveBeenCalledWith(
+      TEST_PATH,
+      "report",
+      ["wiki/sources/report.md"],
+      historyRun("raw/sources/report.pdf"),
+      ["wiki/sources/old-name.md", "wiki/sources/report.md"],
+    )
+  })
+
+  it("does not restore when the baseline failed", async () => {
+    turnHistoryOn()
+    mockPrepareBaseline.mockResolvedValue(false)
+    mockAutoIngest.mockImplementation(
+      async (_projectPath, _sourcePath, _config, _signal, _folder, onFileWritten) => {
+        onFileWritten?.("wiki/concepts/new.md")
+        throw new Error("boom")
+      },
+    )
+
+    await enqueueIngest(TEST_ID, "raw/sources/broken.md")
+    await waitFor(() => getQueue()[0]?.status === "failed")
+
+    expect(mockAutoIngest).toHaveBeenCalledTimes(3)
+    expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
+    expect(mockTrackIngestPath).not.toHaveBeenCalled()
+  })
+
+  it("does not restore after a cancel when the baseline failed", async () => {
+    turnHistoryOn()
+    mockPrepareBaseline.mockResolvedValue(false)
+    const run = createDeferred<string[]>()
+    mockAutoIngest.mockImplementation(() => run.promise)
+
+    await enqueueIngest(TEST_ID, "raw/sources/cancelled.md")
+    await waitFor(() => mockAutoIngest.mock.calls.length === 1)
+    await cancelTask(getQueue()[0].id)
+    run.resolve(["wiki/sources/cancelled.md"])
+    await waitFor(() => mockWriteFile.mock.calls.length > 0 && getQueue()[0].status === "cancelled")
+    await flushMicrotasks(20)
+
+    expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
+  })
+
+  it("still commits a successful ingest when the baseline failed", async () => {
+    turnHistoryOn()
+    mockPrepareBaseline.mockResolvedValue(false)
+    mockAutoIngest.mockResolvedValue(["wiki/sources/ok.md"])
+
+    await enqueueIngest(TEST_ID, "raw/sources/ok.md")
+    await waitFor(() => getQueue().length === 0)
+
+    expect(mockCommitIngest).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not restore on a stale project when the baseline failed", async () => {
+    turnHistoryOn()
+    mockPrepareBaseline.mockResolvedValue(false)
+    const run = createDeferred<string[]>()
+    mockAutoIngest.mockImplementation(() => run.promise)
+
+    await enqueueIngest(TEST_ID, "raw/sources/switching.md")
+    await waitFor(() => mockAutoIngest.mock.calls.length === 1)
+    await pauseQueue()
+    run.reject(new Error("boom"))
+    await flushMicrotasks(20)
+
+    expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
+  })
+
+  it("recovers an interrupted ingest when the project's queue starts", async () => {
+    expect(mockRecoverInterruptedIngest).toHaveBeenCalledWith(TEST_PATH)
+    mockRecoverInterruptedIngest.mockClear()
+    await restoreQueue(TEST_ID_B, TEST_PATH_B)
+    expect(mockRecoverInterruptedIngest).toHaveBeenCalledTimes(1)
+    expect(mockRecoverInterruptedIngest).toHaveBeenCalledWith(TEST_PATH_B)
+  })
+
   it("commits after a successful ingest", async () => {
     turnHistoryOn()
     const order: string[] = []
     mockPrepareBaseline.mockImplementation(async () => {
       order.push("baseline")
+      return true
     })
     mockAutoIngest.mockImplementation(async () => {
       order.push("autoIngest")
@@ -1675,12 +1830,15 @@ describe("ingest-queue — git history", () => {
 
     expect(mockResolveGitHistory).toHaveBeenCalledWith(TEST_ID, TEST_PATH)
     expect(mockPrepareBaseline).toHaveBeenCalledTimes(1)
-    expect(mockPrepareBaseline).toHaveBeenCalledWith(TEST_PATH)
+    expect(mockPrepareBaseline).toHaveBeenCalledWith(TEST_PATH, historyRun("raw/sources/report.pdf"))
     expect(mockCommitIngest).toHaveBeenCalledTimes(1)
-    expect(mockCommitIngest).toHaveBeenCalledWith(TEST_PATH, "report", [
-      "wiki/sources/report.md",
-      "wiki/concepts/rope.md",
-    ])
+    expect(mockCommitIngest).toHaveBeenCalledWith(
+      TEST_PATH,
+      "report",
+      ["wiki/sources/report.md", "wiki/concepts/rope.md"],
+      historyRun("raw/sources/report.pdf"),
+      ["wiki/sources/report.md", "wiki/concepts/rope.md"],
+    )
     expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
     expect(order).toEqual(["baseline", "autoIngest", "commit"])
   })
@@ -1702,7 +1860,7 @@ describe("ingest-queue — git history", () => {
     await enqueueIngest(TEST_ID, "raw/sources/broken.md")
     await waitFor(() => mockRestoreFailedIngest.mock.calls.length >= 1)
 
-    expect(mockRestoreFailedIngest).toHaveBeenCalledWith(TEST_PATH)
+    expect(mockRestoreFailedIngest).toHaveBeenCalledWith(TEST_PATH, [], historyRun("raw/sources/broken.md"))
     expect(mockCommitIngest).not.toHaveBeenCalled()
   })
 
@@ -1751,7 +1909,7 @@ describe("ingest-queue — git history", () => {
     await cancelTask(getQueue()[0].id)
     await waitFor(() => mockRestoreFailedIngest.mock.calls.length === 1)
 
-    expect(mockRestoreFailedIngest).toHaveBeenCalledWith(TEST_PATH)
+    expect(mockRestoreFailedIngest).toHaveBeenCalledWith(TEST_PATH, [], historyRun("raw/sources/cancelled.md"))
     expect(mockCommitIngest).not.toHaveBeenCalled()
     expect(getQueue()[0].status).toBe("cancelled")
   })
@@ -1767,7 +1925,11 @@ describe("ingest-queue — git history", () => {
     run.resolve(["wiki/sources/cancelled.md"])
     await waitFor(() => mockRestoreFailedIngest.mock.calls.length === 1)
 
-    expect(mockRestoreFailedIngest).toHaveBeenCalledWith(TEST_PATH)
+    expect(mockRestoreFailedIngest).toHaveBeenCalledWith(
+      TEST_PATH,
+      ["wiki/sources/cancelled.md"],
+      historyRun("raw/sources/cancelled.md"),
+    )
     expect(mockCommitIngest).not.toHaveBeenCalled()
     expect(getQueue()[0].status).toBe("cancelled")
   })
@@ -1819,7 +1981,7 @@ describe("ingest-queue — git history", () => {
     await waitFor(() => mockRestoreFailedIngest.mock.calls.length === 1)
     await flushMicrotasks(20)
 
-    expect(mockRestoreFailedIngest).toHaveBeenCalledWith(TEST_PATH)
+    expect(mockRestoreFailedIngest).toHaveBeenCalledWith(TEST_PATH, [], historyRun("raw/sources/switching.md"))
     expect(mockCommitIngest).not.toHaveBeenCalled()
     // The queue and its file belong to whatever project is open now.
     expect(mockWriteFile.mock.calls.length).toBe(writesBefore)
@@ -1838,9 +2000,13 @@ describe("ingest-queue — git history", () => {
     await waitFor(() => mockCommitIngest.mock.calls.length === 1)
     await flushMicrotasks(20)
 
-    expect(mockCommitIngest).toHaveBeenCalledWith(TEST_PATH, "switching", [
-      "wiki/sources/switching.md",
-    ])
+    expect(mockCommitIngest).toHaveBeenCalledWith(
+      TEST_PATH,
+      "switching",
+      ["wiki/sources/switching.md"],
+      historyRun("raw/sources/switching.md"),
+      ["wiki/sources/switching.md"],
+    )
     expect(mockRestoreFailedIngest).not.toHaveBeenCalled()
     expect(mockWriteFile.mock.calls.length).toBe(writesBefore)
     expect(getQueueSummary().completed).toBe(0)

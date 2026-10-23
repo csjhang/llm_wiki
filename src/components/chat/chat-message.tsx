@@ -616,11 +616,12 @@ function SaveToWikiButton({ content, visible }: { content: string; visible: bool
       setSaved(true)
       setTimeout(() => setSaved(false), 2000)
 
-      // Full auto-ingest: extract entities, concepts, cross-references from saved content
+      // Full auto-ingest: extract entities, concepts, cross-references from saved content.
+      // Through the ingest queue, so version history records it like any ingest.
       const llmConfig = getTaskLlmConfig("ingest")
       if (hasUsableLlm(llmConfig)) {
-        const { autoIngest } = await import("@/lib/ingest")
-        autoIngest(pp, filePath, llmConfig).catch((err) =>
+        const { enqueueIngest } = await import("@/lib/ingest-queue")
+        enqueueIngest(project.id, filePath).catch((err) =>
           console.error("Failed to auto-ingest saved query:", err)
         )
       }

@@ -9,9 +9,11 @@ import {
   commitIngest,
   getCachedGitHistory,
   prepareIngestBaseline,
+  recoverInterruptedIngest,
   resolveGitHistory,
   restoreFailedIngest,
   titleFromSourcePath,
+  trackIngestPath,
 } from "@/lib/git-history"
 import { clampUserConcurrency } from "@/lib/concurrency-limits"
 
@@ -989,6 +991,8 @@ export async function restoreQueue(
   resetQueueAccounting()
   currentProjectId = projectId
   currentProjectPath = pp
+  // Put back what an ingest interrupted by a crash or quit left in this project.
+  void recoverInterruptedIngest(pp)
 
   await inactiveQueueWrite
 
@@ -1103,15 +1107,20 @@ async function runTask(
   const fullSourcePath = isAbsolutePath(task.sourcePath)
     ? normalizePath(task.sourcePath)
     : `${projectPath}/${task.sourcePath}`
+  // Version history acts on this run's own paths only, and restores only after a good baseline.
+  let historyOn = false
+  let baselineOk = false
+  const historyRun = { taskId: task.id, sourcePath: task.sourcePath }
   const trackWrittenFile = (relativePath: string): void => {
-    if (!run.writtenFiles.includes(relativePath)) run.writtenFiles.push(relativePath)
+    if (run.writtenFiles.includes(relativePath)) return
+    run.writtenFiles.push(relativePath)
+    if (baselineOk) trackIngestPath(projectPath, historyRun, relativePath)
   }
 
-  let historyOn = false
   try {
     // startTask already settled it; awaiting only when it did not keeps the queue's timing.
     historyOn = getCachedGitHistory(projectId) ?? await resolveGitHistory(projectId, projectPath)
-    if (historyOn) await prepareIngestBaseline(projectPath)
+    if (historyOn) baselineOk = await prepareIngestBaseline(projectPath, historyRun)
     const writtenFiles = await autoIngest(
       projectPath,
       fullSourcePath,
@@ -1121,24 +1130,24 @@ async function runTask(
       trackWrittenFile,
       { runCommit },
     )
+    for (const file of writtenFiles) trackWrittenFile(file)
     if (currentProjectId !== projectId || run.epoch !== queueEpoch) {
       // The project changed mid-run: the queue is not ours any more, but the
       // old project's wiki still needs its commit, so act on it by path.
       if (historyOn && writtenFiles.length > 0) {
-        await commitIngest(projectPath, titleFromSourcePath(task.sourcePath), writtenFiles)
+        await commitIngest(projectPath, titleFromSourcePath(task.sourcePath), writtenFiles, historyRun, run.writtenFiles)
       }
       return
     }
-    run.writtenFiles = writtenFiles
 
     const currentTask = queue.find((candidate) => candidate.id === task.id)
     if (cancelledInFlightTaskIds.delete(task.id) || currentTask?.status === "cancelled") {
       // Written paths may be pre-existing pages that were merged in place.
       // Without a reliable old-content snapshot, deleting them would be data
       // loss. Keep completed atomic writes and let a retry converge via merge.
-      // With version history on, wiki/ goes back to the last commit instead.
-      if (historyOn) {
-        await restoreFailedIngest(projectPath)
+      // With version history on, the paths this run wrote go back to the last commit instead.
+      if (historyOn && baselineOk) {
+        await restoreFailedIngest(projectPath, run.writtenFiles, historyRun)
         if (currentProjectId !== projectId || run.epoch !== queueEpoch) return
       }
       await saveQueue(projectPath)
@@ -1147,7 +1156,7 @@ async function runTask(
     if (writtenFiles.length === 0) throw new Error("Ingest produced no output files")
 
     if (historyOn) {
-      await commitIngest(projectPath, titleFromSourcePath(task.sourcePath), writtenFiles)
+      await commitIngest(projectPath, titleFromSourcePath(task.sourcePath), writtenFiles, historyRun, run.writtenFiles)
       if (currentProjectId !== projectId || run.epoch !== queueEpoch) return
     }
     cancelledInFlightTaskIds.delete(task.id)
@@ -1158,13 +1167,13 @@ async function runTask(
     console.log(`[Ingest Queue] Done: ${task.sourcePath}`)
   } catch (err) {
     if (currentProjectId !== projectId || run.epoch !== queueEpoch) {
-      // Stale project: leave the queue alone, but put the old project's wiki/ back.
-      if (historyOn) await restoreFailedIngest(projectPath)
+      // Stale project: leave the queue alone, but put the old project's files back.
+      if (historyOn && baselineOk) await restoreFailedIngest(projectPath, run.writtenFiles, historyRun)
       return
     }
-    // Every branch below ends without success: put wiki/ back before saving.
-    if (historyOn) {
-      await restoreFailedIngest(projectPath)
+    // Every branch below ends without success: put this run's files back before saving.
+    if (historyOn && baselineOk) {
+      await restoreFailedIngest(projectPath, run.writtenFiles, historyRun)
       if (currentProjectId !== projectId || run.epoch !== queueEpoch) return
     }
     const currentTask = queue.find((candidate) => candidate.id === task.id)

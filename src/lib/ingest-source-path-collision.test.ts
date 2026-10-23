@@ -154,6 +154,7 @@ vi.mock("./mineru", () => ({
 import {
   autoIngest,
   buildFallbackSourceSummary,
+  clearIngestResumeState,
   executeIngestWrites,
   hasMineruImageRefs,
 } from "./ingest"
@@ -1160,5 +1161,84 @@ describe("autoIngest source summary paths", () => {
     expect(written).toHaveLength(1)
     const content = await fs.readFile(written[0], "utf8")
     expect(content).toContain("Evidence [1] and [[target|label]].")
+  })
+
+  it("reports every wiki file it writes to onFileWritten, including the aggregate files", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    sourceMarkers = ["project-a config"]
+    const reported: string[] = []
+
+    const written = await autoIngest(
+      tmp.path,
+      `${tmp.path}/raw/sources/project-a/config.yaml`,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "project-a",
+      (relativePath) => reported.push(relativePath),
+    )
+
+    const summary = `wiki/sources/${sourceSummarySlugFromIdentity("project-a/config.yaml")}.md`
+    expect(written).toEqual(expect.arrayContaining([summary, "wiki/index.md", "wiki/overview.md", "wiki/log.md"]))
+    expect([...new Set(reported)].sort()).toEqual([...new Set(written)].sort())
+  })
+
+  it("reports both paths of a migrated legacy source summary to onFileWritten", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    sourceMarkers = ["project-a config"]
+    await fs.rm(path.join(tmp.path, "raw", "sources", "project-b", "config.yaml"))
+    await writeFileRaw(
+      path.join(tmp.path, "wiki", "sources", "config.md"),
+      ["---", 'title: "Source: config.yaml"', 'sources: ["config.yaml"]', "---", "", "# Legacy config"].join("\n"),
+    )
+    const reported: string[] = []
+
+    await autoIngest(
+      tmp.path,
+      `${tmp.path}/raw/sources/project-a/config.yaml`,
+      useWikiStore.getState().llmConfig,
+      undefined,
+      "project-a",
+      (relativePath) => reported.push(relativePath),
+    )
+
+    // The migration deletes the legacy page: a restore must know to bring it back.
+    expect(reported).toContain("wiki/sources/config.md")
+    expect(reported).toContain(`wiki/sources/${sourceSummarySlugFromIdentity("project-a/config.yaml")}.md`)
+  })
+
+  it("clearIngestResumeState removes only this source's generation checkpoints and cache entry", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    const slug = sourceSummarySlugFromIdentity("project-a/config.yaml")
+    const otherSlug = sourceSummarySlugFromIdentity("project-b/config.yaml")
+    const checkpoints = `${tmp.path}/.llm-wiki/ingest-generation`
+    await writeFileRaw(`${checkpoints}/${slug}-0123456789abcdef.json`, "{}")
+    await writeFileRaw(`${checkpoints}/${slug}-fedcba9876543210.json`, "{}")
+    // Another source whose slug starts with this slug, and another source.
+    await writeFileRaw(`${checkpoints}/${slug}-extra-0123456789abcdef.json`, "{}")
+    await writeFileRaw(`${checkpoints}/${otherSlug}-0123456789abcdef.json`, "{}")
+    await writeFileRaw(
+      `${tmp.path}/.llm-wiki/ingest-cache.json`,
+      JSON.stringify({
+        entries: {
+          "project-a/config.yaml": { hash: "a", timestamp: 1, filesWritten: [] },
+          "project-b/config.yaml": { hash: "b", timestamp: 1, filesWritten: [] },
+        },
+      }),
+    )
+
+    await clearIngestResumeState(tmp.path, "raw/sources/project-a/config.yaml")
+
+    expect((await fs.readdir(checkpoints)).sort()).toEqual(
+      [`${slug}-extra-0123456789abcdef.json`, `${otherSlug}-0123456789abcdef.json`].sort(),
+    )
+    const cache = JSON.parse(await fs.readFile(`${tmp.path}/.llm-wiki/ingest-cache.json`, "utf8"))
+    expect(Object.keys(cache.entries)).toEqual(["project-b/config.yaml"])
+  })
+
+  it("clearIngestResumeState accepts an absolute source path and a missing checkpoint folder", async () => {
+    if (!tmp) throw new Error("missing temp project")
+    await expect(
+      clearIngestResumeState(tmp.path, `${tmp.path}/raw/sources/project-a/config.yaml`),
+    ).resolves.toBeUndefined()
   })
 })

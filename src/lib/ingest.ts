@@ -16,7 +16,7 @@ import { parseWithMineruResult } from "@/lib/mineru"
 import { useChatStore } from "@/stores/chat-store"
 import { useActivityStore } from "@/stores/activity-store"
 import { useReviewStore, type ReviewItem } from "@/stores/review-store"
-import { getFileName, normalizePath } from "@/lib/path-utils"
+import { getFileName, isAbsolutePath, normalizePath } from "@/lib/path-utils"
 import {
   sourceIdentityForPath,
   sourceReferenceIdentity,
@@ -24,7 +24,7 @@ import {
   sourceSummarySlugFromIdentity,
 } from "@/lib/source-identity"
 import { parseSources, writeSources } from "@/lib/sources-merge"
-import { checkIngestCache, saveIngestCache } from "@/lib/ingest-cache"
+import { checkIngestCache, removeFromIngestCache, saveIngestCache } from "@/lib/ingest-cache"
 import { sanitizeIngestedFileContent } from "@/lib/ingest-sanitize"
 import { mergePageContent, type MergeFn } from "@/lib/page-merge"
 import { withProjectLock } from "@/lib/project-mutex"
@@ -874,6 +874,7 @@ async function autoIngestImpl(
               )
             }
           }
+          onFileWritten?.(sourceSummaryPath)
           await injectImagesIntoSourceSummary(
             pp,
             sourceIdentity,
@@ -1258,7 +1259,7 @@ async function autoIngestImpl(
   return runCommit(async () => {
   throwIfIngestAborted(signal, activityId)
   activity.updateItem(activityId, { detail: "Writing files..." })
-  await migrateLegacySourceSummaryIfSafe(pp, sourceIdentity, sourceSummaryPath)
+  await migrateLegacySourceSummaryIfSafe(pp, sourceIdentity, sourceSummaryPath, onFileWritten)
   const writeResult = await writeFileBlocks(
     pp,
     generation,
@@ -1458,6 +1459,7 @@ async function autoIngestImpl(
   // want the safety-net section to slip image refs into the wiki
   // through the back door.
   if (mmCfg.enabled && savedImages.length > 0 && !signal?.aborted) {
+    onFileWritten?.(sourceSummaryPath)
     await injectImagesIntoSourceSummary(
       pp,
       sourceIdentity,
@@ -1866,11 +1868,12 @@ async function migrateLegacySourceSummaryIfSafe(
   projectPath: string,
   sourceIdentity: string,
   sourceSummaryPath: string,
+  onFileWritten?: (relativePath: string) => void,
 ): Promise<void> {
   const normalizedIdentity = normalizePath(sourceIdentity)
   if (!normalizedIdentity.includes("/")) return
 
-  if (await migrateExactLegacySourceSummaryIfSafe(projectPath, normalizedIdentity, sourceSummaryPath)) {
+  if (await migrateExactLegacySourceSummaryIfSafe(projectPath, normalizedIdentity, sourceSummaryPath, onFileWritten)) {
     return
   }
 
@@ -1914,6 +1917,8 @@ async function migrateLegacySourceSummaryIfSafe(
   if (!legacyOnlyReferencesBasename) return
 
   try {
+    onFileWritten?.(sourceSummaryPath)
+    onFileWritten?.(legacyPath)
     await writeFile(canonicalFullPath, canonicalizeSourcesField(legacyContent, sourceIdentity))
     await deleteFile(legacyFullPath)
   } catch (err) {
@@ -1928,6 +1933,7 @@ async function migrateExactLegacySourceSummaryIfSafe(
   projectPath: string,
   sourceIdentity: string,
   sourceSummaryPath: string,
+  onFileWritten?: (relativePath: string) => void,
 ): Promise<boolean> {
   const pp = normalizePath(projectPath)
   const canonicalFullPath = `${pp}/${sourceSummaryPath}`
@@ -1961,6 +1967,8 @@ async function migrateExactLegacySourceSummaryIfSafe(
     if (!referencesSameSource) continue
 
     try {
+      onFileWritten?.(sourceSummaryPath)
+      onFileWritten?.(legacyPath)
       await writeFile(canonicalFullPath, canonicalizeSourcesField(legacyContent, sourceIdentity))
       await deleteFile(legacyFullPath)
       return true
@@ -3104,6 +3112,41 @@ async function clearGenerationCheckpoint(checkpointPath: string): Promise<void> 
   } catch {
     // Best-effort cleanup; a completed checkpoint is harmless because the
     // ingest cache short-circuits subsequent unchanged-source runs.
+  }
+}
+
+/**
+ * Forget what an earlier attempt of this source left for a resume: its
+ * generation checkpoints (`.llm-wiki/ingest-generation/<slug>-<fingerprint>.json`)
+ * and its `ingest-cache.json` entry. Call it after the pages that attempt wrote
+ * were put back, so a retry does not skip pages that no longer hold its output.
+ * Best-effort: never rejects.
+ */
+export async function clearIngestResumeState(projectPath: string, sourcePath: string): Promise<void> {
+  const pp = normalizePath(projectPath)
+  const sp = normalizePath(sourcePath)
+  const sourceIdentity = sourceIdentityForPath(pp, isAbsolutePath(sp) ? sp : `${pp}/${sp}`)
+  const slug = sourceSummarySlugFromIdentity(sourceIdentity)
+  // `<slug>-<16 hex>.json` exactly: a longer slug that starts with this one is another source.
+  const escapedSlug = slug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const checkpointName = new RegExp(`^${escapedSlug}-[0-9a-f]{16}\\.json$`)
+  try {
+    const nodes = await listDirectory(`${pp}/.llm-wiki/ingest-generation`)
+    for (const node of nodes) {
+      if (node.is_dir || !checkpointName.test(node.name)) continue
+      try {
+        await deleteFile(node.path)
+      } catch {
+        // Best-effort: a stale checkpoint only costs a resume prompt.
+      }
+    }
+  } catch {
+    // No checkpoint folder yet.
+  }
+  try {
+    await removeFromIngestCache(pp, sourceIdentity)
+  } catch {
+    // Best-effort, like the cache itself.
   }
 }
 
