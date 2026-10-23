@@ -1,13 +1,15 @@
 # Sample wiki
 
-This folder is a small example of a finished Mechanism Wiki. It has two uses:
+This folder is a starting-point fixture for a Mechanism Wiki. It is not a finished wiki. It holds a purpose, a domain list, and three raw sources. It has no wiki pages yet.
 
-- A person can read it to see what the wiki holds after the first sources arrive.
+It has two uses:
+
+- A person can read it to see what a new wiki holds before the first ingest.
 - Tests can build it on disk and use it as a fixture. The helper `materializeSampleWiki` in `src/test-helpers/sample-wiki.ts` does this.
 
 ## Overlay on the template
 
-The sample is an overlay on `templates/mechanism-wiki/`. It holds only the files that differ from the template. `materializeSampleWiki` first copies the template files. It then copies this folder on top, so a file here replaces the template file with the same path. It also creates the folders that the app makes for a new project.
+The sample is an overlay on `templates/mechanism-wiki/`. It holds only the files that differ from the template. `materializeSampleWiki` first copies the template files. It then copies this folder on top, so a file here replaces the template file with the same path. It also creates the folders that the app makes for a new project. It does not copy this README into the wiki.
 
 ## Files
 

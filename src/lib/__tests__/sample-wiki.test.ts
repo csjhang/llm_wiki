@@ -108,6 +108,13 @@ describe("sample wiki overlay", () => {
     expect(readme).toContain("templates/mechanism-wiki/")
     expect(readme.toLowerCase()).toContain("overlay")
   })
+
+  it("README.md calls the sample a starting-point fixture, not a finished wiki", () => {
+    const readme = readFileSync(join(SAMPLE_DIR, "README.md"), "utf-8")
+    expect(readme).toContain("starting-point fixture")
+    expect(readme).toContain("not a finished wiki")
+    expect(readme).not.toMatch(/example of a finished/i)
+  })
 })
 
 describe("materializeSampleWiki", () => {
@@ -115,8 +122,11 @@ describe("materializeSampleWiki", () => {
     const target = await makeTempDir()
     await materializeSampleWiki(target)
 
-    // Template files are present.
+    // Template files are present. The agent entry files are there, and the sample README is not.
     expect(existsSync(join(target, "CLAUDE.md"))).toBe(true)
+    expect(existsSync(join(target, "schema.md"))).toBe(true)
+    expect(existsSync(join(target, "AGENTS.md"))).toBe(true)
+    expect(existsSync(join(target, "README.md"))).toBe(false)
     expect(existsSync(join(target, "lenses", "hardware.md"))).toBe(true)
     expect(existsSync(join(target, "schema", "page-types", "source.md"))).toBe(true)
 

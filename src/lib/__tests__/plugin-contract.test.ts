@@ -11,6 +11,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import yaml from "js-yaml"
 import { describe, expect, it } from "vitest"
+import { findLongSentences } from "@/test-helpers/ste-check"
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url))
 const PLUGIN_DIR = join(REPO_ROOT, "plugins", "llm-wiki")
@@ -92,6 +93,37 @@ describe("llm-wiki plugin contract", () => {
 
   it("skill list includes wiki", () => {
     expect(statSync(join(SKILLS_DIR, "wiki")).isDirectory()).toBe(true)
+  })
+
+  it("skill files and the plugin README keep sentences short", () => {
+    const files = [
+      ...skillFolders().map((folder) => join(SKILLS_DIR, folder, "SKILL.md")),
+      join(PLUGIN_DIR, "README.md"),
+    ]
+    expect(files.length).toBeGreaterThan(1)
+    for (const file of files) {
+      expect(findLongSentences(file, readFileSync(file, "utf8")), file).toEqual([])
+    }
+  })
+
+  it("the manifest description and the README claim only what the skills do", () => {
+    const manifest = readJson("plugins/llm-wiki/.claude-plugin/plugin.json") as { description: string }
+    const readme = readFileSync(join(PLUGIN_DIR, "README.md"), "utf8")
+    const cases: Array<[label: string, text: string]> = [
+      ["plugin.json description", manifest.description],
+      ["README.md", readme],
+    ]
+    for (const [label, text] of cases) {
+      // No skill ingests a source or queries the wiki. The app ingests.
+      expect(text, label).not.toMatch(/ingest sources|query the wiki|cause-and-effect/i)
+      // The jobs of the skills: sync, fuse, lint, recut, undo.
+      for (const job of ["Heptabase", "fuse", "hypothes", "lint", "recut", "undo"]) {
+        expect(text.toLowerCase(), `${label}: ${job}`).toContain(job.toLowerCase())
+      }
+    }
+    // The README says who ingests, and it uses the glossary meaning of mechanism.
+    expect(readme).toMatch(/app ingests/i)
+    expect(readme).toContain("a structure that repeats across domains")
   })
 
   it("no template file is git-ignored", () => {

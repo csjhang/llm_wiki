@@ -1,10 +1,19 @@
 # LLM Wiki (Mechanism) plugin
 
 This plugin adds Claude Code skills for the LLM Wiki mechanism wiki.
-A mechanism wiki stores sources, concepts, and the cause-and-effect mechanisms between them.
+A mechanism wiki stores sources, concepts, and mechanisms. A mechanism is a structure that repeats across domains.
+The LLM Wiki app ingests sources. The skills in this plugin work on the wiki after that.
+
+## Jobs of the skills
+
+- Sync the wiki with Heptabase.
+- Fuse a mechanism into a hypothesis about another domain.
+- Lint the wiki.
+- Recut the domains of the wiki.
+- Undo a change to the wiki.
 
 Every skill name starts with `wiki`.
-Run the `wiki` skill to see all skills and to choose one.
+Run the `wiki` skill to see the skills that are installed and to choose one.
 
 ## Install
 

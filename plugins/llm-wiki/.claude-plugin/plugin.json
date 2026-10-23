@@ -2,7 +2,7 @@
   "name": "llm-wiki",
   "displayName": "LLM Wiki (Mechanism)",
   "version": "0.1.0",
-  "description": "Skills that build and maintain a mechanism wiki: ingest sources, query the wiki, and sync it with Heptabase.",
+  "description": "Skills for a mechanism wiki: sync it with Heptabase, fuse mechanisms into hypotheses, lint it, recut its domains, and undo changes.",
   "license": "GPL-3.0-only",
   "repository": "https://github.com/csjhang/llm_wiki",
   "keywords": [
