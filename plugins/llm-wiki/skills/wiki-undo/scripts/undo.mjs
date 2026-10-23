@@ -11,9 +11,12 @@
 //
 // The script prints JSON to stdout. Exit codes: 0 for success, 2 for a handled
 // failure (for example a conflict), 1 for an unexpected error.
+//
+// --project is the project folder: the folder that contains wiki/ and raw/.
+// Both commands refuse a folder that has no wiki/ folder.
 
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs"
+import { mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
@@ -64,6 +67,15 @@ function hasCommits(project) {
 /** The path of the project folder inside its repository, with a trailing slash. Empty at the top. */
 function projectPrefix(project) {
   return git(project, ["rev-parse", "--show-prefix"]).trim()
+}
+
+/** The project folder contains a `wiki/` folder. Used to catch a wrong `--project`, such as `<project>/wiki`. */
+export function isWikiProject(project) {
+  try {
+    return statSync(join(project, "wiki")).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 function hasActionPrefix(subject) {
@@ -162,34 +174,63 @@ function keepCurrentVersion(project, path) {
   }
 }
 
-function abortRevert(project) {
+const NEEDS_ATTENTION =
+  "The work tree is not clean after the undo stopped. Run git status in the project folder and fix it by hand."
+
+/**
+ * Stop the revert and check the tree. If the tree is still not clean, reset it
+ * once more and restore the project files from HEAD. Return whether the tree is clean.
+ */
+function abortRevert(project, prefix) {
   const result = runGit(project, ["revert", "--abort"])
   if (result.status !== 0) runGit(project, ["reset", "--merge"])
+  if (!isDirty(project, prefix)) return true
+  runGit(project, ["reset", "--merge"])
+  runGit(project, ["checkout", "HEAD", "--", "."])
+  return !isDirty(project, prefix)
 }
 
-function appendLogLine(project, line) {
+/** The text of `wiki/log.md` in HEAD. Empty when HEAD has no such file. */
+function headLogText(project) {
+  const result = runGit(project, ["show", `HEAD:./${LOG_PATH}`])
+  return result.status === 0 ? result.stdout : ""
+}
+
+/**
+ * Write `wiki/log.md` as the HEAD version plus one line. The log is append-only
+ * history, so a revert never removes an entry from it.
+ */
+function writeLogWithLine(project, line) {
+  let text = headLogText(project)
+  if (text !== "" && !text.endsWith("\n")) text += "\n"
   const logFile = join(project, LOG_PATH)
   mkdirSync(dirname(logFile), { recursive: true })
-  let text = existsSync(logFile) ? readFileSync(logFile, "utf8") : ""
-  if (text !== "" && !text.endsWith("\n")) text += "\n"
   writeFileSync(logFile, `${text}${line}\n`)
 }
 
+/** Fill only the part of the identity that git does not have. Never write to the git config. */
 function identityArgs(project) {
-  const email = runGit(project, ["config", "user.email"]).stdout.trim()
-  return email === "" ? ["-c", `user.name=${FALLBACK_NAME}`, "-c", `user.email=${FALLBACK_EMAIL}`] : []
+  const args = []
+  if (runGit(project, ["config", "user.name"]).stdout.trim() === "") {
+    args.push("-c", `user.name=${FALLBACK_NAME}`)
+  }
+  if (runGit(project, ["config", "user.email"]).stdout.trim() === "") {
+    args.push("-c", `user.email=${FALLBACK_EMAIL}`)
+  }
+  return args
 }
 
 /**
  * Revert one action commit and record the undo.
- * @param {string} projectPath
+ * @param {string} projectPath The project folder: the folder that contains `wiki/` and `raw/`.
  * @param {string} sha The commit to undo.
  * @param {string} [today] Date for the log line, `YYYY-MM-DD`. Defaults to the local date.
- * @returns {{ ok: true, sha: string } | { ok: false, reason: "conflict", files: string[] } | { ok: false, reason: "not-action" | "dirty" }}
- *   On success `sha` is the full sha of the reverted commit.
+ * @returns {{ ok: true, sha: string, reverted: string } | { ok: false, reason: "conflict", files: string[] } | { ok: false, reason: "not-action" | "dirty" | "not-a-wiki-project" }}
+ *   On success `sha` is the full sha of the new undo commit. `reverted` is the full sha of the commit that was undone.
  */
 export function revertAction(projectPath, sha, today = localDate()) {
   const project = resolve(projectPath)
+  if (!isWikiProject(project)) return { ok: false, reason: "not-a-wiki-project" }
   const prefix = projectPrefix(project)
 
   // A sha that starts with `-` would read as a git option.
@@ -209,6 +250,7 @@ export function revertAction(projectPath, sha, today = localDate()) {
   if (isDirty(project, prefix)) return { ok: false, reason: "dirty" }
 
   const revert = runGit(project, ["revert", "--no-commit", fullSha])
+  let stopped = false
   try {
     const conflicted = revert.status === 0 ? [] : unmergedPaths(project)
     if (revert.status !== 0 && conflicted.length === 0) {
@@ -224,20 +266,26 @@ export function revertAction(projectPath, sha, today = localDate()) {
 
     const remaining = revert.status === 0 ? [] : unmergedPaths(project)
     if (remaining.length > 0) {
-      abortRevert(project)
+      stopped = true
+      if (!abortRevert(project, prefix)) throw new Error(NEEDS_ATTENTION)
       return { ok: false, reason: "conflict", files: remaining.map(toProjectPath) }
     }
 
-    appendLogLine(project, `## [${today}] undo | ${subject}`)
+    // Whether the revert touched wiki/log.md or not, start from the HEAD version.
+    writeLogWithLine(project, `## [${today}] undo | ${subject}`)
     git(project, ["add", "--", LOG_PATH])
     git(project, [
       ...["-c", "commit.gpgsign=false"],
       ...identityArgs(project),
       ...["commit", "--no-verify", "--quiet", "-m", `undo: ${subject}`, "-m", `Reverts ${fullSha}.`],
     ])
-    return { ok: true, sha: fullSha }
+    return { ok: true, sha: git(project, ["rev-parse", "HEAD"]).trim(), reverted: fullSha }
   } catch (error) {
-    abortRevert(project)
+    if (stopped) throw error
+    if (!abortRevert(project, prefix)) {
+      const message = error instanceof Error ? error.message : String(error)
+      throw new Error(`${message} ${NEEDS_ATTENTION}`)
+    }
     throw error
   }
 }
@@ -275,6 +323,7 @@ function main(argv) {
       limit = Number(options.limit)
       if (!Number.isInteger(limit) || limit < 1) throw new Error("--limit needs a whole number of 1 or more")
     }
+    if (!isWikiProject(project)) return { code: 2, output: { ok: false, reason: "not-a-wiki-project" } }
     return { code: 0, output: listActions(project, limit) }
   }
   if (command === "revert" && rest.length === 1 && options.limit === undefined) {

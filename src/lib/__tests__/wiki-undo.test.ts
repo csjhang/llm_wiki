@@ -23,9 +23,9 @@ interface Action {
 }
 
 type RevertResult =
-  | { ok: true; sha: string }
+  | { ok: true; sha: string; reverted: string }
   | { ok: false; reason: "conflict"; files: string[] }
-  | { ok: false; reason: "not-action" | "dirty" }
+  | { ok: false; reason: "not-action" | "dirty" | "not-a-wiki-project" }
 
 interface UndoModule {
   ACTION_PREFIXES: string[]
@@ -60,6 +60,8 @@ function makeRepo(options: { identity?: boolean } = {}): string {
   const repo = makeDir()
   git(repo, "init", "--quiet")
   git(repo, "config", "commit.gpgsign", "false")
+  // A project folder has a wiki/ folder. Git does not track an empty folder.
+  mkdirSync(join(repo, "wiki"))
   if (options.identity !== false) {
     git(repo, "config", "user.name", "Test User")
     git(repo, "config", "user.email", "test@example.com")
@@ -83,6 +85,11 @@ function commitFiles(repo: string, subject: string, files: Record<string, string
   git(repo, "add", "-A")
   git(repo, "commit", "--quiet", "--no-verify", "-m", subject)
   return git(repo, "rev-parse", "HEAD").trim()
+}
+
+/** The result of a good undo: the new undo commit is HEAD, and `reverted` is the commit that was undone. */
+function expectUndone(result: RevertResult, dir: string, reverted: string): void {
+  expect(result).toEqual({ ok: true, sha: git(dir, "rev-parse", "HEAD").trim(), reverted })
 }
 
 function headSubject(repo: string): string {
@@ -158,12 +165,13 @@ describe("revertAction", () => {
 
     const result = undo.revertAction(repo, sha, "2026-02-03")
 
-    expect(result).toEqual({ ok: true, sha })
+    expectUndone(result, repo, sha)
     expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(false)
     expect(headSubject(repo)).toBe("undo: ingest: a (1 pages)")
     expect(git(repo, "log", "-1", "--format=%b").trim()).toBe(`Reverts ${sha}.`)
-    expect(read(repo, "wiki/log.md").trimEnd().split("\n").pop()).toBe(
-      "## [2026-02-03] undo | ingest: a (1 pages)",
+    // The log is append-only history. The ingest line stays, and the undo line follows it.
+    expect(read(repo, "wiki/log.md")).toBe(
+      "# Log\n\n## [2026-01-01] ingest | a\n## [2026-02-03] undo | ingest: a (1 pages)\n",
     )
     expect(git(repo, "status", "--porcelain")).toBe("")
   })
@@ -175,11 +183,11 @@ describe("revertAction", () => {
 
     const result = undo.revertAction(repo, sha.slice(0, 8), "2026-02-03")
 
-    expect(result).toEqual({ ok: true, sha })
+    expectUndone(result, repo, sha)
     expect(undo.listActions(repo)[0].subject).toBe("undo: lint: fix (1 pages)")
   })
 
-  it("creates wiki/log.md when the reverted commit created it", () => {
+  it("keeps the log entry of a reverted commit that created wiki/log.md", () => {
     const repo = makeRepo()
     commitFiles(repo, "chore: base", { "a.txt": "1" })
     const sha = commitFiles(repo, "ingest: a (1 pages)", {
@@ -187,10 +195,41 @@ describe("revertAction", () => {
       "wiki/log.md": "## [2026-01-01] ingest | a\n",
     })
 
-    expect(undo.revertAction(repo, sha, "2026-02-03")).toEqual({ ok: true, sha })
+    expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha)
+
+    expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(false)
+    expect(read(repo, "wiki/log.md")).toBe(
+      "## [2026-01-01] ingest | a\n## [2026-02-03] undo | ingest: a (1 pages)\n",
+    )
+    expect(git(repo, "status", "--porcelain")).toBe("")
+  })
+
+  it("creates wiki/log.md with only the undo line when the current commit has none", () => {
+    const repo = makeRepo()
+    commitFiles(repo, "chore: base", { "a.txt": "1" })
+    const sha = commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/a.md": "a\n" })
+
+    expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha)
 
     expect(read(repo, "wiki/log.md")).toBe("## [2026-02-03] undo | ingest: a (1 pages)\n")
     expect(git(repo, "status", "--porcelain")).toBe("")
+  })
+
+  it("does not lose log lines when the revert would remove them cleanly", () => {
+    const repo = makeRepo()
+    commitFiles(repo, "chore: base", { "wiki/log.md": "# Log\n\n## [2026-01-01] ingest | old\n\n" })
+    const shaA = commitFiles(repo, "ingest: a (1 pages)", {
+      "wiki/concepts/a.md": "a\n",
+      "wiki/log.md": "# Log\n\n## [2026-01-01] ingest | old\n\n## [2026-01-02] ingest | a\n",
+    })
+    commitFiles(repo, "chore: notes", { "notes.txt": "n\n" })
+
+    expectUndone(undo.revertAction(repo, shaA, "2026-02-03"), repo, shaA)
+
+    const log = read(repo, "wiki/log.md")
+    expect(log).toContain("## [2026-01-01] ingest | old")
+    expect(log).toContain("## [2026-01-02] ingest | a")
+    expect(log.trimEnd().split("\n").pop()).toBe("## [2026-02-03] undo | ingest: a (1 pages)")
   })
 
   it("resolves generated-file conflicts", () => {
@@ -213,12 +252,15 @@ describe("revertAction", () => {
 
     const result = undo.revertAction(repo, shaA, "2026-02-03")
 
-    expect(result).toEqual({ ok: true, sha: shaA })
+    expectUndone(result, repo, shaA)
     expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(false)
     expect(existsSync(join(repo, "wiki/concepts/b.md"))).toBe(true)
     expect(read(repo, "wiki/index.md")).toBe(indexBefore)
     const log = read(repo, "wiki/log.md")
     expect(log).not.toContain("<<<<<<<")
+    // The log is append-only history: both ingest entries survive.
+    expect(log).toContain("## [2026-01-01] ingest | a")
+    expect(log).toContain("## [2026-01-02] ingest | b")
     expect(log.trimEnd().split("\n").pop()).toBe("## [2026-02-03] undo | ingest: a (1 pages)")
     expect(headSubject(repo)).toBe("undo: ingest: a (1 pages)")
     expect(git(repo, "status", "--porcelain")).toBe("")
@@ -240,7 +282,7 @@ describe("revertAction", () => {
       "wiki/overview.md": "overview 0\noverview a\noverview b\n",
     })
 
-    expect(undo.revertAction(repo, shaA, "2026-02-03")).toEqual({ ok: true, sha: shaA })
+    expectUndone(undo.revertAction(repo, shaA, "2026-02-03"), repo, shaA)
 
     expect(read(repo, "wiki/indexes/_mechanisms.md")).toBe("- m0\n- ma\n- mb\n")
     expect(read(repo, "wiki/overview.md")).toBe("overview 0\noverview a\noverview b\n")
@@ -257,7 +299,7 @@ describe("revertAction", () => {
     git(repo, "rm", "--quiet", "wiki/overview.md")
     git(repo, "commit", "--quiet", "--no-verify", "-m", "chore: drop overview")
 
-    expect(undo.revertAction(repo, shaA, "2026-02-03")).toEqual({ ok: true, sha: shaA })
+    expectUndone(undo.revertAction(repo, shaA, "2026-02-03"), repo, shaA)
 
     expect(existsSync(join(repo, "wiki/overview.md"))).toBe(false)
     expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(false)
@@ -269,7 +311,7 @@ describe("revertAction", () => {
     const root = commitFiles(repo, "ingest: first (1 pages)", { "wiki/concepts/a.md": "a\n" })
     commitFiles(repo, "chore: x", { "other.txt": "1" })
 
-    expect(undo.revertAction(repo, root, "2026-02-03")).toEqual({ ok: true, sha: root })
+    expectUndone(undo.revertAction(repo, root, "2026-02-03"), repo, root)
 
     expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(false)
     expect(existsSync(join(repo, "other.txt"))).toBe(true)
@@ -401,55 +443,103 @@ describe("revertAction", () => {
     const sha = commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/a.md": "a\n" })
     write(repo, ".llm-wiki/cache/state.json", "{}\n")
 
-    expect(undo.revertAction(repo, sha, "2026-02-03")).toEqual({ ok: true, sha })
+    expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha)
 
     expect(existsSync(join(repo, ".llm-wiki/cache/state.json"))).toBe(true)
     expect(git(repo, "show", "--name-only", "--format=", "HEAD")).not.toContain(".llm-wiki")
   })
 
-  it("commits with a fallback identity when git has none", () => {
-    const repo = makeRepo({ identity: false })
-    // Make the commits with an explicit identity, then undo with none.
-    const env = {
-      GIT_AUTHOR_NAME: "T",
-      GIT_AUTHOR_EMAIL: "t@example.com",
-      GIT_COMMITTER_NAME: "T",
-      GIT_COMMITTER_EMAIL: "t@example.com",
+  describe("fallback identity", () => {
+    /** A repo with one ingest commit. The commit has an identity. The repo config does not. */
+    function makeRepoWithoutIdentity(): { repo: string; sha: string } {
+      const repo = makeRepo({ identity: false })
+      write(repo, "wiki/concepts/a.md", "a\n")
+      execFileSync("git", ["-C", repo, "add", "-A"])
+      execFileSync("git", ["-C", repo, "commit", "--quiet", "-m", "ingest: a (1 pages)"], {
+        env: {
+          ...process.env,
+          GIT_AUTHOR_NAME: "T",
+          GIT_AUTHOR_EMAIL: "t@example.com",
+          GIT_COMMITTER_NAME: "T",
+          GIT_COMMITTER_EMAIL: "t@example.com",
+        },
+      })
+      return { repo, sha: git(repo, "rev-parse", "HEAD").trim() }
     }
-    write(repo, "wiki/concepts/a.md", "a\n")
-    execFileSync("git", ["-C", repo, "add", "-A"])
-    execFileSync("git", ["-C", repo, "commit", "--quiet", "-m", "ingest: a (1 pages)"], {
-      env: { ...process.env, ...env },
-    })
-    const sha = git(repo, "rev-parse", "HEAD").trim()
 
-    const saved = {
-      GIT_CONFIG_GLOBAL: process.env.GIT_CONFIG_GLOBAL,
-      GIT_CONFIG_NOSYSTEM: process.env.GIT_CONFIG_NOSYSTEM,
-      GIT_AUTHOR_NAME: process.env.GIT_AUTHOR_NAME,
-      GIT_AUTHOR_EMAIL: process.env.GIT_AUTHOR_EMAIL,
-      GIT_COMMITTER_NAME: process.env.GIT_COMMITTER_NAME,
-      GIT_COMMITTER_EMAIL: process.env.GIT_COMMITTER_EMAIL,
-    }
-    process.env.GIT_CONFIG_GLOBAL = join(repo, "no-such-global-config")
-    process.env.GIT_CONFIG_NOSYSTEM = "1"
-    delete process.env.GIT_AUTHOR_NAME
-    delete process.env.GIT_AUTHOR_EMAIL
-    delete process.env.GIT_COMMITTER_NAME
-    delete process.env.GIT_COMMITTER_EMAIL
-    try {
-      expect(undo.revertAction(repo, sha, "2026-02-03")).toEqual({ ok: true, sha })
-    } finally {
-      for (const [key, value] of Object.entries(saved)) {
-        if (value === undefined) delete process.env[key]
-        else process.env[key] = value
+    /** Run `fn` with no global or system git config and no identity in the environment. */
+    function withNoGitConfig<T>(fn: () => T): T {
+      const emptyHome = makeDir()
+      const keys = [
+        "HOME",
+        "XDG_CONFIG_HOME",
+        "GIT_CONFIG_NOSYSTEM",
+        "GIT_CONFIG_GLOBAL",
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "EMAIL",
+      ]
+      const saved = keys.map((key) => [key, process.env[key]] as const)
+      for (const key of keys) delete process.env[key]
+      process.env.HOME = emptyHome
+      process.env.XDG_CONFIG_HOME = emptyHome
+      process.env.GIT_CONFIG_NOSYSTEM = "1"
+      try {
+        return fn()
+      } finally {
+        for (const [key, value] of saved) {
+          if (value === undefined) delete process.env[key]
+          else process.env[key] = value
+        }
       }
     }
 
-    expect(git(repo, "log", "-1", "--format=%an <%ae>")).toBe("LLM Wiki <llm-wiki@localhost>\n")
-    expect(git(repo, "log", "-1", "--format=%cn <%ce>")).toBe("LLM Wiki <llm-wiki@localhost>\n")
-    // The undo never writes the fallback identity to the git config of the repo.
-    expect(readFileSync(join(repo, ".git", "config"), "utf8")).not.toContain("llm-wiki@localhost")
+    function lastCommitIdentity(repo: string): string {
+      const author = git(repo, "log", "-1", "--format=%an <%ae>")
+      const committer = git(repo, "log", "-1", "--format=%cn <%ce>")
+      expect(committer).toBe(author)
+      return author.trim()
+    }
+
+    it("fills both name and email when git has neither", () => {
+      const { repo, sha } = makeRepoWithoutIdentity()
+
+      withNoGitConfig(() => expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha))
+
+      expect(lastCommitIdentity(repo)).toBe("LLM Wiki <llm-wiki@localhost>")
+      // The undo never writes the fallback identity to the git config of the repo.
+      expect(readFileSync(join(repo, ".git", "config"), "utf8")).not.toContain("llm-wiki@localhost")
+    })
+
+    it("fills only the email when the name is set", () => {
+      const { repo, sha } = makeRepoWithoutIdentity()
+      git(repo, "config", "user.name", "Custom Name")
+
+      withNoGitConfig(() => expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha))
+
+      expect(lastCommitIdentity(repo)).toBe("Custom Name <llm-wiki@localhost>")
+    })
+
+    it("fills only the name when the email is set", () => {
+      const { repo, sha } = makeRepoWithoutIdentity()
+      git(repo, "config", "user.email", "custom@example.com")
+
+      withNoGitConfig(() => expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha))
+
+      expect(lastCommitIdentity(repo)).toBe("LLM Wiki <custom@example.com>")
+    })
+
+    it("keeps the identity of the user when both are set", () => {
+      const { repo, sha } = makeRepoWithoutIdentity()
+      git(repo, "config", "user.name", "Custom Name")
+      git(repo, "config", "user.email", "custom@example.com")
+
+      withNoGitConfig(() => expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha))
+
+      expect(lastCommitIdentity(repo)).toBe("Custom Name <custom@example.com>")
+    })
   })
 
   it("works for a project folder inside a larger repository", () => {
@@ -472,7 +562,7 @@ describe("revertAction", () => {
       "ingest: a (1 pages)",
     ])
 
-    expect(undo.revertAction(project, shaA, "2026-02-03")).toEqual({ ok: true, sha: shaA })
+    expectUndone(undo.revertAction(project, shaA, "2026-02-03"), project, shaA)
     expect(existsSync(join(project, "wiki/concepts/a.md"))).toBe(false)
     expect(read(outer, "my-wiki/wiki/index.md")).toBe("- p0\n- a\n- b\n")
     expect(git(outer, "status", "--porcelain")).toBe("")
@@ -497,13 +587,108 @@ describe("revertAction", () => {
     const repo = makeRepo()
     commitFiles(repo, "chore: base", { "a.txt": "1" })
     const sha = commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/a.md": "a\n" })
-    expect(undo.revertAction(repo, sha, "2026-02-03")).toEqual({ ok: true, sha })
+    const first = undo.revertAction(repo, sha, "2026-02-03")
+    expectUndone(first, repo, sha)
     const undoSha = undo.listActions(repo)[0].sha
+    // `sha` of a good result is the new undo commit, the first item of the list.
+    expect(first.ok && first.sha).toBe(undoSha)
 
-    expect(undo.revertAction(repo, undoSha, "2026-02-04")).toEqual({ ok: true, sha: undoSha })
+    expectUndone(undo.revertAction(repo, undoSha, "2026-02-04"), repo, undoSha)
 
     expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(true)
     expect(headSubject(repo)).toBe("undo: undo: ingest: a (1 pages)")
+  })
+})
+
+describe("revertAction safety", () => {
+  it("refuses a commit that is not in the history of HEAD", () => {
+    const repo = makeRepo()
+    commitFiles(repo, "chore: base", { "wiki/index.md": "# Index\n" })
+    const main = git(repo, "rev-parse", "--abbrev-ref", "HEAD").trim()
+    git(repo, "checkout", "--quiet", "-b", "side")
+    const sideSha = commitFiles(repo, "ingest: side (1 pages)", { "wiki/concepts/side.md": "s\n" })
+    git(repo, "checkout", "--quiet", main)
+    const head = git(repo, "rev-parse", "HEAD").trim()
+
+    expect(undo.revertAction(repo, sideSha, "2026-02-03")).toEqual({ ok: false, reason: "not-action" })
+    expect(git(repo, "rev-parse", "HEAD").trim()).toBe(head)
+    expect(git(repo, "status", "--porcelain")).toBe("")
+  })
+
+  it("refuses when a file outside a nested project is staged", () => {
+    const outer = makeRepo()
+    const project = join(outer, "my-wiki")
+    mkdirSync(join(project, "wiki"), { recursive: true })
+    commitFiles(outer, "chore: base", { "other/readme.md": "x\n" })
+    const sha = commitFiles(outer, "ingest: a (1 pages)", { "my-wiki/wiki/concepts/a.md": "a\n" })
+    write(outer, "other/readme.md", "staged edit\n")
+    git(outer, "add", "other/readme.md")
+
+    expect(undo.revertAction(project, sha, "2026-02-03")).toEqual({ ok: false, reason: "dirty" })
+    expect(headSubject(outer)).toBe("ingest: a (1 pages)")
+    expect(git(outer, "diff", "--cached", "--name-only").trim()).toBe("other/readme.md")
+  })
+
+  it("leaves a clean tree and the same HEAD when the commit fails after the log append", () => {
+    const repo = makeRepo()
+    commitFiles(repo, "chore: base", { "a.txt": "1" })
+    const sha = commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/a.md": "a\n" })
+    const head = git(repo, "rev-parse", "HEAD").trim()
+
+    // A garbage author date makes `git commit` fail. The revert and the log append come before it.
+    const saved = process.env.GIT_AUTHOR_DATE
+    process.env.GIT_AUTHOR_DATE = "garbage"
+    try {
+      expect(() => undo.revertAction(repo, sha, "2026-02-03")).toThrow()
+    } finally {
+      if (saved === undefined) delete process.env.GIT_AUTHOR_DATE
+      else process.env.GIT_AUTHOR_DATE = saved
+    }
+
+    expect(git(repo, "status", "--porcelain")).toBe("")
+    expect(git(repo, "rev-parse", "HEAD").trim()).toBe(head)
+    expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(true)
+    expect(existsSync(join(repo, "wiki/log.md"))).toBe(false)
+  })
+})
+
+describe("project folder guard", () => {
+  it("refuses a folder that has no wiki/ folder", () => {
+    const repo = makeRepo()
+    const sha = commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/a.md": "a\n" })
+    const wikiFolder = join(repo, "wiki")
+
+    expect(undo.revertAction(wikiFolder, sha, "2026-02-03")).toEqual({
+      ok: false,
+      reason: "not-a-wiki-project",
+    })
+    expect(headSubject(repo)).toBe("ingest: a (1 pages)")
+    expect(git(repo, "status", "--porcelain")).toBe("")
+  })
+
+  it("refuses a folder that does not exist", () => {
+    const missing = join(makeDir(), "missing")
+    expect(undo.revertAction(missing, "deadbeef", "2026-02-03")).toEqual({
+      ok: false,
+      reason: "not-a-wiki-project",
+    })
+  })
+})
+
+describe("SKILL.md", () => {
+  const skill = readFileSync(join(dirname(SCRIPT_PATH), "..", "SKILL.md"), "utf8")
+
+  it("names the project folder and never the wiki folder", () => {
+    expect(skill).toContain("the project folder (the folder that contains `wiki/` and `raw/`)")
+    expect(skill).not.toMatch(/wiki folder/i)
+    expect(skill).not.toContain("`wiki/` folder")
+  })
+
+  it("tells the agent how to read exit code 2 and each result", () => {
+    expect(skill).toMatch(/exit code 2/i)
+    for (const reason of ["conflict", "dirty", "not-action", "not-a-wiki-project", "error"]) {
+      expect(skill, reason).toContain(`"reason": "${reason}"`)
+    }
   })
 })
 
@@ -547,7 +732,11 @@ describe("cli", () => {
     const result = run(["revert", sha, "--project", repo])
 
     expect(result.status).toBe(0)
-    expect(JSON.parse(result.stdout)).toEqual({ ok: true, sha })
+    expect(JSON.parse(result.stdout)).toEqual({
+      ok: true,
+      sha: git(repo, "rev-parse", "HEAD").trim(),
+      reverted: sha,
+    })
     expect(headSubject(repo)).toBe("undo: ingest: a (1 pages)")
     expect(read(repo, "wiki/log.md")).toMatch(/^## \[\d{4}-\d{2}-\d{2}\] undo \| ingest: a \(1 pages\)\n$/)
   })
@@ -562,8 +751,25 @@ describe("cli", () => {
     expect(JSON.parse(result.stdout)).toEqual({ ok: false, reason: "not-action" })
   })
 
+  it("exits 2 for list and revert when the project is not a project folder", () => {
+    const repo = makeRepo()
+    const sha = commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/a.md": "a\n" })
+    const wikiFolder = join(repo, "wiki")
+
+    for (const args of [
+      ["list", "--project", wikiFolder],
+      ["revert", sha, "--project", wikiFolder],
+    ]) {
+      const result = run(args)
+      expect(result.status, args.join(" ")).toBe(2)
+      expect(JSON.parse(result.stdout)).toEqual({ ok: false, reason: "not-a-wiki-project" })
+    }
+    expect(headSubject(repo)).toBe("ingest: a (1 pages)")
+  })
+
   it("exits 1 with json on an unexpected error", () => {
     const notRepo = makeDir()
+    mkdirSync(join(notRepo, "wiki"))
 
     const result = run(["list", "--project", notRepo])
 
