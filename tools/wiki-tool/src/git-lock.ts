@@ -4,17 +4,23 @@
  * A tool that writes to the git repository of a wiki project takes
  * `<project>/.llm-wiki/git.lock` first, so two tools never run their git
  * commands at the same time. The file is created exclusively and holds
- * `{ "pid": <n>, "started_at": "<iso>", "tool": "<app|wiki-tool|wiki-undo>" }`.
+ * `{ "pid": <n>, "started_at": "<iso>", "tool": "<app|wiki-tool|wiki-undo>",
+ * "host": "<hostname>", "platform": "<os>" }`.
  * A second tool polls every 200 ms for up to 30 s, then gives up with
  * "another wiki tool is using git". A lock is left over, and is removed and
  * taken over, when it is older than 10 minutes or when its `pid` is not a
- * running process on this machine.
+ * running process on this machine. A pid says something only on the machine
+ * and the platform that wrote it, so this early check applies only when the
+ * lock's `host` and `platform` are this process's own.
+ * A lock path that exists but cannot be read (a folder, no permission) counts as
+ * held: the caller waits, then gives up. It never spins.
  *
  * The same rules are in `src-tauri/src/commands/git_history.rs` and in
  * `plugins/llm-wiki/skills/wiki-undo/scripts/undo.mjs`. Change all three together.
  * `.llm-wiki/` is git-ignored, so the lock is never committed.
  */
-import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs"
+import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs"
+import { hostname } from "node:os"
 import { join } from "node:path"
 import { isDirectory } from "./io"
 
@@ -44,6 +50,19 @@ function readText(path: string): string | null {
 }
 
 /**
+ * True unless the path is certainly not there. A path that cannot be looked at for another reason counts as there:
+ * the caller must not take it for a lock that is gone.
+ */
+function pathExists(path: string): boolean {
+  try {
+    lstatSync(path)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ENOENT"
+  }
+}
+
+/**
  * How long ago the holder took the lock: by its `started_at`, or by the time of
  * the file when the text has no start time that parses (a lock that is being
  * written has no text yet). Null when the file is gone.
@@ -68,12 +87,15 @@ function lockAgeMs(path: string, text: string): number | null {
  * True when the lock names a process that does not run on this machine. A lock
  * without a usable pid says nothing, and `EPERM` means the process exists. The
  * pid is meaningful only on the machine and in the process namespace that
- * wrote it.
+ * wrote it, so a lock whose `host` and `platform` are not this process's own
+ * (or are missing) says nothing either: only its age counts.
  */
 function holderIsGone(text: string): boolean {
   let pid: unknown
   try {
-    pid = JSON.parse(text)?.pid
+    const lock = JSON.parse(text)
+    if (lock?.host !== hostname() || lock?.platform !== process.platform) return false
+    pid = lock?.pid
   } catch {
     return false
   }
@@ -95,7 +117,8 @@ function holderIsGone(text: string): boolean {
  */
 export function removeLockIfUnchanged(path: string, judged: string): boolean {
   const current = readText(path)
-  if (current === null) return true
+  // A lock that is there but cannot be read is not gone.
+  if (current === null) return !pathExists(path)
   if (current !== judged) return true
   try {
     unlinkSync(path)
@@ -108,7 +131,8 @@ export function removeLockIfUnchanged(path: string, judged: string): boolean {
 /** Remove the lock when it is stale. Returns true when the caller should try to take it again right away. */
 function clearStaleLock(path: string, staleMs: number): boolean {
   const text = readText(path)
-  if (text === null) return true
+  // A lock that is there but cannot be read (a folder, no permission) is held: wait for it, do not retry at once.
+  if (text === null) return !pathExists(path)
   const age = lockAgeMs(path, text)
   if (age === null) return true
   if (age <= staleMs && !holderIsGone(text)) return false
@@ -126,7 +150,13 @@ function tryCreate(path: string): string | null {
     if (code === "EEXIST" || (code === "EPERM" && readText(path) !== null)) return null
     throw error
   }
-  const text = JSON.stringify({ pid: process.pid, started_at: new Date().toISOString(), tool: LOCK_TOOL })
+  const text = JSON.stringify({
+    pid: process.pid,
+    started_at: new Date().toISOString(),
+    tool: LOCK_TOOL,
+    host: hostname(),
+    platform: process.platform,
+  })
   try {
     writeSync(fd, text)
   } catch (error) {

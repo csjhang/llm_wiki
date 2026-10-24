@@ -9,7 +9,7 @@ Use this skill to revert one action commit of the wiki.
 An action commit is a git commit with the subject prefix `ingest:`, `fuse:`, `recut:`, `lint:`, or `undo:`.
 The undo adds one new commit. It keeps the old commits.
 The undo keeps every earlier line of `wiki/log.md` and adds one undo line.
-The undo changes only the wiki pages. It never changes `raw/` or `.gitignore`.
+The undo changes only the wiki pages. It never changes `raw/`, `.gitignore`, or `heptabase-map.json`.
 
 ## Requirements
 
@@ -51,7 +51,7 @@ Read the JSON on stdout for exit code 0 and for exit code 2.
 - `"reason": "conflict"`: Show the files in `files`. Then check the newer actions in the list, as the section "Check a newer action" says.
   - If a newer action changed these files: Say that a later action changed the same pages. Suggest that the user undoes the later action first. Say that nothing changed.
   - If no newer action changed these files: Say that nothing changed. Stop.
-- `"reason": "dirty"`: Tell the user that the project folder has changes that are not saved in git. The user must save or discard these changes. Do not discard them yourself. After the user confirms, run the revert command again.
+- `"reason": "dirty"`: Tell the user that the project folder has changes that are not saved in git. The user must save or discard these changes. Do not discard them yourself. Never discard or revert `heptabase-map.json`: it maps wiki pages to Heptabase cards. After the user confirms, run the revert command again.
 - `"reason": "not-action"`: Tell the user that the commit is not an action that can be undone. Say that nothing changed.
 - `"reason": "busy"`: Tell the user that another wiki tool (the app or a skill) is using git in this project. Say that nothing changed. Ask the user to wait until it is done. Then run the revert command again.
 - `"reason": "not-a-wiki-project"`: Tell the user that the path is not a project folder. Ask for the folder that contains `wiki/` and `raw/`. Then run the steps again.
@@ -67,6 +67,7 @@ The output lists the files that the action changed, with paths that start at the
 ## Rules
 
 - Do not run `git revert`, `git reset`, or any other git command that changes the repository. Use the script only.
+- Never discard, revert, or reset `heptabase-map.json`. It maps wiki pages to Heptabase cards, and nothing can rebuild it. The script keeps it as it is.
 - Use `git show` only to read the files of a newer action.
 - Do not run `revert` before the user confirms.
 - Undo one action at a time.

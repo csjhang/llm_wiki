@@ -13,7 +13,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -40,7 +40,8 @@ const UNTRACK_LLM_WIKI_MESSAGE: &str = "chore: stop tracking .llm-wiki";
 const FALLBACK_NAME: &str = "LLM Wiki";
 const FALLBACK_EMAIL: &str = "llm-wiki@localhost";
 /// The git lock shared with `wiki-undo` and `wiki-tool`: one file, one JSON
-/// shape (`pid`, `started_at`, `tool`), one set of wait and stale rules.
+/// shape (`pid`, `started_at`, `tool`, `host`, `platform`), one set of wait and
+/// stale rules.
 /// `tools/wiki-tool/src/git-lock.ts` and `undo.mjs` carry the same constants.
 const LOCK_FOLDER: &str = ".llm-wiki";
 const LOCK_FILE: &str = "git.lock";
@@ -312,8 +313,47 @@ fn lock_content() -> String {
         "pid": std::process::id(),
         "started_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
         "tool": LOCK_TOOL,
+        "host": this_host(),
+        "platform": std::env::consts::OS,
     })
     .to_string()
+}
+
+/// The name of this machine, as the other lock writers see it (`os.hostname()` in
+/// Node is the same name). A pid says something only on the machine that wrote
+/// it. Empty when the name cannot be found: then no lock is judged by its pid.
+fn this_host() -> &'static str {
+    static HOST: OnceLock<String> = OnceLock::new();
+    HOST.get_or_init(read_host_name)
+}
+
+fn read_host_name() -> String {
+    let from_file = ["/proc/sys/kernel/hostname", "/etc/hostname"]
+        .iter()
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .map(|text| text.trim().to_string())
+        .find(|name| !name.is_empty());
+    if let Some(name) = from_file {
+        return name;
+    }
+    let from_env = ["HOSTNAME", "COMPUTERNAME"]
+        .iter()
+        .filter_map(|key| std::env::var(key).ok())
+        .map(|name| name.trim().to_string())
+        .find(|name| !name.is_empty());
+    if let Some(name) = from_env {
+        return name;
+    }
+    let mut command = Command::new("hostname");
+    suppress_windows_console(&mut command);
+    command
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .unwrap_or_default()
 }
 
 /// How long ago the holder took the lock: by its `started_at`, or by the time
@@ -358,11 +398,21 @@ fn process_is_gone(_pid: u64) -> bool {
 }
 
 /// True when the lock names a process that is not running. A lock without a
-/// usable pid says nothing.
+/// usable pid says nothing. A pid is meaningful only on the machine and the
+/// platform that wrote it, so a lock whose `host` and `platform` are not this
+/// process's own (or are missing) says nothing either: only its age counts.
 fn holder_is_gone(text: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(text)
-        .ok()
-        .and_then(|json| json.get("pid")?.as_u64())
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(text) else {
+        return false;
+    };
+    let host = json.get("host").and_then(serde_json::Value::as_str);
+    let platform = json.get("platform").and_then(serde_json::Value::as_str);
+    let here = !this_host().is_empty()
+        && host == Some(this_host())
+        && platform == Some(std::env::consts::OS);
+    here && json
+        .get("pid")
+        .and_then(serde_json::Value::as_u64)
         .is_some_and(process_is_gone)
 }
 
@@ -2562,12 +2612,38 @@ mod tests {
         write_lock_of(dir, tool, started_at, std::process::id());
     }
 
+    /// A lock written on this machine and platform, by the process `pid`.
     fn write_lock_of(dir: &Path, tool: &str, started_at: DateTime<Utc>, pid: u32) {
-        let text = serde_json::json!({
+        write_lock_on(
+            dir,
+            tool,
+            started_at,
+            pid,
+            Some(this_host()),
+            Some(std::env::consts::OS),
+        );
+    }
+
+    /// A lock as another machine or platform (or an older tool, with no host) would write it.
+    fn write_lock_on(
+        dir: &Path,
+        tool: &str,
+        started_at: DateTime<Utc>,
+        pid: u32,
+        host: Option<&str>,
+        platform: Option<&str>,
+    ) {
+        let mut text = serde_json::json!({
             "pid": pid,
             "started_at": started_at.to_rfc3339_opts(SecondsFormat::Millis, true),
             "tool": tool,
         });
+        if let Some(host) = host {
+            text["host"] = serde_json::json!(host);
+        }
+        if let Some(platform) = platform {
+            text["platform"] = serde_json::json!(platform);
+        }
         write(dir, ".llm-wiki/git.lock", &text.to_string());
     }
 
@@ -2607,7 +2683,7 @@ mod tests {
     }
 
     #[test]
-    fn lock_file_holds_pid_start_time_and_tool_until_it_is_dropped() {
+    fn lock_file_holds_pid_start_time_tool_host_and_platform_until_it_is_dropped() {
         let dir = temp_dir();
         let before = Utc::now() - ChronoDuration::seconds(1);
 
@@ -2617,6 +2693,17 @@ mod tests {
         let json: serde_json::Value = serde_json::from_str(&text).unwrap();
         assert_eq!(json["pid"], serde_json::json!(std::process::id()));
         assert_eq!(json["tool"], serde_json::json!("app"));
+        assert_eq!(json["platform"], serde_json::json!(std::env::consts::OS));
+        let host = json["host"].as_str().unwrap();
+        assert!(!host.is_empty());
+        assert_eq!(host, this_host());
+        // The Node tools write os.hostname(). On a Unix system `hostname` prints the same name.
+        #[cfg(unix)]
+        if let Ok(output) = Command::new("hostname").output() {
+            if output.status.success() {
+                assert_eq!(host, String::from_utf8_lossy(&output.stdout).trim());
+            }
+        }
         let started = DateTime::parse_from_rfc3339(json["started_at"].as_str().unwrap()).unwrap();
         assert!(started.with_timezone(&Utc) >= before);
         assert!(json["started_at"].as_str().unwrap().ends_with('Z'));
@@ -2703,6 +2790,71 @@ mod tests {
         assert!(sha.is_some());
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(!lock_path(&dir).exists());
+    }
+
+    // Needs /proc to look a process up; elsewhere the check is skipped.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fresh_lock_of_a_dead_pid_is_kept_when_it_was_written_elsewhere() {
+        let other_host = format!("{}-other", this_host());
+        let cases: [(&str, Option<&str>, Option<&str>); 5] = [
+            (
+                "another host",
+                Some(other_host.as_str()),
+                Some(std::env::consts::OS),
+            ),
+            ("another platform", Some(this_host()), Some("windows")),
+            ("no host", None, Some(std::env::consts::OS)),
+            ("no platform", Some(this_host()), None),
+            ("neither", None, None),
+        ];
+        for (name, host, platform) in cases {
+            let dir = repo_with_a_page_to_commit();
+            write_lock_on(&dir, "wiki-tool", Utc::now(), exited_pid(), host, platform);
+
+            let result = with_lock_wait(250, || git_commit_all_inner(&path_str(&dir), "x"));
+
+            assert_eq!(
+                result,
+                Err("another wiki tool is using git".to_string()),
+                "{name}"
+            );
+            assert!(lock_path(&dir).exists(), "{name}");
+        }
+    }
+
+    #[test]
+    fn such_a_lock_is_replaced_once_it_is_older_than_the_stale_limit() {
+        let dir = repo_with_a_page_to_commit();
+        write_lock_on(
+            &dir,
+            "wiki-tool",
+            Utc::now() - ChronoDuration::minutes(11),
+            exited_pid(),
+            Some("elsewhere"),
+            Some("elsewhere"),
+        );
+
+        let sha = git_commit_all_inner(&path_str(&dir), "ingest: a (1 pages)").unwrap();
+
+        assert!(sha.is_some());
+        assert!(!lock_path(&dir).exists());
+    }
+
+    #[test]
+    fn a_lock_that_exists_but_cannot_be_read_is_held_not_spun_on() {
+        let dir = repo_with_a_page_to_commit();
+        // A folder at the place of the lock file: it exists, and reading it fails.
+        fs::create_dir_all(lock_path(&dir)).unwrap();
+
+        let started = Instant::now();
+        let result = with_lock_wait(300, || git_commit_all_inner(&path_str(&dir), "x"));
+        let elapsed = started.elapsed();
+
+        assert_eq!(result, Err("another wiki tool is using git".to_string()));
+        assert!(elapsed >= Duration::from_millis(250), "waited {elapsed:?}");
+        assert!(elapsed < Duration::from_secs(3), "waited {elapsed:?}");
+        assert!(lock_path(&dir).exists());
     }
 
     #[test]

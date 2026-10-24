@@ -7,7 +7,7 @@
  */
 import { execFileSync, spawn, spawnSync } from "node:child_process"
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { hostname, tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, beforeAll, describe, expect, it } from "vitest"
@@ -455,6 +455,62 @@ describe("revertAction", () => {
     expect(git(repo, "show", "--name-only", "--format=", "HEAD")).not.toContain(".llm-wiki")
   })
 
+  describe("the card map heptabase-map.json", () => {
+    it("does not block a revert when it is untracked", () => {
+      const repo = makeRepo()
+      const sha = commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/a.md": "a\n" })
+      write(repo, "heptabase-map.json", '{ "version": 1 }\n')
+
+      expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha)
+
+      expect(read(repo, "heptabase-map.json")).toBe('{ "version": 1 }\n')
+      expect(git(repo, "show", "--name-only", "--format=", "HEAD")).not.toContain("heptabase-map.json")
+    })
+
+    it("does not block a revert when it is changed and not staged, and keeps the change", () => {
+      const repo = makeRepo()
+      commitFiles(repo, "chore: base", { "heptabase-map.json": '{ "pages": {} }\n' })
+      const sha = commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/a.md": "a\n" })
+      write(repo, "heptabase-map.json", '{ "pages": { "wiki/a.md": {} } }\n')
+
+      expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha)
+
+      expect(read(repo, "heptabase-map.json")).toBe('{ "pages": { "wiki/a.md": {} } }\n')
+      expect(git(repo, "show", "--name-only", "--format=", "HEAD")).not.toContain("heptabase-map.json")
+      // The change is still there, not staged and not committed.
+      expect(git(repo, "status", "--porcelain").trimEnd()).toBe(" M heptabase-map.json")
+    })
+
+    it("does not block a revert inside a larger repository", () => {
+      const outer = makeRepo()
+      const project = join(outer, "my-wiki")
+      commitFiles(outer, "chore: base", { "my-wiki/wiki/index.md": "- p0\n" })
+      const sha = commitFiles(outer, "ingest: a (1 pages)", { "my-wiki/wiki/concepts/a.md": "a\n" })
+      write(outer, "my-wiki/heptabase-map.json", "{}\n")
+
+      expectUndone(undo.revertAction(project, sha, "2026-02-03"), project, sha)
+
+      expect(read(outer, "my-wiki/heptabase-map.json")).toBe("{}\n")
+    })
+
+    it("still refuses a map that is staged: the undo commit would include it", () => {
+      const repo = makeRepo()
+      const sha = commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/a.md": "a\n" })
+      write(repo, "heptabase-map.json", "{}\n")
+      git(repo, "add", "heptabase-map.json")
+
+      expect(undo.revertAction(repo, sha, "2026-02-03")).toEqual({ ok: false, reason: "dirty" })
+    })
+
+    it("only ignores the map of the project, not another file with that name", () => {
+      const repo = makeRepo()
+      const sha = commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/a.md": "a\n" })
+      write(repo, "wiki/heptabase-map.json", "{}\n")
+
+      expect(undo.revertAction(repo, sha, "2026-02-03")).toEqual({ ok: false, reason: "dirty" })
+    })
+  })
+
   describe("fallback identity", () => {
     /** A repo with one ingest commit. The commit has an identity. The repo config does not. */
     function makeRepoWithoutIdentity(): { repo: string; sha: string } {
@@ -658,6 +714,31 @@ describe("revertAction safety", () => {
   })
 })
 
+describe("revertAction never discards the card map", () => {
+  it("keeps an uncommitted map when the undo fails halfway and the tree is put back", () => {
+    const repo = makeRepo()
+    commitFiles(repo, "chore: base", { "heptabase-map.json": '{ "pages": {} }\n' })
+    const sha = commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/a.md": "a\n" })
+    const head = git(repo, "rev-parse", "HEAD").trim()
+    write(repo, "heptabase-map.json", '{ "pages": { "wiki/a.md": {} } }\n')
+
+    // A garbage author date makes `git commit` fail after the revert and the log append.
+    const saved = process.env.GIT_AUTHOR_DATE
+    process.env.GIT_AUTHOR_DATE = "garbage"
+    try {
+      expect(() => undo.revertAction(repo, sha, "2026-02-03")).toThrow()
+    } finally {
+      if (saved === undefined) delete process.env.GIT_AUTHOR_DATE
+      else process.env.GIT_AUTHOR_DATE = saved
+    }
+
+    expect(git(repo, "rev-parse", "HEAD").trim()).toBe(head)
+    expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(true)
+    expect(read(repo, "heptabase-map.json")).toBe('{ "pages": { "wiki/a.md": {} } }\n')
+    expect(git(repo, "status", "--porcelain").trimEnd()).toBe(" M heptabase-map.json")
+  })
+})
+
 describe("revertAction git lock", () => {
   const BUSY = "another wiki tool is using git"
 
@@ -665,10 +746,19 @@ describe("revertAction git lock", () => {
     return join(repo, ".llm-wiki", "git.lock")
   }
 
-  /** The pid defaults to this process, which is alive. */
-  function writeLock(repo: string, tool: string, startedAt: Date, pid: number = process.pid): void {
+  /**
+   * The pid defaults to this process, which is alive. The host and the platform default to this machine: a pid says
+   * something only on the machine that wrote it.
+   */
+  function writeLock(
+    repo: string,
+    tool: string,
+    startedAt: Date,
+    pid: number = process.pid,
+    where: { host?: string; platform?: string } = { host: hostname(), platform: process.platform },
+  ): void {
     mkdirSync(join(repo, ".llm-wiki"), { recursive: true })
-    writeFileSync(lockFile(repo), JSON.stringify({ pid, started_at: startedAt.toISOString(), tool }))
+    writeFileSync(lockFile(repo), JSON.stringify({ pid, started_at: startedAt.toISOString(), tool, ...where }))
   }
 
   /** A repo with one undoable ingest commit. */
@@ -737,6 +827,41 @@ describe("revertAction git lock", () => {
     expect(existsSync(lockFile(repo))).toBe(false)
   })
 
+  it("keeps a fresh lock of a dead pid that was written on another machine or another platform", () => {
+    const exited = spawnSync(process.execPath, ["-e", "0"])
+    const wrote = {
+      "another host": { host: `${hostname()}-other`, platform: process.platform },
+      "another platform": { host: hostname(), platform: process.platform === "linux" ? "win32" : "linux" },
+      "no host": { platform: process.platform },
+      "no platform": { host: hostname() },
+      neither: {},
+    }
+    for (const [name, where] of Object.entries(wrote)) {
+      const { repo, sha } = makeUndoableRepo()
+      writeLock(repo, "app", new Date(), exited.pid, where)
+      const result = undo.revertAction(repo, sha, "2026-02-03", { lockWaitMs: 300 })
+      expect(result, name).toEqual({ ok: false, reason: "busy", message: BUSY })
+      expect(JSON.parse(readFileSync(lockFile(repo), "utf8")).tool, name).toBe("app")
+    }
+  })
+
+  it("counts a lock that exists but cannot be read as held: busy within the wait, no spin", () => {
+    const { repo, sha } = makeUndoableRepo()
+    // A folder at the place of the lock file: it exists, and reading it fails.
+    mkdirSync(lockFile(repo), { recursive: true })
+    const head = git(repo, "rev-parse", "HEAD").trim()
+
+    const started = Date.now()
+    const result = undo.revertAction(repo, sha, "2026-02-03", { lockWaitMs: 300 })
+    const elapsed = Date.now() - started
+
+    expect(result).toEqual({ ok: false, reason: "busy", message: BUSY })
+    expect(elapsed).toBeGreaterThanOrEqual(250)
+    expect(elapsed).toBeLessThan(3000)
+    expect(git(repo, "rev-parse", "HEAD").trim()).toBe(head)
+    expect(existsSync(lockFile(repo))).toBe(true)
+  })
+
   it("holds the lock from the revert through the undo commit", () => {
     const { repo, sha } = makeUndoableRepo()
     // post-commit runs even with --no-verify. It copies the lock while the commit is made.
@@ -750,6 +875,8 @@ describe("revertAction git lock", () => {
     const seen = JSON.parse(readFileSync(join(repo, ".git/lock-seen-by-commit"), "utf8"))
     expect(seen.tool).toBe("wiki-undo")
     expect(seen.pid).toBe(process.pid)
+    expect(seen.host).toBe(hostname())
+    expect(seen.platform).toBe(process.platform)
     expect(new Date(seen.started_at).toISOString()).toBe(seen.started_at)
     expect(existsSync(lockFile(repo))).toBe(false)
   })

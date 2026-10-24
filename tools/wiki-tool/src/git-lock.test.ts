@@ -5,8 +5,8 @@
  * name, the JSON shape, and the wait and stale rules are part of the contract.
  */
 import { spawnSync } from "node:child_process"
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs"
+import { hostname, tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { removeLockIfUnchanged, withGitLock } from "./git-lock"
@@ -37,9 +37,17 @@ function writeLock(project: string, text: string): void {
   writeFileSync(lockPath(project), text)
 }
 
-/** The text of a lock file. The pid defaults to this process, which is alive. */
-function lockText(tool: string, startedAt: Date, pid: number = process.pid): string {
-  return JSON.stringify({ pid, started_at: startedAt.toISOString(), tool })
+/**
+ * The text of a lock file. The pid defaults to this process, which is alive. The host and the platform default to
+ * this machine: a pid says something only on the machine that wrote it.
+ */
+function lockText(
+  tool: string,
+  startedAt: Date,
+  pid: number = process.pid,
+  where: { host?: string; platform?: string } = { host: hostname(), platform: process.platform },
+): string {
+  return JSON.stringify({ pid, started_at: startedAt.toISOString(), tool, ...where })
 }
 
 /** The pid of a process that has already exited on this machine. */
@@ -58,7 +66,7 @@ describe("withGitLock", () => {
     const project = makeProject()
     const before = Date.now()
 
-    let seen: { pid: number; started_at: string; tool: string } | undefined
+    let seen: { pid: number; started_at: string; tool: string; host: string; platform: string } | undefined
     const result = await withGitLock(project, () => {
       seen = JSON.parse(readFileSync(lockPath(project), "utf8"))
       return "done"
@@ -67,6 +75,8 @@ describe("withGitLock", () => {
     expect(result).toBe("done")
     expect(seen?.pid).toBe(process.pid)
     expect(seen?.tool).toBe("wiki-tool")
+    expect(seen?.host).toBe(hostname())
+    expect(seen?.platform).toBe(process.platform)
     expect(new Date(seen?.started_at ?? "").getTime()).toBeGreaterThanOrEqual(before)
     expect(new Date(seen?.started_at ?? "").toISOString()).toBe(seen?.started_at)
     expect(existsSync(lockPath(project))).toBe(false)
@@ -190,6 +200,29 @@ describe("withGitLock", () => {
     expect(existsSync(lockPath(project))).toBe(false)
   })
 
+  it("keeps a fresh lock of a dead pid when it was written on another machine or another platform", async () => {
+    const pid = deadPid()
+    const wrote = {
+      "another host": { host: `${hostname()}-other`, platform: process.platform },
+      "another platform": { host: hostname(), platform: process.platform === "linux" ? "win32" : "linux" },
+      "no host": { platform: process.platform },
+      "no platform": { host: hostname() },
+      "neither": {},
+    }
+    for (const [name, where] of Object.entries(wrote)) {
+      const project = makeProject()
+      writeLock(project, lockText("app", new Date(), pid, where))
+      await expect(withGitLock(project, () => "ran", { waitMs: 250 }), name).rejects.toThrow(BUSY)
+      expect(JSON.parse(readFileSync(lockPath(project), "utf8")).tool, name).toBe("app")
+    }
+  })
+
+  it("still replaces such a lock when it is older than the stale limit", async () => {
+    const project = makeProject()
+    writeLock(project, lockText("app", new Date(Date.now() - 2000), deadPid(), { host: "elsewhere", platform: "elsewhere" }))
+    expect(await withGitLock(project, () => "ran", { staleMs: 1000 })).toBe("ran")
+  })
+
   it("keeps a fresh lock whose process is alive", async () => {
     const project = makeProject()
     writeLock(project, lockText("app", new Date(), process.pid))
@@ -203,6 +236,36 @@ describe("withGitLock", () => {
       const project = makeProject()
       writeLock(project, JSON.stringify({ pid, started_at: new Date().toISOString(), tool: "app" }))
       await expect(withGitLock(project, () => "ran", { waitMs: 250 })).rejects.toThrow(BUSY)
+    }
+  })
+
+  it("counts a lock that exists but cannot be read as held: busy within the wait, no spin", async () => {
+    const project = makeProject()
+    // A folder at the place of the lock file: it exists, and reading it fails.
+    mkdirSync(lockPath(project), { recursive: true })
+
+    const started = Date.now()
+    await expect(withGitLock(project, () => "ran", { waitMs: 300 })).rejects.toThrow(BUSY)
+    const elapsed = Date.now() - started
+    expect(elapsed).toBeGreaterThanOrEqual(250)
+    expect(elapsed).toBeLessThan(3000)
+    expect(existsSync(lockPath(project))).toBe(true)
+  })
+
+  it("does not take a lock that is a folder after a stale limit either", async () => {
+    const project = makeProject()
+    mkdirSync(lockPath(project), { recursive: true })
+    await expect(withGitLock(project, () => "ran", { waitMs: 200, staleMs: 0 })).rejects.toThrow(BUSY)
+  })
+
+  it.skipIf(process.getuid?.() === 0)("counts a lock file that the process may not read as held", async () => {
+    const project = makeProject()
+    writeLock(project, lockText("app", new Date()))
+    chmodSync(lockPath(project), 0o000)
+    try {
+      await expect(withGitLock(project, () => "ran", { waitMs: 300 })).rejects.toThrow(BUSY)
+    } finally {
+      chmodSync(lockPath(project), 0o644)
     }
   })
 
@@ -279,5 +342,12 @@ describe("removeLockIfUnchanged", () => {
   it("reports a lock that is already gone", () => {
     const project = makeProject()
     expect(removeLockIfUnchanged(lockPath(project), "anything")).toBe(true)
+  })
+
+  it("does not report a lock that exists but cannot be read as gone", () => {
+    const project = makeProject()
+    mkdirSync(lockPath(project), { recursive: true })
+    expect(removeLockIfUnchanged(lockPath(project), "anything")).toBe(false)
+    expect(existsSync(lockPath(project))).toBe(true)
   })
 })

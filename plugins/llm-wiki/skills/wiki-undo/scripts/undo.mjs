@@ -18,9 +18,14 @@
 // A revert holds the project's git lock, `.llm-wiki/git.lock`, from the dirty
 // check to the undo commit. The app and wiki-tool use the same lock. If another
 // tool keeps it for 30 s, the revert stops with `"reason": "busy"`.
+//
+// The card map `heptabase-map.json` (wiki pages to Heptabase cards) is the user's
+// work in progress and cannot be rebuilt. The dirty check ignores it when it is not
+// staged, and the revert never touches it.
 
 import { spawnSync } from "node:child_process"
-import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs"
+import { closeSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs"
+import { hostname } from "node:os"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
@@ -31,6 +36,8 @@ export const GENERATED_PATHS = ["wiki/index.md", "wiki/log.md", "wiki/overview.m
 const GENERATED_DIR = "wiki/indexes/"
 const LOG_PATH = "wiki/log.md"
 const LLM_WIKI_DIR = ".llm-wiki/"
+/** The card map of the wiki-sync skill, at the top of the project folder. An undo never discards or reverts it. */
+const CARD_MAP_FILE = "heptabase-map.json"
 /** An undo never changes these. A revert keeps their HEAD version. */
 const KEPT_DIR = "raw/"
 const KEPT_FILE = ".gitignore"
@@ -48,9 +55,13 @@ const RECORD_SEPARATOR = "\x1e"
 //
 // The same lock as tools/wiki-tool/src/git-lock.ts and src-tauri/src/commands/git_history.rs:
 // the file `<project>/.llm-wiki/git.lock`, created exclusively, holding
-// `{ "pid", "started_at", "tool" }`. Wait up to 30 s, polling every 200 ms. A
-// lock is left over, and is replaced, when it is older than 10 minutes or when
-// its pid is not a running process on this machine. This script has no
+// `{ "pid", "started_at", "tool", "host", "platform" }`. Wait up to 30 s, polling
+// every 200 ms. A lock is left over, and is replaced, when it is older than 10
+// minutes or when its pid is not a running process on this machine. A pid says
+// something only on the machine and the platform that wrote it, so that early
+// check applies only when the lock's host and platform are this process's own.
+// A lock path that exists but cannot be read (a folder, no permission) counts as
+// held: wait, then busy. It never spins. This script has no
 // dependency and runs without a build step, so it carries its own small copy
 // instead of importing the wiki-tool one. The copy is synchronous because
 // revertAction is. Change the three copies together.
@@ -68,6 +79,19 @@ function readLockText(path) {
     return readFileSync(path, "utf8")
   } catch {
     return null
+  }
+}
+
+/**
+ * True unless the path is certainly not there. A path that cannot be looked at for another reason counts as there:
+ * the caller must not take it for a lock that is gone.
+ */
+function lockPathExists(path) {
+  try {
+    lstatSync(path)
+    return true
+  } catch (error) {
+    return error?.code !== "ENOENT"
   }
 }
 
@@ -99,12 +123,16 @@ function lockAgeMs(path, text) {
 
 /**
  * True when the lock names a process that does not run on this machine. A lock
- * without a usable pid says nothing, and EPERM means the process exists.
+ * without a usable pid says nothing, and EPERM means the process exists. A lock
+ * whose host and platform are not this process's own (or are missing) says
+ * nothing either: only its age counts.
  */
 function holderIsGone(text) {
   let pid
   try {
-    pid = JSON.parse(text)?.pid
+    const lock = JSON.parse(text)
+    if (lock?.host !== hostname() || lock?.platform !== process.platform) return false
+    pid = lock?.pid
   } catch {
     return false
   }
@@ -126,7 +154,8 @@ function holderIsGone(text) {
  */
 function removeLockIfUnchanged(path, judged) {
   const current = readLockText(path)
-  if (current === null) return true
+  // A lock that is there but cannot be read is not gone.
+  if (current === null) return !lockPathExists(path)
   if (current !== judged) return true
   try {
     unlinkSync(path)
@@ -139,7 +168,8 @@ function removeLockIfUnchanged(path, judged) {
 /** Remove the lock when it is stale. Returns true when the caller should try to take it again right away. */
 function clearStaleLock(path, staleMs) {
   const text = readLockText(path)
-  if (text === null) return true
+  // A lock that is there but cannot be read (a folder, no permission) is held: wait for it, do not retry at once.
+  if (text === null) return !lockPathExists(path)
   const age = lockAgeMs(path, text)
   if (age === null) return true
   if (age <= staleMs && !holderIsGone(text)) return false
@@ -156,7 +186,13 @@ function tryCreateLock(path) {
     if (error?.code === "EEXIST" || (error?.code === "EPERM" && readLockText(path) !== null)) return null
     throw error
   }
-  const text = JSON.stringify({ pid: process.pid, started_at: new Date().toISOString(), tool: LOCK_TOOL })
+  const text = JSON.stringify({
+    pid: process.pid,
+    started_at: new Date().toISOString(),
+    tool: LOCK_TOOL,
+    host: hostname(),
+    platform: process.platform,
+  })
   try {
     writeSync(fd, text)
   } catch (error) {
@@ -343,8 +379,9 @@ function unmergedPaths(project) {
 /**
  * Whether the work tree has changes that make a revert unsafe.
  * Changes under the project folder count, except untracked files under
- * `.llm-wiki/`. Staged changes elsewhere in the repository count too, because
- * the undo commit would include them.
+ * `.llm-wiki/` and the card map `heptabase-map.json` when it is not staged (the
+ * undo keeps it as it is). Staged changes elsewhere in the repository count too,
+ * because the undo commit would include them.
  */
 function isDirty(project, prefix) {
   const output = git(project, ["status", "--porcelain", "-z"])
@@ -360,7 +397,9 @@ function isDirty(project, prefix) {
     const inProject = prefix === "" || path.startsWith(prefix)
     if (inProject) {
       const isLlmWikiFile = index === "?" && path.startsWith(prefix + LLM_WIKI_DIR)
-      if (!isLlmWikiFile) return true
+      // `?` is untracked and a space is a change that is not staged: the undo commit does not include either.
+      const isCardMap = path === prefix + CARD_MAP_FILE && (index === "?" || index === " ")
+      if (!isLlmWikiFile && !isCardMap) return true
     } else if (index !== " " && index !== "?" && index !== "!") {
       return true
     }
@@ -395,7 +434,8 @@ function abortRevert(project, prefix) {
   if (result.status !== 0) runGit(project, ["reset", "--merge"])
   if (!isDirty(project, prefix)) return true
   runGit(project, ["reset", "--merge"])
-  runGit(project, ["checkout", "HEAD", "--", "."])
+  // The card map is the user's own work: restoring the project files never discards it.
+  runGit(project, ["checkout", "HEAD", "--", ".", `:(exclude)${CARD_MAP_FILE}`])
   return !isDirty(project, prefix)
 }
 
