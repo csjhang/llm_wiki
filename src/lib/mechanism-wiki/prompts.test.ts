@@ -186,6 +186,16 @@ describe("buildAnalysisAddendum", () => {
     expect(text).toContain("Updated Global Digest")
     expect(text).not.toContain("End the analysis with")
   })
+
+  it("chunk variant asks for the decisions first in the digest, where a cut of the tail keeps them", () => {
+    const text = buildAnalysisAddendum(makeCtx(), null, { chunked: true })
+
+    expect(text).toContain("FIRST subsection of the Updated Global Digest")
+    expect(text).toContain("directly after the `## Updated Global Digest` heading")
+    expect(text).toContain("then the rest of the digest")
+    expect(text).not.toMatch(/end the Updated Global Digest/i)
+    expect(text).not.toMatch(/last (subsection|part) of the (Updated )?(Global )?Digest/i)
+  })
 })
 
 describe("buildGenerationAddendum", () => {
@@ -239,6 +249,16 @@ describe("buildGenerationAddendum", () => {
     expect(traditional).toContain("## 組成\n## 流動\n## 約束與取捨\n## 為什麼有效\n## 失效條件\n## 已知實例")
     expect(simplified).toContain("## 组成\n## 流动\n## 约束与取舍\n## 为什么有效\n## 失效条件\n## 已知实例")
     expect(japanese).toContain("## Parts\n## Flows")
+  })
+
+  it("tells the model to use the six headings exactly and not to translate them", () => {
+    const sentence = "Use exactly these six level-2 headings, in this order. Do not translate or rephrase them."
+    const work = makeCtx({ identity: WORK })
+
+    expect(buildGenerationAddendum(makeCtx(), decisions())).toContain(sentence)
+    expect(buildGenerationAddendum(makeCtx(), decisions(), "Traditional Chinese")).toContain(sentence)
+    expect(buildGenerationAddendum(work, decisions())).toContain(sentence)
+    expect(buildGenerationAddendum(makeCtx(), decisions())).not.toContain("in the output language:")
   })
 
   it("generation addendum for work wiki forbids mechanism files", () => {
@@ -323,11 +343,37 @@ describe("buildGenerationAddendum", () => {
     expect(text).not.toContain("update wiki/mechanisms/event-driven-computing.md")
   })
 
-  it("lists no mechanism instructions when the analysis found none", () => {
+  it("states a neutral rule when the decisions list no mechanism", () => {
     const text = buildGenerationAddendum(makeCtx(), decisions({ mechanisms: [] }))
 
     expect(text).not.toContain("update wiki/mechanisms/")
-    expect(text).toMatch(/no mechanism/i)
+    expect(text).toContain(
+      "Write a mechanism page only for a MECHANISM line in the analysis decisions. This analysis has none, so do not write a mechanism page.",
+    )
+    // It must not read as a finding about the source.
+    expect(text).not.toContain("The analysis found no mechanism")
+    expect(text).not.toContain("had problems")
+  })
+
+  it("blocks mechanism pages when the analysis decisions had problems", () => {
+    const line = "The analysis decisions had problems; do not write or update a mechanism page in this run."
+    const withProblems = buildGenerationAddendum(
+      makeCtx(),
+      decisions({ problems: ["The analysis has no Decisions section."] }),
+    )
+    expect(withProblems).toContain(line)
+    expect(buildGenerationAddendum(makeCtx(), decisions())).not.toContain(line)
+
+    // A mechanism line that was read does not override the problem line.
+    const both = buildGenerationAddendum(
+      makeCtx(),
+      decisions({
+        problems: ["A MECHANISM line was not understood."],
+        mechanisms: [{ kind: "existing", slug: "event-driven-computing", summary: "x" }],
+      }),
+    )
+    expect(both).toContain(line)
+    expect(both).not.toContain("update wiki/mechanisms/event-driven-computing.md")
   })
 
   it("keeps the output format reminder at the end", () => {
@@ -335,6 +381,12 @@ describe("buildGenerationAddendum", () => {
 
     const lines = text.trimEnd().split("\n")
     expect(lines[lines.length - 1]).toMatch(/---FILE:/)
+  })
+
+  it("ends by repeating the output language rule, since it follows the upstream language rule", () => {
+    const text = buildGenerationAddendum(makeCtx(), decisions())
+
+    expect(text.trimEnd().endsWith("Write all prose in the mandatory output language above.")).toBe(true)
   })
 })
 

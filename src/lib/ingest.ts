@@ -1090,10 +1090,14 @@ async function autoIngestImpl(
   if (!analysis) {
     let analysisTruncated = false
     const analysisRequest = ingestAnalysisRequest(llmConfig)
+    const analysisSystemPrompt = appendPromptSection(
+      buildAnalysisPrompt(purpose, promptIndex, sourceContext, schema),
+      mechanism?.analysis,
+    )
     await streamChat(
       llmConfig,
       [
-        { role: "system", content: appendPromptSection(buildAnalysisPrompt(purpose, promptIndex, sourceContext, schema), mechanism?.analysis) },
+        { role: "system", content: analysisSystemPrompt },
         { role: "user", content: `Analyze this source document:\n\n**File:** ${sourceIdentity}${folderContext ? `\n**Folder context:** ${folderContext}` : ""}\n\n---\n\n${sourceContext}` },
       ],
       {
@@ -1147,10 +1151,14 @@ async function autoIngestImpl(
   let generationTruncated = false
 
   try {
+    const generationSystemPrompt = appendPromptSection(
+      buildGenerationPrompt(schema, purpose, promptIndex, sourceIdentity, overview, sourceContext, sourceSummaryPath),
+      mechanismGeneration,
+    )
     await streamChat(
       llmConfig,
       [
-        { role: "system", content: appendPromptSection(buildGenerationPrompt(schema, purpose, promptIndex, sourceIdentity, overview, sourceContext, sourceSummaryPath), mechanismGeneration) },
+        { role: "system", content: generationSystemPrompt },
         {
           role: "user",
           content: [

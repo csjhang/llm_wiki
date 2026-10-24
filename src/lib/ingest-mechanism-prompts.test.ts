@@ -56,9 +56,10 @@ import {
   buildAnalysisPrompt,
   buildChunkAnalysisSystemPrompt,
   buildGenerationPrompt,
+  computeIngestSourceBudget,
 } from "./ingest"
 import { streamChat } from "./llm-client"
-import { buildAnalysisAddendum, buildGenerationAddendum } from "./mechanism-wiki/prompts"
+import { buildAnalysisAddendum, buildGenerationAddendum, prepareMechanismPrompts } from "./mechanism-wiki/prompts"
 import { loadMechanismContext } from "./mechanism-wiki/context"
 import { emptyDecisions } from "./mechanism-wiki/types"
 import { sourceSummarySlugFromIdentity } from "./source-identity"
@@ -300,5 +301,34 @@ describe("ingest prompts and the mechanism context", () => {
     expect(chunks[0].system).toBe(
       `${buildChunkAnalysisSystemPrompt(purpose, schema, INDEX, longSource)}\n\n${buildAnalysisAddendum(ctx, null, { chunked: true })}`,
     )
+  })
+
+  it("counts the mechanism addenda as stable context when it sizes the source budget", async () => {
+    const maxContextSize = 100_000
+    const project = await mechanismProject()
+    const ctx = await loadMechanismContext(project)
+    if (!ctx) throw new Error("expected a mechanism context")
+    const read = (name: string) => fs.readFile(`${project}/${name}`, "utf8")
+    const [schema, purpose, index, overview] = await Promise.all([
+      read("schema.md"),
+      read("purpose.md"),
+      read("wiki/index.md"),
+      read("wiki/overview.md"),
+    ])
+    const plainStable = schema.length + purpose.length + index.length + overview.length
+    const reserved = prepareMechanismPrompts(ctx, index, "", "English").reservedChars
+    const budgetWithout = computeIngestSourceBudget(maxContextSize, plainStable)
+    const budgetWith = computeIngestSourceBudget(maxContextSize, plainStable + reserved)
+    // The addenda must make a difference for this test to mean anything.
+    expect(budgetWith).toBeLessThan(budgetWithout)
+
+    // A source that fits the plain budget but not the budget with the addenda.
+    const size = Math.floor((budgetWith + budgetWithout) / 2)
+    const paragraph = `${"A".repeat(1_999)}\n\n`
+    const source = paragraph.repeat(Math.ceil(size / paragraph.length)).slice(0, size)
+    await writeFileRaw(`${project}/${SOURCE_PATH}`, source)
+    await ingest(project, { maxContextSize })
+
+    expect(capturedCalls().filter(isChunk).length).toBeGreaterThan(1)
   })
 })

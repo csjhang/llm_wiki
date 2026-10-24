@@ -13,6 +13,7 @@
 import { parseFrontmatter } from "@/lib/frontmatter"
 import type { OutputLanguage } from "@/lib/output-language-options"
 import { headingFor, MECHANISM_SECTIONS } from "@/lib/wiki-config/section-headings"
+import type { SectionHeading } from "@/lib/wiki-config/section-headings"
 import { hasOwn } from "@/lib/wiki-config/yaml-util"
 import { canWriteMechanismPages, extractLensFieldsText, lensForDomain } from "./context"
 import type { MechanismContext } from "./context"
@@ -28,6 +29,9 @@ const SECTION_MEANINGS: Readonly<Record<string, string>> = {
   failure: "when the mechanism stops working",
   instances: "the pages that apply the mechanism, each with its domain and its local term",
 }
+
+/** The Known instances section. `section-headings.ts` always defines it. */
+const INSTANCES_SECTION: SectionHeading = MECHANISM_SECTIONS.filter((section) => section.key === "instances")[0]
 
 /** Add `section` to `prompt` after a blank line. An empty or missing section leaves the prompt as it is. */
 export function appendPromptSection(prompt: string, section: string | undefined): string {
@@ -141,12 +145,23 @@ function lensSection(ctx: MechanismContext, hintDomain: string | null): string {
   ].join("\n")
 }
 
-const DECISION_LINES = [
-  "DOMAIN: <path>",
-  "NEW-DOMAIN: <path> | <lens> | <description>",
-  "MECHANISM: existing:<slug> | <one-line>",
-  "MECHANISM: new:<slug> | <one-line>",
-] as const
+/** The four line forms of the Decisions section, as fenced blocks. */
+function decisionLineForms(): string[] {
+  return [
+    "```",
+    "DOMAIN: <path>",
+    "```",
+    "or, when no listed domain fits:",
+    "```",
+    "NEW-DOMAIN: <path> | <lens> | <description>",
+    "```",
+    "then zero or more mechanism lines:",
+    "```",
+    "MECHANISM: existing:<slug> | <one-line>",
+    "MECHANISM: new:<slug> | <one-line>",
+    "```",
+  ]
+}
 
 const DECISION_RULES = [
   "- Write exactly one `DOMAIN` line, or exactly one `NEW-DOMAIN` line when no listed domain fits. `<path>` is a domain path: lowercase words joined by `-`, with `/` between levels.",
@@ -162,18 +177,7 @@ function decisionsSection(): string {
     "",
     "End your analysis with a section headed exactly `## Decisions`. Write nothing after it. It holds only these lines, one per line, without bullets:",
     "",
-    "```",
-    DECISION_LINES[0],
-    "```",
-    "or, when no listed domain fits:",
-    "```",
-    DECISION_LINES[1],
-    "```",
-    "then zero or more mechanism lines:",
-    "```",
-    DECISION_LINES[2],
-    DECISION_LINES[3],
-    "```",
+    ...decisionLineForms(),
     "",
     ...DECISION_RULES,
   ].join("\n")
@@ -184,20 +188,10 @@ function chunkDecisionsSection(): string {
     "### Decisions",
     "",
     "Output exactly the two sections already requested. Do not add a third section.",
-    "Instead, end the Updated Global Digest with a subsection headed exactly `### Decisions`. It holds only these lines, one per line, without bullets:",
+    "Instead, make the `### Decisions` subsection the FIRST subsection of the Updated Global Digest: write it directly after the `## Updated Global Digest` heading, then the rest of the digest. Do not put it last, because the app cuts the end of a long digest and would lose the decisions.",
+    "The subsection is headed exactly `### Decisions`. It holds only these lines, one per line, without bullets. The next digest heading ends it:",
     "",
-    "```",
-    DECISION_LINES[0],
-    "```",
-    "or, when no listed domain fits:",
-    "```",
-    DECISION_LINES[1],
-    "```",
-    "then zero or more mechanism lines:",
-    "```",
-    DECISION_LINES[2],
-    DECISION_LINES[3],
-    "```",
+    ...decisionLineForms(),
     "",
     "Keep one `DOMAIN` or `NEW-DOMAIN` line for the whole document. Change it only when this chunk shows that the document belongs elsewhere.",
     "Keep the `MECHANISM` lines of the Current Global Digest, and add a line for each mechanism that this chunk shows.",
@@ -228,10 +222,7 @@ export function buildGenerationAddendum(
 ): string {
   const language = headingLanguage(outputLanguage)
   const canWrite = canWriteMechanismPages(ctx)
-  const instancesHeading = headingFor(
-    MECHANISM_SECTIONS.find((section) => section.key === "instances") ?? MECHANISM_SECTIONS[MECHANISM_SECTIONS.length - 1],
-    language,
-  )
+  const instancesHeading = headingFor(INSTANCES_SECTION, language)
   return [
     "## Mechanism Wiki Rules (these add to the rules above)",
     "",
@@ -244,7 +235,7 @@ export function buildGenerationAddendum(
     "",
     decisionRules(decisions, canWrite, instancesHeading),
     "",
-    "These rules add to the Output Format above. Your response still begins with `---FILE:` and holds only FILE blocks and REVIEW blocks.",
+    "These rules add to the Output Format above. Your response still begins with `---FILE:` and holds only FILE blocks and REVIEW blocks. Write all prose in the mandatory output language above.",
   ].join("\n")
 }
 
@@ -303,7 +294,7 @@ function reviewOnlyMechanismRules(ctx: MechanismContext, language: OutputLanguag
 
 function headingList(language: OutputLanguage): string {
   return [
-    "Write these six level-2 headings, in this order, in the output language:",
+    "Use exactly these six level-2 headings, in this order. Do not translate or rephrase them.",
     "",
     ...MECHANISM_SECTIONS.map((section) => `## ${headingFor(section, language)}`),
   ].join("\n")
@@ -320,11 +311,19 @@ function decisionRules(
   canWrite: boolean,
   instancesHeading: string,
 ): string {
+  if (decisions.problems.length > 0) {
+    // The mechanism lines cannot be trusted, so none is listed.
+    return [
+      "### Mechanisms for this source",
+      "",
+      "The analysis decisions had problems; do not write or update a mechanism page in this run.",
+    ].join("\n")
+  }
   if (decisions.mechanisms.length === 0) {
     return [
       "### Mechanisms for this source",
       "",
-      "The analysis found no mechanism in this source. Do not write a mechanism page for it.",
+      "Write a mechanism page only for a MECHANISM line in the analysis decisions. This analysis has none, so do not write a mechanism page.",
     ].join("\n")
   }
   return [
