@@ -5,9 +5,11 @@
  * commands read those files and the card map.
  */
 import { init } from "./cmd-init"
+import { planDown } from "./cmd-plan-down"
+import { record } from "./cmd-record"
 import type { CommandGroup } from "./io"
 
 export const HEPTA_GROUP: CommandGroup = {
   name: "hepta",
-  commands: { init },
+  commands: { init, "plan-down": planDown, record },
 }

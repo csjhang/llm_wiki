@@ -7,7 +7,7 @@
  * and the whiteboard tree of the card map. Nothing is written unless every check
  * passes. The generated text is parsed with parseHeptabaseYaml before it is written.
  */
-import { existsSync, readFileSync, statSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import {
   parseHeptabaseYaml,
   REQUIRED_PROPERTY_KEYS,
@@ -18,7 +18,7 @@ import { isRecord } from "@/lib/wiki-config/yaml-util"
 import { parseArgs } from "./args"
 import { type CardMap, loadCardMap, saveCardMap } from "./card-map"
 import type { CommandResult } from "./io"
-import { resolveInProject, writeFileAtomic } from "./io"
+import { isDirectory, resolveInProject, writeFileAtomic } from "./io"
 import { joinListWhiteboards, parsePagingTrailer, type WhiteboardNode } from "./parse-mcp"
 
 const HEPTABASE_YAML = "heptabase.yaml"
@@ -44,7 +44,7 @@ const OPTION_SPEC = {
 
 const REQUIRED_OPTIONS = ["project", "database", "whiteboards", "ingest-tag", "mirror-tag", "root"] as const
 
-interface DatabaseSchema {
+export interface DatabaseSchema {
   /** Property id to its definition, as `read_database` returns it. */
   schema: Record<string, unknown>
   tagId: string | null
@@ -155,14 +155,6 @@ function unique(values: string[]): string[] {
   return [...new Set(values)]
 }
 
-function isDirectory(path: string): boolean {
-  try {
-    return statSync(path).isDirectory()
-  } catch {
-    return false
-  }
-}
-
 function readText(option: string, path: string, problems: string[]): string | null {
   try {
     return readFileSync(path, "utf8").replace(/^\uFEFF/, "")
@@ -173,7 +165,7 @@ function readText(option: string, path: string, problems: string[]): string | nu
 }
 
 /** The schema and tag id of a `read_database` result: the parsed object, or the JSON text in `content`. */
-function readDatabase(path: string, problems: string[]): DatabaseSchema | null {
+export function readDatabase(path: string, problems: string[]): DatabaseSchema | null {
   const text = readText("--database", path, problems)
   if (text === null) return null
   let raw: unknown

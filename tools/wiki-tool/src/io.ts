@@ -6,7 +6,7 @@
  * outside the folder a command is given: resolveInProject throws first.
  */
 import { randomBytes } from "node:crypto"
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs"
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, statSync, unlinkSync, writeSync } from "node:fs"
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path"
 
 /** What a command returns. `ok: false` needs a `problems` list of messages. */
@@ -22,6 +22,15 @@ export type CommandHandler = (args: string[]) => CommandResult | Promise<Command
 export interface CommandGroup {
   name: string
   commands: Record<string, CommandHandler>
+}
+
+/** True when `path` is a folder. A missing path is not one. */
+export function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 /** Read and parse a JSON file. A parse error names the file. */

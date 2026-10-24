@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 import { runCli } from "./cli"
 import type { CommandGroup } from "./io"
-import { readJsonFile, resolveInProject, writeFileAtomic } from "./io"
+import { isDirectory, readJsonFile, resolveInProject, writeFileAtomic } from "./io"
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url))
 const MANIFEST_PATH = join(REPO_ROOT, "plugins", "llm-wiki", ".claude-plugin", "plugin.json")
@@ -107,6 +107,16 @@ describe("runCli", () => {
       expect(result.exitCode).toBe(1)
       expect(result.output).toEqual({ ok: false, problems: ["unexpected error: boom"] })
     })
+  })
+})
+
+describe("isDirectory", () => {
+  it("is true for a folder only", () => {
+    const dir = makeTempDir()
+    writeFileSync(join(dir, "file.txt"), "x")
+    expect(isDirectory(dir)).toBe(true)
+    expect(isDirectory(join(dir, "file.txt"))).toBe(false)
+    expect(isDirectory(join(dir, "missing"))).toBe(false)
   })
 })
 

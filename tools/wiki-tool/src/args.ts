@@ -68,3 +68,17 @@ export function parseArgs(args: readonly string[], spec: ArgSpec): { parsed: Par
   }
   return { parsed, problems }
 }
+
+/**
+ * The time of a `--now` option: the clock when the option is not given, else the date and time
+ * it names (ISO 8601, such as 2026-10-24T08:00:00Z). Anything else is a problem and returns null.
+ */
+export function parseNowOption(value: string | undefined, problems: string[]): Date | null {
+  if (value === undefined) return new Date()
+  const time = /^\d{4}-\d{2}-\d{2}/.test(value) ? Date.parse(value) : Number.NaN
+  if (Number.isNaN(time)) {
+    problems.push(`--now must be an ISO date and time, such as 2026-10-24T08:00:00Z: ${value}`)
+    return null
+  }
+  return new Date(time)
+}

@@ -2,7 +2,7 @@
  * args.test.ts - tests for the option parser shared by the wiki-tool commands.
  */
 import { describe, expect, it } from "vitest"
-import { parseArgs } from "./args"
+import { parseArgs, parseNowOption } from "./args"
 
 const SPEC = { values: ["project", "database"], lists: ["root"], flags: ["force"] } as const
 
@@ -43,5 +43,31 @@ describe("parseArgs", () => {
 
   it("does not find options through the prototype chain", () => {
     expect(parseArgs(["--constructor", "x"], SPEC).problems).toEqual(["unknown option: --constructor"])
+  })
+})
+
+describe("parseNowOption", () => {
+  it("reads the clock when the option is not given", () => {
+    const problems: string[] = []
+    const before = Date.now()
+    const now = parseNowOption(undefined, problems)
+    expect(problems).toEqual([])
+    expect(now?.getTime()).toBeGreaterThanOrEqual(before)
+    expect(now?.getTime()).toBeLessThanOrEqual(Date.now())
+  })
+
+  it("reads an ISO date and time", () => {
+    const problems: string[] = []
+    expect(parseNowOption("2026-10-24T08:00:00Z", problems)?.toISOString()).toBe("2026-10-24T08:00:00.000Z")
+    expect(parseNowOption("2026-10-24T08:00:00+08:00", problems)?.toISOString()).toBe("2026-10-24T00:00:00.000Z")
+    expect(problems).toEqual([])
+  })
+
+  it("reports anything else", () => {
+    for (const value of ["yesterday", "", "10/24/2026", "2026-13-45T00:00:00Z"]) {
+      const problems: string[] = []
+      expect(parseNowOption(value, problems)).toBeNull()
+      expect(problems).toEqual([expect.stringContaining("--now must be an ISO date and time")])
+    }
   })
 })
