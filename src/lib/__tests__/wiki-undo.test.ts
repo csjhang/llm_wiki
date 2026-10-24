@@ -5,8 +5,8 @@
  * against real temporary git repositories. Each repo has a local identity, so
  * the tests do not depend on the git config of the machine.
  */
-import { execFileSync, spawnSync } from "node:child_process"
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs"
+import { execFileSync, spawn, spawnSync } from "node:child_process"
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -26,12 +26,18 @@ type RevertResult =
   | { ok: true; sha: string; reverted: string }
   | { ok: false; reason: "conflict"; files: string[] }
   | { ok: false; reason: "not-action" | "dirty" | "not-a-wiki-project" | "protected" }
+  | { ok: false; reason: "busy"; message: string }
 
 interface UndoModule {
   ACTION_PREFIXES: string[]
   GENERATED_PATHS: string[]
   listActions: (projectPath: string, limit?: number) => Action[]
-  revertAction: (projectPath: string, sha: string, today?: string) => RevertResult
+  revertAction: (
+    projectPath: string,
+    sha: string,
+    today?: string,
+    options?: { lockWaitMs?: number; lockStaleMs?: number },
+  ) => RevertResult
 }
 
 let undo: UndoModule
@@ -649,6 +655,127 @@ describe("revertAction safety", () => {
     expect(git(repo, "rev-parse", "HEAD").trim()).toBe(head)
     expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(true)
     expect(existsSync(join(repo, "wiki/log.md"))).toBe(false)
+  })
+})
+
+describe("revertAction git lock", () => {
+  const BUSY = "another wiki tool is using git"
+
+  function lockFile(repo: string): string {
+    return join(repo, ".llm-wiki", "git.lock")
+  }
+
+  function writeLock(repo: string, tool: string, startedAt: Date): void {
+    mkdirSync(join(repo, ".llm-wiki"), { recursive: true })
+    writeFileSync(lockFile(repo), JSON.stringify({ pid: 4242, started_at: startedAt.toISOString(), tool }))
+  }
+
+  /** A repo with one undoable ingest commit. */
+  function makeUndoableRepo(): { repo: string; sha: string } {
+    const repo = makeRepo()
+    commitFiles(repo, "chore: base", { "a.txt": "1" })
+    return { repo, sha: commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/a.md": "a\n" }) }
+  }
+
+  it("undo waits for the lock", () => {
+    const { repo, sha } = makeUndoableRepo()
+    writeLock(repo, "wiki-tool", new Date())
+    // The undo blocks this process while it waits, so another process lets go of the lock.
+    const holder = spawn(
+      process.execPath,
+      ["-e", "setTimeout(() => require('node:fs').rmSync(process.argv[1], { force: true }), 500)", lockFile(repo)],
+      { stdio: "ignore" },
+    )
+    holder.unref()
+    const head = git(repo, "rev-parse", "HEAD").trim()
+
+    const started = Date.now()
+    const result = undo.revertAction(repo, sha, "2026-02-03")
+    const waited = Date.now() - started
+
+    expectUndone(result, repo, sha)
+    expect(waited).toBeGreaterThanOrEqual(400)
+    expect(git(repo, "rev-parse", "HEAD~1").trim()).toBe(head)
+    expect(existsSync(lockFile(repo))).toBe(false)
+  })
+
+  it("fails with the busy message when the lock stays taken, and changes nothing", () => {
+    const { repo, sha } = makeUndoableRepo()
+    writeLock(repo, "app", new Date())
+    const head = git(repo, "rev-parse", "HEAD").trim()
+
+    const started = Date.now()
+    const result = undo.revertAction(repo, sha, "2026-02-03", { lockWaitMs: 400 })
+
+    expect(result).toEqual({ ok: false, reason: "busy", message: BUSY })
+    expect(Date.now() - started).toBeGreaterThanOrEqual(350)
+    expect(git(repo, "rev-parse", "HEAD").trim()).toBe(head)
+    expect(existsSync(join(repo, "wiki/concepts/a.md"))).toBe(true)
+    // The lock of the other tool is still there.
+    expect(JSON.parse(readFileSync(lockFile(repo), "utf8")).tool).toBe("app")
+  })
+
+  it("replaces a stale lock", () => {
+    const { repo, sha } = makeUndoableRepo()
+    writeLock(repo, "app", new Date(Date.now() - 11 * 60_000))
+
+    expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha)
+
+    expect(existsSync(lockFile(repo))).toBe(false)
+  })
+
+  it("holds the lock from the revert through the undo commit", () => {
+    const { repo, sha } = makeUndoableRepo()
+    // post-commit runs even with --no-verify. It copies the lock while the commit is made.
+    const hook = join(repo, ".git/hooks/post-commit")
+    mkdirSync(dirname(hook), { recursive: true })
+    writeFileSync(hook, "#!/bin/sh\ncp .llm-wiki/git.lock .git/lock-seen-by-commit\n")
+    chmodSync(hook, 0o755)
+
+    expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha)
+
+    const seen = JSON.parse(readFileSync(join(repo, ".git/lock-seen-by-commit"), "utf8"))
+    expect(seen.tool).toBe("wiki-undo")
+    expect(seen.pid).toBe(process.pid)
+    expect(new Date(seen.started_at).toISOString()).toBe(seen.started_at)
+    expect(existsSync(lockFile(repo))).toBe(false)
+  })
+
+  it("releases the lock after a conflict and after a refusal", () => {
+    const repo = makeRepo()
+    commitFiles(repo, "chore: base", { "wiki/concepts/p.md": "line\n" })
+    const shaA = commitFiles(repo, "ingest: a (1 pages)", { "wiki/concepts/p.md": "from a\n" })
+    commitFiles(repo, "ingest: b (1 pages)", { "wiki/concepts/p.md": "from b\n" })
+
+    expect(undo.revertAction(repo, shaA, "2026-02-03")).toMatchObject({ ok: false, reason: "conflict" })
+    expect(existsSync(lockFile(repo))).toBe(false)
+
+    expect(undo.revertAction(repo, "deadbeef", "2026-02-03")).toEqual({ ok: false, reason: "not-action" })
+    expect(existsSync(lockFile(repo))).toBe(false)
+
+    write(repo, "wiki/concepts/p.md", "dirty\n")
+    expect(undo.revertAction(repo, shaA, "2026-02-03")).toEqual({ ok: false, reason: "dirty" })
+    expect(existsSync(lockFile(repo))).toBe(false)
+  })
+
+  it("releases the lock when the undo throws", () => {
+    const { repo, sha } = makeUndoableRepo()
+    const saved = process.env.GIT_AUTHOR_DATE
+    process.env.GIT_AUTHOR_DATE = "garbage"
+    try {
+      expect(() => undo.revertAction(repo, sha, "2026-02-03")).toThrow()
+    } finally {
+      if (saved === undefined) delete process.env.GIT_AUTHOR_DATE
+      else process.env.GIT_AUTHOR_DATE = saved
+    }
+    expect(existsSync(lockFile(repo))).toBe(false)
+  })
+
+  it("does not create .llm-wiki for a project that is not a wiki project", () => {
+    const repo = makeDir()
+    git(repo, "init", "--quiet")
+    expect(undo.revertAction(repo, "deadbeef", "2026-02-03")).toEqual({ ok: false, reason: "not-a-wiki-project" })
+    expect(existsSync(join(repo, ".llm-wiki"))).toBe(false)
   })
 })
 

@@ -4,14 +4,21 @@
 //! ingest wrote, and a failed or cancelled ingest restores only those paths to
 //! the last commit. These commands shell out to the user's `git`; none of them
 //! ever writes to the user's git config.
+//!
+//! Every command that writes (init, commit, restore) holds the project's git
+//! lock, `.llm-wiki/git.lock`, so it never overlaps with `wiki-undo` or
+//! `wiki-tool` working on the same project.
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Mutex;
+use std::time::{Duration, Instant, SystemTime};
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
@@ -32,6 +39,17 @@ const INIT_COMMIT_MESSAGE: &str = "chore: start version history";
 const UNTRACK_LLM_WIKI_MESSAGE: &str = "chore: stop tracking .llm-wiki";
 const FALLBACK_NAME: &str = "LLM Wiki";
 const FALLBACK_EMAIL: &str = "llm-wiki@localhost";
+/// The git lock shared with `wiki-undo` and `wiki-tool`: one file, one JSON
+/// shape (`pid`, `started_at`, `tool`), one set of wait and stale rules.
+/// `tools/wiki-tool/src/git-lock.ts` and `undo.mjs` carry the same constants.
+const LOCK_FOLDER: &str = ".llm-wiki";
+const LOCK_FILE: &str = "git.lock";
+const LOCK_TOOL: &str = "app";
+const LOCK_BUSY_MESSAGE: &str = "another wiki tool is using git";
+const LOCK_WAIT: Duration = Duration::from_secs(30);
+const LOCK_POLL: Duration = Duration::from_millis(200);
+/// A lock older than this is left over from a crashed tool.
+const LOCK_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 /// Candidates tried after `git` on PATH: desktop apps often do not inherit the
 /// user's login-shell PATH.
 const GIT_FALLBACK_PATHS: [&str; 3] = [
@@ -225,6 +243,183 @@ fn nul_entries(output: &str) -> Vec<String> {
         .collect()
 }
 
+// ── the shared git lock ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy)]
+struct GitLockOptions {
+    /// How long to wait for another tool to let go.
+    wait: Duration,
+    /// How often to look again while waiting.
+    poll: Duration,
+    /// The age after which a lock is taken to be left over.
+    stale: Duration,
+}
+
+impl Default for GitLockOptions {
+    fn default() -> Self {
+        GitLockOptions {
+            wait: LOCK_WAIT,
+            poll: LOCK_POLL,
+            stale: LOCK_STALE_AFTER,
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static LOCK_OPTIONS_FOR_TESTS: std::cell::Cell<Option<GitLockOptions>> =
+        const { std::cell::Cell::new(None) };
+}
+
+/// Lets a test shorten the 30 s wait for the code running on its own thread.
+#[cfg(test)]
+fn set_lock_options_for_tests(options: Option<GitLockOptions>) {
+    LOCK_OPTIONS_FOR_TESTS.with(|cell| cell.set(options));
+}
+
+fn lock_options() -> GitLockOptions {
+    #[cfg(test)]
+    if let Some(options) = LOCK_OPTIONS_FOR_TESTS.with(|cell| cell.get()) {
+        return options;
+    }
+    GitLockOptions::default()
+}
+
+/// The lock this process holds. Dropping it releases the lock.
+struct GitLock {
+    path: PathBuf,
+    content: String,
+}
+
+impl Drop for GitLock {
+    fn drop(&mut self) {
+        // Only remove the file while it is still ours: a lock that went stale
+        // under a long stall may belong to another tool by now.
+        if read_lock_text(&self.path).as_deref() == Some(self.content.as_str()) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn read_lock_text(path: &Path) -> Option<String> {
+    fs::read(path)
+        .ok()
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+}
+
+fn lock_content() -> String {
+    serde_json::json!({
+        "pid": std::process::id(),
+        "started_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        "tool": LOCK_TOOL,
+    })
+    .to_string()
+}
+
+/// How long ago the holder took the lock: by its `started_at`, or by the time
+/// of the file when the text has no start time that parses (a lock that is
+/// being written has no text yet). `None` when the file is gone.
+fn lock_age(path: &Path, text: &str) -> Option<Duration> {
+    let started_at = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|json| json.get("started_at")?.as_str().map(String::from))
+        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok());
+    if let Some(started_at) = started_at {
+        // A start time in the future (clock skew) counts as just started.
+        return Some(
+            (Utc::now() - started_at.with_timezone(&Utc))
+                .to_std()
+                .unwrap_or(Duration::ZERO),
+        );
+    }
+    let modified = fs::metadata(path).and_then(|meta| meta.modified()).ok()?;
+    Some(
+        SystemTime::now()
+            .duration_since(modified)
+            .unwrap_or(Duration::ZERO),
+    )
+}
+
+/// Remove the lock when it is stale. Returns true when the caller should try to
+/// take the lock again right away: the lock was removed, or it is already gone.
+fn clear_stale_lock(path: &Path, stale_after: Duration) -> bool {
+    let Some(text) = read_lock_text(path) else {
+        return !path.exists();
+    };
+    let Some(age) = lock_age(path, &text) else {
+        return true;
+    };
+    if age <= stale_after {
+        return false;
+    }
+    // Look again right before removing: another tool may have replaced the
+    // stale lock with its own since the read above.
+    if read_lock_text(path).as_deref() != Some(text.as_str()) {
+        return true;
+    }
+    match fs::remove_file(path) {
+        Ok(()) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// `create_new` found the lock taken. On Windows a lock that is being deleted
+/// reports "access denied" instead, which also means "try again".
+fn lock_is_taken(error: &std::io::Error, path: &Path) -> bool {
+    error.kind() == std::io::ErrorKind::AlreadyExists
+        || (cfg!(windows) && error.kind() == std::io::ErrorKind::PermissionDenied && path.exists())
+}
+
+/// Take `<project>/.llm-wiki/git.lock`, waiting up to `options.wait` for
+/// another tool to let go. A lock older than `options.stale` is removed.
+fn acquire_git_lock(project_path: &str, options: &GitLockOptions) -> Result<GitLock, String> {
+    if !Path::new(project_path).is_dir() {
+        return Err(format!("Project folder not found: {project_path}"));
+    }
+    let folder = Path::new(project_path).join(LOCK_FOLDER);
+    fs::create_dir_all(&folder)
+        .map_err(|error| format!("Failed to create {LOCK_FOLDER}/: {error}"))?;
+    let path = folder.join(LOCK_FILE);
+    let deadline = Instant::now() + options.wait;
+    loop {
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                let content = lock_content();
+                if let Err(error) = file.write_all(content.as_bytes()) {
+                    drop(file);
+                    let _ = fs::remove_file(&path);
+                    return Err(format!("Failed to write the git lock: {error}"));
+                }
+                return Ok(GitLock { path, content });
+            }
+            Err(error) if lock_is_taken(&error, &path) => {}
+            Err(error) => return Err(format!("Failed to take the git lock: {error}")),
+        }
+        if clear_stale_lock(&path, options.stale) {
+            continue;
+        }
+        let now = Instant::now();
+        if now >= deadline {
+            return Err(LOCK_BUSY_MESSAGE.to_string());
+        }
+        std::thread::sleep(options.poll.min(deadline - now));
+    }
+}
+
+/// Run a git write while holding the project's git lock. The lock is released
+/// when `work` returns, fails, or panics.
+fn with_git_lock<T>(
+    project_path: &str,
+    work: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _lock = acquire_git_lock(project_path, &lock_options())?;
+    work()
+}
+
 fn git_info_inner(project_path: &str) -> GitInfo {
     if resolve_git().is_none() {
         return GitInfo::unavailable();
@@ -320,7 +515,7 @@ fn git_init_with_env(project_path: &str, envs: &[(&str, &str)]) -> Result<(), St
 }
 
 fn git_init_inner(project_path: &str) -> Result<(), String> {
-    git_init_with_env(project_path, &[])
+    with_git_lock(project_path, || git_init_with_env(project_path, &[]))
 }
 
 /// `.llm-wiki/` must never be committed: make sure git ignores it, appending
@@ -379,6 +574,37 @@ fn commit_as_app(
     head_sha(project_path, envs)
 }
 
+/// The operation git is in the middle of, judged by the files it leaves in the
+/// git dir.
+fn operation_in_progress(git_dir: &Path) -> Option<&'static str> {
+    const MARKERS: [(&str, &str); 6] = [
+        ("MERGE_HEAD", "merge"),
+        ("REBASE_HEAD", "rebase"),
+        ("CHERRY_PICK_HEAD", "cherry-pick"),
+        ("REVERT_HEAD", "revert"),
+        ("rebase-merge", "rebase"),
+        ("rebase-apply", "rebase"),
+    ];
+    MARKERS
+        .iter()
+        .find(|(marker, _)| git_dir.join(marker).exists())
+        .map(|(_, operation)| *operation)
+}
+
+/// The file name of the temporary index of the untracking commit. Two projects
+/// in one repository share a git dir, so the name comes from a hash of the
+/// canonical project path and never collides.
+fn untrack_index_name(project_path: &str) -> String {
+    let canonical = fs::canonicalize(project_path).unwrap_or_else(|_| PathBuf::from(project_path));
+    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    let hash: String = digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    format!("llm-wiki-untrack-{hash}.index")
+}
+
 /// Ignoring `.llm-wiki/` does not untrack files an older commit recorded, and
 /// a path-limited commit takes such a file's current content from disk, so it
 /// would keep committing the secret. When HEAD has `.llm-wiki` files, record
@@ -386,6 +612,10 @@ fn commit_as_app(
 /// temporary index from HEAD so it holds nothing else: no staged change of the
 /// user and nothing outside a nested project folder. Then drop the files from
 /// the real index (they stay on disk). Returns true when it made that commit.
+/// While a merge, rebase, cherry-pick, or revert is in progress it refuses
+/// instead: a commit made then would end or move that operation. The temporary
+/// index is named after a hash of the project path, so two projects in one
+/// repository never share it.
 fn untrack_llm_wiki(project_path: &str, envs: &[(&str, &str)]) -> Result<bool, String> {
     let in_index = !run_git_ok(project_path, &["ls-files", "--", ".llm-wiki"], envs)?
         .stdout
@@ -401,13 +631,27 @@ fn untrack_llm_wiki(project_path: &str, envs: &[(&str, &str)]) -> Result<bool, S
         .trim()
         .is_empty();
 
-    if in_head {
+    let git_dir = if in_index || in_head {
         let git_dir = run_git_ok(project_path, &["rev-parse", "--absolute-git-dir"], envs)?
             .stdout
             .trim()
             .to_string();
-        let temp_index =
-            Path::new(&git_dir).join(format!("llm-wiki-untrack-{}.index", std::process::id()));
+        // A commit made now would join the operation instead of standing
+        // alone: in a merge it becomes the merge commit, in a rebase or a
+        // cherry-pick it moves the sequence along. Leave it to the user.
+        if let Some(operation) = operation_in_progress(Path::new(&git_dir)) {
+            return Err(format!(
+                "Cannot stop tracking .llm-wiki while a {operation} is in progress. \
+                 Finish or abort it, then try again."
+            ));
+        }
+        git_dir
+    } else {
+        String::new()
+    };
+
+    if in_head {
+        let temp_index = Path::new(&git_dir).join(untrack_index_name(project_path));
         let temp_index_str = temp_index.to_string_lossy().to_string();
         let mut temp_envs: Vec<(&str, &str)> = envs.to_vec();
         temp_envs.push(("GIT_INDEX_FILE", temp_index_str.as_str()));
@@ -488,7 +732,9 @@ fn has_config(project_path: &str, key: &str, envs: &[(&str, &str)]) -> Result<bo
 }
 
 fn git_commit_all_inner(project_path: &str, message: &str) -> Result<Option<String>, String> {
-    git_commit_all_with_env(project_path, message, &[])
+    with_git_lock(project_path, || {
+        git_commit_all_with_env(project_path, message, &[])
+    })
 }
 
 /// A checked project-relative path, rebuilt with `/` separators.
@@ -782,7 +1028,11 @@ fn git_commit_paths_inner(
     paths: &[String],
     message: &str,
 ) -> Result<Option<String>, String> {
-    git_commit_paths_with_env(project_path, paths, message, &[])
+    // A bad path is the caller's mistake: report it without waiting for the lock.
+    parse_commit_paths(paths)?;
+    with_git_lock(project_path, || {
+        git_commit_paths_with_env(project_path, paths, message, &[])
+    })
 }
 
 /// Put `paths` (inside `wiki/`) back as they are in HEAD and touch nothing
@@ -796,14 +1046,18 @@ fn git_restore_paths_inner(project_path: &str, paths: &[String]) -> Result<(), S
     if paths.is_empty() {
         return Ok(());
     }
-    let all = rels(&paths);
+    with_git_lock(project_path, || restore_checked_paths(project_path, &paths))
+}
+
+fn restore_checked_paths(project_path: &str, paths: &[ProjectPath]) -> Result<(), String> {
+    let all = rels(paths);
     let in_index = index_entries(project_path, &all, &[])?;
     let in_head = head_entries(project_path, &all, &[])?;
     let root = Path::new(project_path);
 
     // Tell the file watcher these changes come from the app, so a deleted
     // page is not handled as an external delete.
-    for path in &paths {
+    for path in paths {
         crate::commands::file_sync::mark_app_write_path(&root.join(&path.rel));
     }
 
@@ -2254,5 +2508,453 @@ mod tests {
             "outer/o.md"
         );
         assert_eq!(read(&project, ".llm-wiki/secret"), "v2 changed since");
+    }
+
+    // ── the shared git lock ──────────────────────────────────────────────
+
+    use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
+    use std::time::{Duration, Instant};
+
+    fn lock_path(dir: &Path) -> PathBuf {
+        dir.join(".llm-wiki").join("git.lock")
+    }
+
+    /// Put a lock file in the shape every tool writes, as another tool would.
+    fn write_lock(dir: &Path, tool: &str, started_at: DateTime<Utc>) {
+        let text = serde_json::json!({
+            "pid": 4242,
+            "started_at": started_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+            "tool": tool,
+        });
+        write(dir, ".llm-wiki/git.lock", &text.to_string());
+    }
+
+    /// Run `work` with the lock wait set to `wait_ms`, so a test does not wait 30 s.
+    fn with_lock_wait<T>(wait_ms: u64, work: impl FnOnce() -> T) -> T {
+        struct Reset;
+        impl Drop for Reset {
+            fn drop(&mut self) {
+                set_lock_options_for_tests(None);
+            }
+        }
+        set_lock_options_for_tests(Some(GitLockOptions {
+            wait: Duration::from_millis(wait_ms),
+            ..GitLockOptions::default()
+        }));
+        let _reset = Reset;
+        work()
+    }
+
+    /// A repo with one commit and a page edit that is waiting to be committed.
+    fn repo_with_a_page_to_commit() -> PathBuf {
+        let dir = repo_with_committed_wiki();
+        write(&dir, "wiki/a.md", "a edited");
+        dir
+    }
+
+    #[test]
+    fn lock_file_holds_pid_start_time_and_tool_until_it_is_dropped() {
+        let dir = temp_dir();
+        let before = Utc::now() - ChronoDuration::seconds(1);
+
+        let lock = acquire_git_lock(&path_str(&dir), &GitLockOptions::default()).unwrap();
+
+        let text = fs::read_to_string(lock_path(&dir)).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(json["pid"], serde_json::json!(std::process::id()));
+        assert_eq!(json["tool"], serde_json::json!("app"));
+        let started = DateTime::parse_from_rfc3339(json["started_at"].as_str().unwrap()).unwrap();
+        assert!(started.with_timezone(&Utc) >= before);
+        assert!(json["started_at"].as_str().unwrap().ends_with('Z'));
+        drop(lock);
+        assert!(!lock_path(&dir).exists());
+    }
+
+    #[test]
+    fn commit_waits_for_the_lock() {
+        let dir = repo_with_a_page_to_commit();
+        write_lock(&dir, "wiki-tool", Utc::now());
+        let lock = lock_path(&dir);
+        let holder = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            fs::remove_file(lock).unwrap();
+        });
+
+        let started = Instant::now();
+        let sha = git_commit_all_inner(&path_str(&dir), "ingest: a (1 pages)").unwrap();
+        let waited = started.elapsed();
+        holder.join().unwrap();
+
+        assert!(sha.is_some());
+        assert!(waited >= Duration::from_millis(400), "waited {waited:?}");
+        assert!(!lock_path(&dir).exists());
+    }
+
+    #[test]
+    fn stale_lock_is_replaced() {
+        let dir = repo_with_a_page_to_commit();
+        write_lock(&dir, "wiki-tool", Utc::now() - ChronoDuration::minutes(11));
+
+        let started = Instant::now();
+        let sha = git_commit_all_inner(&path_str(&dir), "ingest: a (1 pages)").unwrap();
+
+        assert!(sha.is_some());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!lock_path(&dir).exists());
+    }
+
+    #[test]
+    fn a_lock_younger_than_ten_minutes_is_not_stale() {
+        let dir = repo_with_a_page_to_commit();
+        write_lock(&dir, "wiki-tool", Utc::now() - ChronoDuration::minutes(9));
+
+        let result = with_lock_wait(300, || git_commit_all_inner(&path_str(&dir), "x"));
+
+        assert_eq!(result, Err("another wiki tool is using git".to_string()));
+        assert!(lock_path(&dir).exists());
+    }
+
+    #[test]
+    fn a_lock_with_unreadable_text_goes_stale_by_its_file_time() {
+        let dir = repo_with_a_page_to_commit();
+        write(&dir, ".llm-wiki/git.lock", "not json");
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(lock_path(&dir))
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() - Duration::from_secs(11 * 60))
+            .unwrap();
+        drop(file);
+
+        let sha = git_commit_all_inner(&path_str(&dir), "ingest: a (1 pages)").unwrap();
+        assert!(sha.is_some());
+
+        // A fresh unreadable lock is still a lock.
+        write(&dir, ".llm-wiki/git.lock", "not json");
+        write(&dir, "wiki/a.md", "a edited again");
+        let result = with_lock_wait(300, || git_commit_all_inner(&path_str(&dir), "x"));
+        assert_eq!(result, Err("another wiki tool is using git".to_string()));
+    }
+
+    #[test]
+    fn every_write_command_fails_with_the_busy_message_while_another_tool_holds_git() {
+        let busy = "another wiki tool is using git".to_string();
+
+        // git_init: a folder that is not a repository yet.
+        let fresh = temp_dir();
+        write(&fresh, "wiki/a.md", "# A");
+        write_lock(&fresh, "wiki-tool", Utc::now());
+        assert_eq!(
+            with_lock_wait(250, || git_init_inner(&path_str(&fresh))).unwrap_err(),
+            busy
+        );
+        assert!(!fresh.join(".git").exists());
+
+        let dir = repo_with_a_page_to_commit();
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+        write_lock(&dir, "wiki-undo", Utc::now());
+        let p = path_str(&dir);
+
+        assert_eq!(
+            with_lock_wait(250, || git_commit_all_inner(&p, "x")).unwrap_err(),
+            busy
+        );
+        assert_eq!(
+            with_lock_wait(250, || git_commit_paths_inner(
+                &p,
+                &strings(&["wiki/a.md"]),
+                "x"
+            ))
+            .unwrap_err(),
+            busy
+        );
+        assert_eq!(
+            with_lock_wait(250, || git_restore_paths_inner(
+                &p,
+                &strings(&["wiki/a.md"])
+            ))
+            .unwrap_err(),
+            busy
+        );
+
+        // Nothing ran: no commit, the edit is still on disk, and the other tool's lock stands.
+        assert_eq!(git(&dir, &["rev-parse", "HEAD"]), head);
+        assert_eq!(read(&dir, "wiki/a.md"), "a edited");
+        assert!(lock_path(&dir).exists());
+    }
+
+    #[test]
+    fn read_only_commands_do_not_need_the_lock() {
+        let dir = repo_with_committed_wiki();
+        write_lock(&dir, "wiki-tool", Utc::now());
+        let p = path_str(&dir);
+
+        assert!(with_lock_wait(250, || git_info_inner(&p)).is_repo);
+        assert!(git_head_inner(&p).unwrap().is_some());
+        assert!(lock_path(&dir).exists());
+    }
+
+    #[test]
+    fn the_lock_is_released_after_every_command_even_when_it_fails() {
+        let dir = repo_with_a_page_to_commit();
+        let p = path_str(&dir);
+
+        git_commit_all_inner(&p, "ingest: a (1 pages)").unwrap();
+        assert!(!lock_path(&dir).exists());
+
+        git_commit_paths_inner(&p, &strings(&["wiki/a.md"]), "x").unwrap();
+        assert!(!lock_path(&dir).exists());
+        assert!(git_commit_paths_inner(&p, &strings(&[".llm-wiki/x"]), "x").is_err());
+        assert!(!lock_path(&dir).exists());
+
+        git_restore_paths_inner(&p, &strings(&["wiki/a.md"])).unwrap();
+        assert!(!lock_path(&dir).exists());
+        assert!(git_restore_paths_inner(&p, &strings(&["raw/x.md"])).is_err());
+        assert!(!lock_path(&dir).exists());
+
+        let fresh = temp_dir();
+        write(&fresh, "wiki/a.md", "# A");
+        git_init_inner(&path_str(&fresh)).unwrap();
+        assert!(!lock_path(&fresh).exists());
+        assert!(git_init_inner(&path_str(&fresh)).is_err());
+        assert!(!lock_path(&fresh).exists());
+
+        let outside = temp_dir();
+        assert!(git_commit_all_inner(&path_str(&outside), "x").is_err());
+        assert!(!lock_path(&outside).exists());
+    }
+
+    #[test]
+    fn the_lock_is_held_while_git_runs() {
+        let dir = repo_with_a_page_to_commit();
+        // post-commit runs even with --no-verify. It copies the lock while the commit is made.
+        let hook = dir.join(".git/hooks/post-commit");
+        fs::create_dir_all(hook.parent().unwrap()).unwrap();
+        fs::write(
+            &hook,
+            "#!/bin/sh\ncp .llm-wiki/git.lock .git/lock-seen-by-commit\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        git_commit_all_inner(&path_str(&dir), "ingest: a (1 pages)").unwrap();
+
+        if cfg!(unix) {
+            let seen: serde_json::Value =
+                serde_json::from_str(&read(&dir, ".git/lock-seen-by-commit")).unwrap();
+            assert_eq!(seen["tool"], serde_json::json!("app"));
+            assert_eq!(seen["pid"], serde_json::json!(std::process::id()));
+        }
+    }
+
+    #[test]
+    fn dropping_a_lock_leaves_a_lock_another_tool_took_over() {
+        let dir = temp_dir();
+        let lock = acquire_git_lock(&path_str(&dir), &GitLockOptions::default()).unwrap();
+        write_lock(&dir, "wiki-undo", Utc::now());
+
+        drop(lock);
+
+        let json: serde_json::Value =
+            serde_json::from_str(&read(&dir, ".llm-wiki/git.lock")).unwrap();
+        assert_eq!(json["tool"], serde_json::json!("wiki-undo"));
+    }
+
+    #[test]
+    fn the_lock_works_for_a_project_nested_in_a_larger_repo() {
+        let root = temp_dir();
+        init_repo_with_identity(&root);
+        let project = root.join("p");
+        write(&project, ".gitignore", ".llm-wiki/\n");
+        write(&project, "wiki/a.md", "# A");
+
+        git_commit_all_inner(&path_str(&project), "chore: start").unwrap();
+
+        assert!(!lock_path(&project).exists());
+        assert!(!lock_path(&root).exists());
+        assert!(!git(&root, &["ls-files"]).contains("git.lock"));
+    }
+
+    // ── the untracking commit ────────────────────────────────────────────
+
+    /// A repo whose HEAD tracks `.llm-wiki/secret` (an old version committed it),
+    /// with a page edit waiting.
+    fn repo_that_tracks_llm_wiki() -> PathBuf {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        write(&dir, ".gitignore", ".llm-wiki/\n");
+        write(&dir, ".llm-wiki/secret", "v1");
+        write(&dir, "wiki/a.md", "# A");
+        git(&dir, &["add", "-f", "-A"]);
+        git(&dir, &["commit", "-m", "old commit that tracked .llm-wiki"]);
+        write(&dir, "wiki/a.md", "# A edited");
+        dir
+    }
+
+    #[test]
+    fn untracking_commit_refuses_during_a_merge() {
+        let dir = repo_that_tracks_llm_wiki();
+        let main = git(&dir, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .trim()
+            .to_string();
+        git(&dir, &["checkout", "-q", "-b", "side"]);
+        write(&dir, "wiki/b.md", "side");
+        git(&dir, &["add", "wiki/b.md"]);
+        git(&dir, &["commit", "-q", "-m", "side change"]);
+        git(&dir, &["checkout", "-q", &main]);
+        git(&dir, &["checkout", "--", "wiki/a.md"]);
+        write(&dir, "wiki/b.md", "main");
+        git(&dir, &["add", "wiki/b.md"]);
+        git(&dir, &["commit", "-q", "-m", "main change"]);
+        // A conflicting merge stops half way and leaves MERGE_HEAD.
+        let merge = Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["merge", "--no-edit", "side"])
+            .output()
+            .unwrap();
+        assert!(!merge.status.success());
+        assert!(dir.join(".git/MERGE_HEAD").exists());
+        let head = git(&dir, &["rev-parse", "HEAD"]);
+
+        let error = git_commit_all_inner(&path_str(&dir), "chore: save").unwrap_err();
+
+        assert!(
+            error.contains("Cannot stop tracking .llm-wiki while a merge is in progress"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(git(&dir, &["rev-parse", "HEAD"]), head);
+        assert!(
+            dir.join(".git/MERGE_HEAD").exists(),
+            "the merge must stay in progress"
+        );
+        assert!(git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).contains(".llm-wiki/secret"));
+        assert!(!lock_path(&dir).exists());
+    }
+
+    #[test]
+    fn untracking_commit_refuses_during_a_rebase_cherry_pick_or_revert() {
+        for (marker, is_folder, word) in [
+            ("MERGE_HEAD", false, "merge"),
+            ("REBASE_HEAD", false, "rebase"),
+            ("CHERRY_PICK_HEAD", false, "cherry-pick"),
+            ("REVERT_HEAD", false, "revert"),
+            ("rebase-merge", true, "rebase"),
+            ("rebase-apply", true, "rebase"),
+        ] {
+            let dir = repo_that_tracks_llm_wiki();
+            let head = git(&dir, &["rev-parse", "HEAD"]);
+            if is_folder {
+                fs::create_dir_all(dir.join(".git").join(marker)).unwrap();
+            } else {
+                fs::write(dir.join(".git").join(marker), &head).unwrap();
+            }
+
+            let paths_error =
+                git_commit_paths_inner(&path_str(&dir), &strings(&["wiki/a.md"]), "x").unwrap_err();
+            let all_error = git_commit_all_inner(&path_str(&dir), "x").unwrap_err();
+
+            let expected = format!("Cannot stop tracking .llm-wiki while a {word} is in progress");
+            for error in [paths_error, all_error] {
+                assert!(
+                    error.contains(&expected),
+                    "{marker}: unexpected error: {error}"
+                );
+            }
+            assert_eq!(git(&dir, &["rev-parse", "HEAD"]), head, "{marker}");
+            assert!(
+                git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).contains(".llm-wiki/secret")
+            );
+        }
+    }
+
+    #[test]
+    fn a_merge_in_progress_does_not_block_the_untracking_when_nothing_is_tracked() {
+        // The untracking only matters when `.llm-wiki` is tracked. With nothing to
+        // untrack it must not add its own refusal (git itself refuses a partial
+        // commit during a merge).
+        let dir = repo_with_committed_wiki();
+        fs::write(
+            dir.join(".git/MERGE_HEAD"),
+            git(&dir, &["rev-parse", "HEAD"]),
+        )
+        .unwrap();
+        write(&dir, "wiki/a.md", "a edited");
+
+        let error =
+            git_commit_paths_inner(&path_str(&dir), &strings(&["wiki/a.md"]), "x").unwrap_err();
+
+        assert!(
+            !error.contains("stop tracking"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn the_temporary_index_is_named_after_the_project_path() {
+        let root = temp_dir();
+        init_repo_with_identity(&root);
+        let one = root.join("one");
+        let two = root.join("two");
+        fs::create_dir_all(&one).unwrap();
+        fs::create_dir_all(&two).unwrap();
+
+        let name_one = untrack_index_name(&path_str(&one));
+        let name_two = untrack_index_name(&path_str(&two));
+
+        assert_ne!(name_one, name_two);
+        // The same project gives the same name, however its path is spelled.
+        assert_eq!(
+            name_one,
+            untrack_index_name(&format!("{}/", path_str(&one)))
+        );
+        assert_eq!(
+            name_one,
+            untrack_index_name(&path_str(&one.join("..").join("one")))
+        );
+        assert!(name_one.starts_with("llm-wiki-untrack-") && name_one.ends_with(".index"));
+        assert!(
+            !name_one.contains(&std::process::id().to_string()),
+            "the name must not depend on the process: {name_one}"
+        );
+    }
+
+    #[test]
+    fn two_projects_in_one_repo_untrack_without_sharing_an_index() {
+        let root = temp_dir();
+        init_repo_with_identity(&root);
+        for name in ["one", "two"] {
+            write(&root, &format!("{name}/.llm-wiki/secret"), "v1");
+            write(&root, &format!("{name}/wiki/a.md"), "# A");
+        }
+        git(&root, &["add", "-f", "-A"]);
+        git(
+            &root,
+            &["commit", "-q", "-m", "old commit that tracked .llm-wiki"],
+        );
+        // A temporary index left by a crashed run of the other project must not matter.
+        let leftover = root
+            .join(".git")
+            .join(untrack_index_name(&path_str(&root.join("two"))));
+        fs::write(&leftover, "garbage from a crash").unwrap();
+
+        git_commit_all_inner(&path_str(&root.join("one")), "chore: save").unwrap();
+
+        let tree = git(&root, &["ls-tree", "-r", "--name-only", "HEAD"]);
+        assert!(!tree.contains("one/.llm-wiki/"), "tree: {tree}");
+        assert!(tree.contains("two/.llm-wiki/secret"), "tree: {tree}");
+        // Each run removes its own temporary index and leaves the other project's alone.
+        assert!(
+            leftover.exists(),
+            "another project's temporary index must stay"
+        );
+        assert!(!root
+            .join(".git")
+            .join(untrack_index_name(&path_str(&root.join("one"))))
+            .exists());
     }
 }

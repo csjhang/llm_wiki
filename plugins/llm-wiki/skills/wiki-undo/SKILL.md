@@ -53,6 +53,7 @@ Read the JSON on stdout for exit code 0 and for exit code 2.
   - If no newer action changed these files: Say that nothing changed. Stop.
 - `"reason": "dirty"`: Tell the user that the project folder has changes that are not saved in git. The user must save or discard these changes. Do not discard them yourself. After the user confirms, run the revert command again.
 - `"reason": "not-action"`: Tell the user that the commit is not an action that can be undone. Say that nothing changed.
+- `"reason": "busy"`: Tell the user that another wiki tool (the app or a skill) is using git in this project. Say that nothing changed. Ask the user to wait until it is done. Then run the revert command again.
 - `"reason": "not-a-wiki-project"`: Tell the user that the path is not a project folder. Ask for the folder that contains `wiki/` and `raw/`. Then run the steps again.
 - `"reason": "protected"`: Tell the user that this action changed `.llm-wiki/` or `.gitignore`. Undoing it could put secrets back in git, so the script refuses it. Say that nothing changed.
 - `"reason": "error"`: This result has exit code 1. Show the `message` to the user. Stop. If the message says "not a git repository", tell the user that version history is off for this wiki.

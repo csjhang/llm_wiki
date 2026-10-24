@@ -14,9 +14,13 @@
 //
 // --project is the project folder: the folder that contains wiki/ and raw/.
 // Both commands refuse a folder that has no wiki/ folder.
+//
+// A revert holds the project's git lock, `.llm-wiki/git.lock`, from the dirty
+// check to the undo commit. The app and wiki-tool use the same lock. If another
+// tool keeps it for 30 s, the revert stops with `"reason": "busy"`.
 
 import { spawnSync } from "node:child_process"
-import { mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs"
+import { closeSync, mkdirSync, openSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync, writeSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
@@ -38,6 +42,132 @@ const FALLBACK_EMAIL = "llm-wiki@localhost"
 
 const FIELD_SEPARATOR = "\x1f"
 const RECORD_SEPARATOR = "\x1e"
+
+// ---------------------------------------------------------------------------
+// Git lock
+//
+// The same lock as tools/wiki-tool/src/git-lock.ts and src-tauri/src/commands/git_history.rs:
+// the file `<project>/.llm-wiki/git.lock`, created exclusively, holding
+// `{ "pid", "started_at", "tool" }`. Wait up to 30 s, polling every 200 ms. A
+// lock older than 10 minutes is left over and is replaced. This script has no
+// dependency and runs without a build step, so it carries its own small copy
+// instead of importing the wiki-tool one. The copy is synchronous because
+// revertAction is. Change the three copies together.
+
+export const GIT_LOCK_BUSY_MESSAGE = "another wiki tool is using git"
+const LOCK_FOLDER = ".llm-wiki"
+const LOCK_FILE = "git.lock"
+const LOCK_TOOL = "wiki-undo"
+const LOCK_WAIT_MS = 30_000
+const LOCK_STALE_MS = 10 * 60_000
+const LOCK_POLL_MS = 200
+
+function readLockText(path) {
+  try {
+    return readFileSync(path, "utf8")
+  } catch {
+    return null
+  }
+}
+
+/** Block this thread for `ms` without spinning. */
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+/**
+ * How long ago the holder took the lock: by its `started_at`, or by the time of
+ * the file when the text has no start time that parses (a lock that is being
+ * written has no text yet). Null when the file is gone.
+ */
+function lockAgeMs(path, text) {
+  try {
+    const startedAt = JSON.parse(text)?.started_at
+    const time = typeof startedAt === "string" ? Date.parse(startedAt) : Number.NaN
+    // A start time in the future (clock skew) counts as just started.
+    if (Number.isFinite(time)) return Math.max(0, Date.now() - time)
+  } catch {
+    // Not JSON: fall back to the file time.
+  }
+  try {
+    return Math.max(0, Date.now() - statSync(path).mtimeMs)
+  } catch {
+    return null
+  }
+}
+
+/** Remove the lock when it is stale. Returns true when the caller should try to take it again right away. */
+function clearStaleLock(path, staleMs) {
+  const text = readLockText(path)
+  if (text === null) return true
+  const age = lockAgeMs(path, text)
+  if (age === null) return true
+  if (age <= staleMs) return false
+  // Look again right before removing: another tool may have replaced the stale
+  // lock with its own since the read above.
+  if (readLockText(path) !== text) return true
+  try {
+    unlinkSync(path)
+    return true
+  } catch (error) {
+    return error?.code === "ENOENT"
+  }
+}
+
+/** Create the lock file. Returns what was written, or null when another tool holds the lock. */
+function tryCreateLock(path) {
+  let fd
+  try {
+    fd = openSync(path, "wx")
+  } catch (error) {
+    // On Windows a lock that is being deleted reports EPERM instead of EEXIST.
+    if (error?.code === "EEXIST" || (error?.code === "EPERM" && readLockText(path) !== null)) return null
+    throw error
+  }
+  const text = JSON.stringify({ pid: process.pid, started_at: new Date().toISOString(), tool: LOCK_TOOL })
+  try {
+    writeSync(fd, text)
+  } catch (error) {
+    closeSync(fd)
+    try {
+      unlinkSync(path)
+    } catch {
+      // Nothing more to do.
+    }
+    throw error
+  }
+  closeSync(fd)
+  return text
+}
+
+/**
+ * Take the git lock of the project, waiting for another tool to let go.
+ * Returns a function that releases it, or null when the lock stayed taken for the
+ * whole wait. The release removes the file only while it is still the one this
+ * call wrote.
+ */
+function takeGitLock(project, { waitMs = LOCK_WAIT_MS, staleMs = LOCK_STALE_MS } = {}) {
+  mkdirSync(join(project, LOCK_FOLDER), { recursive: true })
+  const path = join(project, LOCK_FOLDER, LOCK_FILE)
+  const deadline = Date.now() + waitMs
+  for (;;) {
+    const text = tryCreateLock(path)
+    if (text !== null) {
+      return () => {
+        if (readLockText(path) !== text) return
+        try {
+          unlinkSync(path)
+        } catch {
+          // Already gone.
+        }
+      }
+    }
+    if (clearStaleLock(path, staleMs)) continue
+    const remaining = deadline - Date.now()
+    if (remaining <= 0) return null
+    sleepSync(Math.min(LOCK_POLL_MS, remaining))
+  }
+}
 
 function gitEnv() {
   // Never open an editor. Keep git messages stable.
@@ -272,10 +402,12 @@ function identityArgs(project) {
  * @param {string} projectPath The project folder: the folder that contains `wiki/` and `raw/`.
  * @param {string} sha The commit to undo.
  * @param {string} [today] Date for the log line, `YYYY-MM-DD`. Defaults to the local date.
- * @returns {{ ok: true, sha: string, reverted: string } | { ok: false, reason: "conflict", files: string[] } | { ok: false, reason: "not-action" | "dirty" | "not-a-wiki-project" | "protected" }}
+ * @param {{ lockWaitMs?: number, lockStaleMs?: number }} [options] How long to wait for the git lock (default 30 s)
+ *   and how old a lock must be to count as left over (default 10 minutes).
+ * @returns {{ ok: true, sha: string, reverted: string } | { ok: false, reason: "conflict", files: string[] } | { ok: false, reason: "busy", message: string } | { ok: false, reason: "not-action" | "dirty" | "not-a-wiki-project" | "protected" }}
  *   On success `sha` is the full sha of the new undo commit. `reverted` is the full sha of the commit that was undone.
  */
-export function revertAction(projectPath, sha, today = localDate()) {
+export function revertAction(projectPath, sha, today = localDate(), options = {}) {
   const project = resolve(projectPath)
   if (!isWikiProject(project)) return { ok: false, reason: "not-a-wiki-project" }
   const prefix = projectPrefix(project)
@@ -295,6 +427,19 @@ export function revertAction(projectPath, sha, today = localDate()) {
   if (!hasActionPrefix(subject) || parents.length > 1) return { ok: false, reason: "not-action" }
   if (touchesProtectedPath(project, fullSha)) return { ok: false, reason: "protected" }
 
+  // From here the script changes the repository. Another tool must not commit or
+  // stage between the dirty check and the undo commit, so the lock starts before the check.
+  const release = takeGitLock(project, { waitMs: options.lockWaitMs, staleMs: options.lockStaleMs })
+  if (release === null) return { ok: false, reason: "busy", message: GIT_LOCK_BUSY_MESSAGE }
+  try {
+    return revertLocked(project, prefix, fullSha, subject, today)
+  } finally {
+    release()
+  }
+}
+
+/** The part of revertAction that runs under the git lock. */
+function revertLocked(project, prefix, fullSha, subject, today) {
   if (isDirty(project, prefix)) return { ok: false, reason: "dirty" }
 
   const revert = runGit(project, ["revert", "--no-commit", fullSha])
