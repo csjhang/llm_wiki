@@ -1,0 +1,112 @@
+/**
+ * wiki-sync-skill.test.ts - the wiki-sync skill and the wiki-tool commands it runs must agree.
+ *
+ * The skill is text for an agent. These tests keep it in step with the tool: every action the plan can give has a
+ * section, every record event the skill names is one the tool takes, and the rules that must be said once are said once.
+ */
+import { mkdtempSync, readFileSync, rmSync } from "node:fs"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+import { fileURLToPath } from "node:url"
+import { afterAll, describe, expect, it } from "vitest"
+import { runCli } from "../../../tools/wiki-tool/src/cli"
+import { findLongSentences } from "@/test-helpers/ste-check"
+
+const SKILL_DIR = fileURLToPath(new URL("../../../plugins/llm-wiki/skills/wiki-sync/", import.meta.url))
+const skill = readFileSync(join(SKILL_DIR, "SKILL.md"), "utf8")
+const steps = readFileSync(join(SKILL_DIR, "reference/mcp-steps.md"), "utf8")
+
+const scratch = mkdtempSync(join(tmpdir(), "wiki-sync-skill-"))
+afterAll(() => rmSync(scratch, { recursive: true, force: true }))
+
+describe("wiki-sync skill", () => {
+  it("has a section for every action of plan-down and plan-up", () => {
+    for (const op of ["create", "setup", "update", "relink", "retire", "skip-edited", "place", "snapshot", "ask", "download-pdf"]) {
+      const named = op === "update" || op === "relink" ? "update and relink" : op
+      expect(skill, op).toMatch(new RegExp(`^### ${named}$`, "m"))
+    }
+  })
+
+  it("names only record events that the tool takes", async () => {
+    const types = [...new Set([...skill.matchAll(/"type":"([a-z-]+)"/g)].map((match) => match[1]))]
+    expect(types.sort()).toEqual(["created", "feedback", "placed", "relinked", "retired", "setup-done", "up-decision", "updated"])
+    for (const type of types) {
+      const result = await runCli(["hepta", "record", "--project", scratch, "--event", JSON.stringify({ type })])
+      expect(JSON.stringify(result.output), type).not.toContain("unknown event type")
+    }
+  })
+
+  it("creates a card as record created with setup false, then setup, then record setup-done", () => {
+    const create = skill.slice(skill.indexOf("### create"), skill.indexOf("### setup"))
+    const order = ["create_object", "record", "update_database_card_membership", "edit_card_properties", "list_cards", "setup-done"]
+    let at = -1
+    for (const word of order) {
+      const next = create.indexOf(word, at + 1)
+      expect(next, word).toBeGreaterThan(at)
+      at = next
+    }
+    expect(create).toContain('"setup": false')
+    expect(create).toContain("lowercase UUID")
+    expect(create).toContain("heptabase-map.json")
+    expect(create).toContain("must equal the `title` of the action")
+    expect(skill).toContain('"setup":false')
+  })
+
+  it("states the rule for a failed call once, and points to it", () => {
+    expect(skill.match(/"runOn": \{"type": "server"\}/g)).toHaveLength(1)
+    expect(steps).not.toContain("runOn")
+    expect(skill).toMatch(/^## When a call fails$/m)
+    const rule = skill.slice(skill.indexOf("## When a call fails"), skill.indexOf("## Before you start"))
+    expect(rule).toContain("Never call `create_object` again, and never call `place_whiteboard_objects` again")
+    expect(rule).toContain("A card that failed in this run is not tried again in this run.")
+    expect(skill.match(/When a call fails/g)?.length).toBeGreaterThan(3)
+    expect(steps).toContain("When a call fails")
+  })
+
+  it("checks the card right before it writes", () => {
+    expect(skill).toMatch(/^### Check the card before a write$/m)
+    for (const section of ["update and relink", "retire", "place"]) {
+      const body = skill.slice(skill.indexOf(`### ${section}`)).split(/\n### |\n## /)[0]
+      expect(body, section).toContain("Check the card before a write")
+    }
+  })
+
+  it("sends the body file and gives the feedback command its --content files", () => {
+    expect(skill).toContain("bodyFile")
+    expect(skill).not.toMatch(/node -e/)
+    const feedback = skill.slice(skill.indexOf("### skip-edited"), skill.indexOf("### place"))
+    expect(feedback).toContain("--content")
+    expect(feedback).not.toContain('"content"')
+    expect(feedback).toContain("`note`")
+  })
+
+  it("lists whiteboards with depth 10, and rescans after the snapshots", () => {
+    expect(steps).toMatch(/"offset": 0, "depth": 10/)
+    expect(skill).toContain("`depth` 10")
+    expect(skill).toContain("llm_wiki_rescan_sources")
+    expect(steps).toMatch(/^## llm_wiki_rescan_sources$/m)
+    expect(skill).toContain("source watch")
+  })
+
+  it("checks the whiteboard before every place", () => {
+    const place = skill.slice(skill.indexOf("### place"), skill.indexOf("## Rules"))
+    expect(place.indexOf("read_whiteboard")).toBeGreaterThan(-1)
+    expect(place.indexOf("read_whiteboard")).toBeLessThan(place.indexOf("place_whiteboard_objects"))
+  })
+
+  it("asks the two-wikis and no-root questions with the answers this-wiki and skip", () => {
+    const ask = skill.slice(skill.indexOf("### ask"), skill.indexOf("### snapshot"))
+    for (const word of ["two-wikis", "no-root", "this-wiki", "skip"]) expect(ask, word).toContain(word)
+    expect(skill).not.toContain("two-roots")
+  })
+
+  it("says to never discard or revert the card map", () => {
+    expect(skill).toMatch(/Never discard, revert, or reset `heptabase-map.json`/)
+    expect(skill).toMatch(/maps wiki pages to Heptabase cards/)
+  })
+
+  it("keeps sentences short", () => {
+    expect(findLongSentences("SKILL.md", skill)).toEqual([])
+    expect(findLongSentences("mcp-steps.md", steps)).toEqual([])
+  })
+})
