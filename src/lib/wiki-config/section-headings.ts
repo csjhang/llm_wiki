@@ -53,26 +53,51 @@ function normalizeHeading(text: string): string {
   return text.trim().replace(/[:：]$/, "").trim()
 }
 
+function isLevelTwo(line: string): boolean {
+  return /^##(?:[ \t]|$)/.test(line)
+}
+
+/**
+ * True when `line` is the level-2 heading of `section`. The heading text must
+ * equal the English, Traditional Chinese, or Simplified Chinese variant after
+ * `normalizeHeading`. The English variant ignores letter case ("## Why It
+ * Works" is `why`). The two Chinese variants must match exactly.
+ */
+function isHeadingOf(line: string, section: SectionHeading): boolean {
+  if (!isLevelTwo(line)) return false
+  const text = normalizeHeading(line.slice(2))
+  return text.toLowerCase() === section.en.toLowerCase() || text === section.zhHant || text === section.zhHans
+}
+
 /**
  * Body of the level-2 section of `section` in `markdown`, or null when absent.
  *
- * A heading matches when its text equals the English, Traditional Chinese, or
- * Simplified Chinese variant after `normalizeHeading`. The English variant
- * ignores letter case ("## Why It Works" finds `why`). The two Chinese
- * variants must match exactly. The body runs to the next level-2 heading, or
- * to the end of the text, and is trimmed.
+ * A heading matches as `isHeadingOf` says. The body runs to the next level-2
+ * heading, or to the end of the text, and is trimmed.
  */
 export function findSection(markdown: string, section: SectionHeading): string | null {
-  const english = section.en.toLowerCase()
-  const matches = (heading: string): boolean => {
-    const text = normalizeHeading(heading)
-    return text.toLowerCase() === english || text === section.zhHant || text === section.zhHans
-  }
   const lines = markdown.split(/\r?\n/)
-  const isLevelTwo = (line: string): boolean => /^##(?:[ \t]|$)/.test(line)
-  const start = lines.findIndex((line) => isLevelTwo(line) && matches(line.slice(2)))
+  const start = lines.findIndex((line) => isHeadingOf(line, section))
   if (start === -1) return null
   const rest = lines.slice(start + 1)
   const end = rest.findIndex(isLevelTwo)
   return (end === -1 ? rest : rest.slice(0, end)).join("\n").trim()
+}
+
+/**
+ * `markdown` without every level-2 section of `section`: the heading line and the
+ * body up to the next level-2 heading (or the end). Matching is the one of
+ * `findSection`, so all three language variants go. Text without such a section
+ * comes back as it is. Otherwise the result has `\n` line breaks.
+ */
+export function removeSection(markdown: string, section: SectionHeading): string {
+  const lines = markdown.split(/\r?\n/)
+  if (!lines.some((line) => isHeadingOf(line, section))) return markdown
+  const kept: string[] = []
+  let removing = false
+  for (const line of lines) {
+    if (isLevelTwo(line)) removing = isHeadingOf(line, section)
+    if (!removing) kept.push(line)
+  }
+  return kept.join("\n")
 }

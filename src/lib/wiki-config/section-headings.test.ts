@@ -4,6 +4,7 @@ import {
   MECHANISM_SECTIONS,
   findSection,
   headingFor,
+  removeSection,
 } from "./section-headings"
 
 const PARTS = MECHANISM_SECTIONS[0]
@@ -106,5 +107,38 @@ describe("section headings", () => {
     expect(findSection("## 为什么有效\nText.\n", WHY)).toBe("Text.")
     expect(findSection("## 為什麼有效\nText.\n", PARTS)).toBeNull()
     expect(findSection("## 為什么有效\nText.\n", WHY)).toBeNull()
+  })
+  describe("removeSection", () => {
+    const INSTANCES = MECHANISM_SECTIONS[5]
+
+    it("removes the heading and the body, and keeps the other sections", () => {
+      const page = "# T\n\n## Why it works\nBecause.\n\n## Known instances\n\n- [[a]]\n- [[b]]\n\n## Parts\nP.\n"
+      expect(removeSection(page, INSTANCES)).toBe("# T\n\n## Why it works\nBecause.\n\n## Parts\nP.\n")
+    })
+
+    it("removes the section at the end of the text", () => {
+      expect(removeSection("# T\n\nIntro.\n\n## Known instances\n- [[a]]", INSTANCES)).toBe("# T\n\nIntro.\n")
+    })
+
+    it("matches every heading variant, any letter case, and a trailing colon", () => {
+      for (const heading of ["Known instances", "known INSTANCES:", "已知實例", "已知实例", "已知實例："]) {
+        expect(removeSection(`Intro.\n\n## ${heading}\n- [[a]]\n`, INSTANCES)).toBe("Intro.\n")
+      }
+    })
+
+    it("removes every section of that heading", () => {
+      const page = "A.\n## Known instances\n- x\n## Parts\nP.\n## 已知實例\n- y\n"
+      expect(removeSection(page, INSTANCES)).toBe("A.\n## Parts\nP.")
+    })
+
+    it("keeps a level-3 heading inside the section it removes, and a level-3 heading of another name", () => {
+      expect(removeSection("## Known instances\n### Sub\n- x\n## Parts\nP.\n", INSTANCES)).toBe("## Parts\nP.\n")
+      expect(removeSection("### Known instances\n- x\n", INSTANCES)).toBe("### Known instances\n- x\n")
+    })
+
+    it("returns the text as it is when the section is missing", () => {
+      const page = "# T\r\n\r\n## Parts\r\nP.\r\n"
+      expect(removeSection(page, INSTANCES)).toBe(page)
+    })
   })
 })

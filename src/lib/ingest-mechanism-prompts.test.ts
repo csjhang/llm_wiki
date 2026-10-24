@@ -24,11 +24,18 @@ vi.mock("@/commands/fs", () => realFs)
  */
 const DEFAULT_ANALYSIS = "## Analysis\nA short analysis."
 const DEFAULT_DIGEST = "A digest."
-const llm = vi.hoisted(() => ({ analysis: "", digest: "", generation: "", repair: "" }))
+const llm = vi.hoisted(() => ({ analysis: "", digest: "", generation: "", repair: "", chat: "" }))
 
 vi.mock("./llm-client", () => ({
   streamChat: vi.fn(async (_cfg, messages, cb) => {
     const systemPrompt = String(messages?.[0]?.content ?? "")
+
+    // The write step of the chat ingest.
+    if (systemPrompt.startsWith("You are a wiki generation assistant")) {
+      cb.onToken(llm.chat)
+      cb.onDone({ finishReason: "stop", truncated: false })
+      return
+    }
 
     if (systemPrompt.startsWith("You are analyzing a long source document")) {
       cb.onToken(`## Chunk Analysis\nA chunk.\n\n## Updated Global Digest\n${llm.digest}`)
@@ -74,6 +81,7 @@ import {
   buildChunkAnalysisSystemPrompt,
   buildGenerationPrompt,
   computeIngestSourceBudget,
+  executeIngestWrites,
   updateBoundedRecentIndexSection,
 } from "./ingest"
 import { streamChat } from "./llm-client"
@@ -134,6 +142,7 @@ describe("ingest prompts and the mechanism context", () => {
     llm.digest = DEFAULT_DIGEST
     llm.generation = ""
     llm.repair = ""
+    llm.chat = ""
     tmp = await createTempProject("mechanism-prompts")
     useReviewStore.setState({ items: [] })
     useActivityStore.setState({ items: [] })
@@ -774,6 +783,59 @@ describe("ingest prompts and the mechanism context", () => {
     await expect(fs.access(`${project}/wiki/concepts/backpressure.md`)).rejects.toThrow()
     await expect(fs.access(`${project}/wiki/mechanisms/backpressure.md`)).rejects.toThrow()
     expect(reviewSummary()).toEqual([["new-mechanism", "Backpressure"]])
+  })
+
+  // --- the chat ingest ("Save to Wiki") ------------------------------------
+
+  /** Run the write step of the chat ingest for the source of the project. */
+  async function chatIngest(project: string): Promise<string[]> {
+    useChatStore.getState().createConversation()
+    useChatStore.setState({ ingestSource: `${project}/${SOURCE_PATH}` })
+    return executeIngestWrites(project, { ...useWikiStore.getState().llmConfig })
+  }
+
+  it("chat ingest in a work wiki sends mechanism pages to review", async () => {
+    llm.chat = [CONCEPT_WITHOUT_DOMAIN, MECHANISM_PAGE, NEW_MECHANISM_REVIEW].join("\n\n")
+    const project = await mechanismProject(SOURCE_TEXT, WORK_YAML)
+    await chatIngest(project)
+
+    // The mechanism page is not written, in any folder; the concept page is.
+    await expect(fs.access(`${project}/wiki/mechanisms/backpressure.md`)).rejects.toThrow()
+    expect(await fs.readFile(`${project}/wiki/concepts/attention.md`, "utf8")).toContain("Attention weighs the parts of an input.")
+    expect(reviewSummary().sort()).toEqual([
+      ["new-mechanism", "Backpressure"],
+      ["new-mechanism", "Flow control"],
+    ])
+    for (const review of useReviewStore.getState().items) {
+      expect(review.options.map((option) => option.action)).toEqual(["mech:propose-mechanism", "Skip"])
+    }
+  })
+
+  it("chat ingest in a work wiki sends a type: mechanism page outside wiki/mechanisms/ to review", async () => {
+    llm.chat = MECHANISM_PAGE.replace("wiki/mechanisms/backpressure.md", "wiki/concepts/backpressure.md")
+    const project = await mechanismProject(SOURCE_TEXT, WORK_YAML)
+    await chatIngest(project)
+
+    await expect(fs.access(`${project}/wiki/concepts/backpressure.md`)).rejects.toThrow()
+    expect(reviewSummary()).toEqual([["new-mechanism", "Backpressure"]])
+  })
+
+  it("chat ingest in a reading wiki still writes its mechanism pages", async () => {
+    llm.chat = [CONCEPT_WITHOUT_DOMAIN, MECHANISM_PAGE].join("\n\n")
+    const project = await mechanismProject()
+    await chatIngest(project)
+
+    expect(await fs.readFile(`${project}/wiki/mechanisms/backpressure.md`, "utf8")).toContain("A slow consumer slows the producer.")
+    expect(reviewSummary()).toEqual([])
+  })
+
+  it("chat ingest in a plain wiki writes the FILE blocks unchanged", async () => {
+    llm.chat = [CONCEPT_WITHOUT_DOMAIN, MECHANISM_PAGE, NEW_MECHANISM_REVIEW].join("\n\n")
+    const project = await plainProject()
+    await chatIngest(project)
+
+    expect(await fs.readFile(`${project}/wiki/mechanisms/backpressure.md`, "utf8")).toMatch(/^domain: ai\/architecture$/m)
+    expect(reviewSummary()).toEqual([])
   })
 
   it("writes the FILE blocks of a plain wiki unchanged", async () => {

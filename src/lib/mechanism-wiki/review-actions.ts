@@ -20,6 +20,7 @@ import { normalizePath } from "@/lib/path-utils"
 import { withProjectLock } from "@/lib/project-mutex"
 import { indexResearchPage } from "@/lib/research-index"
 import { DOMAIN_NAME_PATTERN, KNOWN_LENSES, parseDomainsYaml } from "@/lib/wiki-config/domains"
+import { MECHANISM_SECTIONS, removeSection } from "@/lib/wiki-config/section-headings"
 import { hasOwn } from "@/lib/wiki-config/yaml-util"
 import type { ReviewItem } from "@/stores/review-store"
 import { listMarkdownFiles, loadMechanismContext } from "./context"
@@ -255,8 +256,10 @@ async function proposeMechanism(item: ReviewItem, ctx: ReviewActionContext): Pro
 
   const incomplete = INCOMPLETE_PREFIX.test(item.title)
   const title = item.title.replace(INCOMPLETE_PREFIX, "").replace(/\s+/g, " ").trim()
-  const body = proposalBody(item.description, item.sourcePath)
-  if (body === "") throw new Error("The review item has no proposal text to send.")
+  const text = proposalBody(item.description, item.sourcePath)
+  if (text === "") throw new Error("The review item has no proposal text to send.")
+  // The pages of the work wiki that apply the mechanism stay there. The reading wiki learns only that one exists.
+  const body = `${text}\n\nInstances: 1 in work wiki ${mechanism.identity.id.replace(/\s+/g, " ").trim()}.`
 
   const frontmatter = [
     "---",
@@ -294,13 +297,32 @@ async function proposeMechanism(item: ReviewItem, ctx: ReviewActionContext): Pro
 const FRONTMATTER_LINE = /^(?:[A-Za-z_][\w-]*[ \t]*:.*|[ \t]*-(?:[ \t].*)?|[ \t]+\S.*)$/
 const HEADING_LINE = /^#{1,6}(?:[ \t]|$)/
 
+/** The Known instances section: every heading variant of `MECHANISM_SECTIONS` with the key `instances`. */
+const INSTANCES_SECTIONS = MECHANISM_SECTIONS.filter((section) => section.key === "instances")
+
+/** A wikilink or an embed: `[[target]]`, `[[target|label]]`, `![[target#heading]]`. */
+const WIKILINK = /!?\[\[([^\]\r\n]*)\]\]/g
+
 /**
- * The proposed page without its frontmatter and without any line that names a source file.
+ * The text that a wikilink shows: its label, else its target without folder, heading, and block id.
+ * Links of the work wiki name its pages, so no link is kept; a plain word stays where the link was.
+ */
+function linkLabel(inner: string): string {
+  const bar = inner.indexOf("|")
+  if (bar !== -1) return inner.slice(bar + 1).trim()
+  const target = inner.split(/[#^]/)[0].trim()
+  return (target.slice(target.lastIndexOf("/") + 1) || target).replace(/\.md$/i, "")
+}
+
+/**
+ * The proposed page without its frontmatter and without anything that names the work wiki.
  * The frontmatter of the work wiki lists its raw sources, and the reading wiki must not learn them.
  * - A closed frontmatter is cut off as a block.
  * - A page that stopped inside its frontmatter has an opening fence and no closing one: the fence and
  *   the run of frontmatter lines after it go, up to the first blank line or heading.
  * - In every case a line that holds `raw/sources/` or the path of the item's own source goes too.
+ * - The Known instances section goes in every language variant: it lists pages of the work wiki.
+ * - Every `[[wikilink]]` becomes its label as plain text, so no page name of the work wiki is linked.
  */
 function proposalBody(content: string, sourcePath: string | undefined): string {
   const parsed = parseFrontmatter(content)
@@ -324,12 +346,16 @@ function proposalBody(content: string, sourcePath: string | undefined): string {
     }
   }
   const own = normalizePath(sourcePath ?? "").trim().toLowerCase()
-  return lines
+  let text = lines.join("\n")
+  for (const section of INSTANCES_SECTIONS) text = removeSection(text, section)
+  return text
+    .split("\n")
     .filter((line) => {
       const path = normalizePath(line).toLowerCase()
       return !path.includes("raw/sources/") && (own === "" || !path.includes(own))
     })
     .join("\n")
+    .replace(WIKILINK, (_link, inner: string) => linkLabel(inner))
     .trim()
 }
 

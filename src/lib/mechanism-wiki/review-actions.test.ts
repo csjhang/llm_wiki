@@ -463,9 +463,7 @@ describe("mech:propose-mechanism", () => {
         "",
         "One line that states it.",
         "",
-        "## Known instances",
-        "",
-        "- [[async-handshake]] (hardware/async-circuits): request/ack",
+        "Instances: 1 in work wiki work.",
         "",
       ].join("\n"),
     )
@@ -476,6 +474,60 @@ describe("mech:propose-mechanism", () => {
     expect(await fileExists(`${work}/raw`)).toBe(false)
     expect(await fileExists(`${work}/wiki`)).toBe(false)
     expect(resolveItem).toHaveBeenCalledWith("review-abc", "Sent to reading wiki")
+  })
+
+  it("propose-mechanism drops work instances and wikilinks", async () => {
+    await setUpReading()
+    await setUpWork()
+    const { ctx } = makeCtx(work)
+    const page = [
+      "---",
+      "type: mechanism",
+      "title: Event-driven computation",
+      "lenses: [hardware, ai]",
+      "instances: [async-handshake, spiking-network]",
+      "---",
+      "# Event-driven computation",
+      "",
+      "A part works only when an event reaches it, as in [[async-handshake]] and [[wiki/concepts/spiking-network|spiking networks]].",
+      "",
+      "## Why it works",
+      "",
+      "Most of the time nothing changes. See [[sources/some-page#Part 2]] and ![[wiring-diagram]].",
+      "",
+      "## 已知實例",
+      "",
+      "- [[async-handshake]] (hardware/async-circuits): request/ack",
+      "- [[spiking-network]] (ai/architecture): spike",
+      "",
+      "## Failure conditions",
+      "",
+      "Events that arrive too densely.",
+      "",
+      "## Known instances:",
+      "",
+      "- [[another-instance]] (business/franchising): outlet",
+    ].join("\n")
+
+    await handleMechanismReviewAction(mechanismReview({ description: page }), "mech:propose-mechanism", ctx)
+
+    const written = await readFileRaw(`${reading}/raw/sources/proposals/event-driven-computation.md`)
+    // No instance section of any heading variant, no instance page name, no link.
+    expect(written.replace("Instances: 1 in work wiki work.", "")).not.toMatch(/instances/i)
+    expect(written).not.toContain("已知實例")
+    expect(written).not.toContain("[[")
+    expect(written).not.toContain("]]")
+    expect(written).not.toContain("hardware/async-circuits")
+    expect(written).not.toContain("another-instance")
+    expect(written).not.toContain("spiking-network")
+    expect(written).not.toContain("request/ack")
+    // The text stays, each link as its label.
+    expect(written).toContain("as in async-handshake and spiking networks.")
+    expect(written).toContain("See some-page and wiring-diagram.")
+    expect(written).toContain("## Why it works")
+    expect(written).toContain("## Failure conditions\n\nEvents that arrive too densely.")
+    // One neutral line says where the instance lives.
+    expect(written.endsWith("Events that arrive too densely.\n\nInstances: 1 in work wiki work.\n")).toBe(true)
   })
 
   it("propose-mechanism names an incomplete proposal and marks it", async () => {

@@ -44,13 +44,14 @@ import {
 } from "@/lib/image-caption-pipeline"
 import type { MultimodalConfig } from "@/stores/wiki-store"
 import { BASE_GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
-import { loadMechanismContext } from "@/lib/mechanism-wiki/context"
+import { canWriteMechanismPages, loadMechanismContext } from "@/lib/mechanism-wiki/context"
 import { checkDuplicateSource, noteOtherEntryPoint, recordFingerprint } from "@/lib/mechanism-wiki/source-fingerprint"
 import { parseAnalysisDecisions } from "@/lib/mechanism-wiki/decisions"
 import { buildScopedIndexText, listMechanismSlugs, rebuildDomainIndex, scanWikiPages } from "@/lib/mechanism-wiki/domain-index"
 import { isDomainIndexPath } from "@/lib/mechanism-wiki/domain-index-render"
 import { enforceMechanismRules, proposedDomainReview } from "@/lib/mechanism-wiki/enforce"
 import { appendPromptSection, prepareMechanismPrompts } from "@/lib/mechanism-wiki/prompts"
+import { emptyDecisions } from "@/lib/mechanism-wiki/types"
 import type { AnalysisDecisions } from "@/lib/mechanism-wiki/types"
 import { computeContextBudget } from "@/lib/context-budget"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
@@ -4013,6 +4014,23 @@ async function executeIngestWritesImpl(
     signal,
   )
 
+  // A work wiki keeps no mechanism pages: they live in the reading wiki. The chat ingest does not run
+  // the mechanism pipeline (parked decision P25), but it must not write a mechanism page there either.
+  // Each such page becomes a review item, as in `autoIngest`. Nothing else changes in the text.
+  const mechanismCtx = await loadMechanismContext(pp)
+  const mechanismReviews: Omit<ReviewItem, "id" | "resolved" | "createdAt">[] = []
+  if (mechanismCtx && !canWriteMechanismPages(mechanismCtx)) {
+    const enforced = enforceMechanismRules(
+      accumulated,
+      mechanismCtx,
+      emptyDecisions(null),
+      ingestSource ? normalizePath(ingestSource) : "",
+    )
+    accumulated = enforced.text
+    mechanismReviews.push(...enforced.reviews)
+    for (const note of enforced.notes) console.log(`[executeIngestWrites:mechanism] ${note}`)
+  }
+
   const writtenPaths: string[] = []
   const summaryWarnings: string[] = []
   let summaryWritten = false
@@ -4062,6 +4080,8 @@ async function executeIngestWritesImpl(
       console.error(`Failed to write ${fullPath}:`, err)
     }
   }
+
+  if (mechanismReviews.length > 0) useReviewStore.getState().addItems(mechanismReviews)
 
   if (summaryWarnings.length > 0) {
     await appendIngestWarningLog(pp, activeSourceIdentity ?? "", summaryWarnings)
