@@ -43,6 +43,7 @@ vi.mock("@/commands/fs", () => ({
 
 import {
   canWriteMechanismPages,
+  extractLensFieldsText,
   extractLensPromptText,
   lensForDomain,
   loadMechanismContext,
@@ -584,5 +585,40 @@ describe("extractLensPromptText", () => {
 
   it("returns an empty string when no section matches", () => {
     expect(extractLensPromptText("# Lens\n\n## Purpose\n\nText.\n")).toBe("")
+  })
+})
+
+describe("extractLensFieldsText", () => {
+  it("returns the Fields section with its heading and nothing else", () => {
+    const markdown = [
+      "# Lens: x",
+      "",
+      "## Purpose",
+      "",
+      "About.",
+      "",
+      "## Fields",
+      "",
+      "### Parts",
+      "",
+      "Write: one line each.",
+      "",
+      "## Evidence standard",
+      "",
+      "1. Measured data.",
+    ].join("\n")
+
+    expect(extractLensFieldsText(markdown)).toBe("## Fields\n\n### Parts\n\nWrite: one line each.")
+  })
+
+  it("ignores a fenced `## Fields` line and a missing section", () => {
+    const fenced = ["## Example", "", "```markdown", "## Fields", "DECOY", "```"].join("\n")
+
+    expect(extractLensFieldsText(fenced)).toBe("")
+    expect(extractLensFieldsText("")).toBe("")
+  })
+
+  it("matches the heading without regard to case or a trailing colon", () => {
+    expect(extractLensFieldsText("## FIELDS:\n\nbody")).toBe("## FIELDS:\n\nbody")
   })
 })

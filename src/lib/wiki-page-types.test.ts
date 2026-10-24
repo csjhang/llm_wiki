@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest"
-import { GENERATION_WIKI_TYPES, inferWikiTypeFromPath, wikiTypeLabel } from "./wiki-page-types"
+import { BASE_GENERATION_WIKI_TYPES, GENERATION_WIKI_TYPES, MECHANISM_WIKI_TYPES, inferWikiTypeFromPath, wikiTypeLabel } from "./wiki-page-types"
 
 describe("inferWikiTypeFromPath", () => {
   it("recognizes core wiki directories", () => {
@@ -44,6 +44,25 @@ describe("mechanism wiki page types", () => {
   it("labels both types", () => {
     expect(wikiTypeLabel("mechanism")).toBe("Mechanism")
     expect(wikiTypeLabel("hypothesis")).toBe("Hypothesis")
+  })
+
+  it("names the two types that only a mechanism wiki lists", () => {
+    expect([...MECHANISM_WIKI_TYPES]).toEqual(["mechanism", "hypothesis"])
+    for (const type of MECHANISM_WIKI_TYPES) expect(GENERATION_WIKI_TYPES).toContain(type)
+  })
+
+  it("keeps the upstream type list for a wiki that is not a mechanism wiki", () => {
+    expect([...BASE_GENERATION_WIKI_TYPES]).toEqual([
+      "source",
+      "entity",
+      "concept",
+      "comparison",
+      "query",
+      "synthesis",
+      "thesis",
+      "methodology",
+      "finding",
+    ])
   })
 })
 

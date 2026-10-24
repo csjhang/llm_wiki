@@ -43,7 +43,10 @@ import {
   stripMarkdownImageReferences,
 } from "@/lib/image-caption-pipeline"
 import type { MultimodalConfig } from "@/stores/wiki-store"
-import { GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
+import { BASE_GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
+import { loadMechanismContext } from "@/lib/mechanism-wiki/context"
+import { appendPromptSection, prepareMechanismPrompts } from "@/lib/mechanism-wiki/prompts"
+import { emptyDecisions } from "@/lib/mechanism-wiki/types"
 import { computeContextBudget } from "@/lib/context-budget"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
 import { persistParsedMarkdown } from "@/lib/parsed-source-output"
@@ -1034,7 +1037,17 @@ async function autoIngestImpl(
     }
   }
 
-  const stableContextLength = schema.length + purpose.length + index.length + overview.length
+  // A project with domains.yaml is a mechanism wiki: its prompts get domain and
+  // mechanism sections (src/lib/mechanism-wiki/prompts.ts). Any other project
+  // gets `null` here and every prompt below stays as upstream builds it.
+  const mechanismCtx = await loadMechanismContext(pp)
+  const mechanism = mechanismCtx
+    ? prepareMechanismPrompts(mechanismCtx, index, sourceContent, getOutputLanguage(sourceContent))
+    : null
+  const promptIndex = mechanism?.index ?? index
+
+  const stableContextLength =
+    schema.length + purpose.length + index.length + overview.length + (mechanism?.reservedChars ?? 0)
   const sourceBudget = computeIngestSourceBudget(llmConfig.maxContextSize, stableContextLength)
   let sourceContext = enrichedSourceContent
   let precomputedAnalysis = ""
@@ -1046,7 +1059,7 @@ async function autoIngestImpl(
       llmConfig,
       purpose,
       schema,
-      index,
+      promptIndex,
       sourceIdentity,
       sourceSummarySlug,
       folderContext,
@@ -1054,6 +1067,7 @@ async function autoIngestImpl(
       sourceBudget,
       activityId,
       signal,
+      mechanism?.chunkAnalysis,
     )
     if (longSourcePlan.chunked) {
       sourceContext = longSourcePlan.sourceContext
@@ -1079,7 +1093,7 @@ async function autoIngestImpl(
     await streamChat(
       llmConfig,
       [
-        { role: "system", content: buildAnalysisPrompt(purpose, index, sourceContext, schema) },
+        { role: "system", content: appendPromptSection(buildAnalysisPrompt(purpose, promptIndex, sourceContext, schema), mechanism?.analysis) },
         { role: "user", content: `Analyze this source document:\n\n**File:** ${sourceIdentity}${folderContext ? `\n**Folder context:** ${folderContext}` : ""}\n\n---\n\n${sourceContext}` },
       ],
       {
@@ -1126,6 +1140,8 @@ async function autoIngestImpl(
     pp,
   )
   const previouslyCompletedPaths = generationCheckpoint?.completedPaths ?? []
+  // Nothing parses the analysis yet, so only the domain hint is known here.
+  const mechanismGeneration = mechanism?.generation(emptyDecisions(mechanism.hint))
   let generation = ""
   let generationError: string | null = null
   let generationTruncated = false
@@ -1134,7 +1150,7 @@ async function autoIngestImpl(
     await streamChat(
       llmConfig,
       [
-        { role: "system", content: buildGenerationPrompt(schema, purpose, index, sourceIdentity, overview, sourceContext, sourceSummaryPath) },
+        { role: "system", content: appendPromptSection(buildGenerationPrompt(schema, purpose, promptIndex, sourceIdentity, overview, sourceContext, sourceSummaryPath), mechanismGeneration) },
         {
           role: "user",
           content: [
@@ -2566,7 +2582,7 @@ export function buildGenerationPrompt(
     "   write `related: [a, b]` with bare slugs.",
     "",
     "Required fields and types:",
-    `  • type     — one of the known types (${GENERATION_WIKI_TYPES.join(" | ")}), or a custom type explicitly defined by the project schema`,
+    `  • type     — one of the known types (${BASE_GENERATION_WIKI_TYPES.join(" | ")}), or a custom type explicitly defined by the project schema`,
     "  • title    — string (quote it if it contains a colon, e.g. `title: \"Foo: Bar\"`)",
     `  • created  — ${today} for new pages (YYYY-MM-DD, no quotes)`,
     `  • updated  — ${today} for new pages (same as created)`,
@@ -3293,6 +3309,7 @@ async function analyzeLongSourceInChunks(
   sourceBudget: number,
   activityId: string,
   signal?: AbortSignal,
+  systemPromptAddendum?: string,
 ): Promise<LongSourcePlan> {
   const targetChars = clampNumber(Math.floor(sourceBudget * 0.55), LONG_SOURCE_CHUNK_MIN, LONG_SOURCE_CHUNK_MAX)
   const overlapChars = clampNumber(Math.floor(targetChars * 0.08), 800, 3_000)
@@ -3302,7 +3319,10 @@ async function analyzeLongSourceInChunks(
   }
 
   const activity = useActivityStore.getState()
-  const systemPrompt = buildChunkAnalysisSystemPrompt(purpose, schema, index, sourceContent)
+  const systemPrompt = appendPromptSection(
+    buildChunkAnalysisSystemPrompt(purpose, schema, index, sourceContent),
+    systemPromptAddendum,
+  )
   const sourceHash = hashTextHex(sourceContent)
   const checkpointPath = longSourceCheckpointPath(projectPath, sourceSummarySlug, sourceHash)
   const checkpointParams = {

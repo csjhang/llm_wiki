@@ -153,6 +153,18 @@ export function extractLensPromptText(markdown: string): string {
   return picked.join("\n\n")
 }
 
+/**
+ * The `## Fields` section of a lens file, with its heading, or "" when the file
+ * has none. A `## Fields` line inside a fenced code block does not count.
+ * Exported for the ingest prompts.
+ */
+export function extractLensFieldsText(markdown: string): string {
+  for (const section of splitLevelTwoSections(markdown)) {
+    if (normalizeHeadingName(section.heading) === "fields") return section.lines.join("\n").trimEnd()
+  }
+  return ""
+}
+
 // --- files -------------------------------------------------------------
 
 /** True when the path exists. A failed check counts as absent. */

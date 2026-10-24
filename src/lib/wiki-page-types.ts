@@ -12,6 +12,14 @@ export const GENERATION_WIKI_TYPES = [
   "hypothesis",
 ] as const
 
+/** Types that only a mechanism wiki lists. Other wikis keep the upstream type list. */
+export const MECHANISM_WIKI_TYPES = ["mechanism", "hypothesis"] as const
+
+/** `GENERATION_WIKI_TYPES` without the mechanism wiki types. */
+export const BASE_GENERATION_WIKI_TYPES: readonly string[] = GENERATION_WIKI_TYPES.filter(
+  (type) => !(MECHANISM_WIKI_TYPES as readonly string[]).includes(type),
+)
+
 const WIKI_TYPE_DIRS: Array<{ dir: string; type: string }> = [
   { dir: "entities", type: "entity" },
   { dir: "concepts", type: "concept" },
