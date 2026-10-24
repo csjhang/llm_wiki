@@ -14,6 +14,7 @@ import { stripBodyWikilinkPathPrefixes } from "./page-merge"
 import { normalizeMalformedWikilinks } from "./ingest-sanitize"
 import { loadMechanismContext } from "./mechanism-wiki/context"
 import { stageResearchResult } from "./mechanism-wiki/review-actions"
+import { indexResearchPage } from "./research-index"
 
 const MAX_RESEARCH_SOURCES = 20
 const MIN_RESEARCH_CONTENT_CHARS = 120
@@ -720,21 +721,8 @@ async function executeResearch(
     // The query page no longer goes through source ingest, so index it here
     // directly. This keeps freshly generated research available to hybrid
     // search without recreating the review-amplifying ingest loop.
-    const embeddingConfig = useWikiStore.getState().embeddingConfig
-    if (!staged && embeddingConfig.enabled && embeddingConfig.model) {
-      try {
-        const { embedPage, wikiPageIdFromPath } = await import("@/lib/embedding")
-        await embedPage(
-          pp,
-          wikiPageIdFromPath(pp, filePath),
-          `Research: ${topic}`,
-          pageContent,
-          embeddingConfig,
-        )
-      } catch (err) {
-        console.warn("[DeepResearch] failed to index generated query page:", err)
-      }
-    }
+    // A staged page is indexed when the user accepts it (mech:accept-research).
+    if (!staged) await indexResearchPage(pp, filePath, `Research: ${topic}`, pageContent)
 
     // A research result is already a generated wiki page. Feeding it back
     // through source ingest creates a second summary page and recursively

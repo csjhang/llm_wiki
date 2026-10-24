@@ -7,9 +7,18 @@ import { createTempProject, fileExists, readFileRaw, realFs, writeFileRaw } from
 import { MECHANISM_TEMPLATE_FILES } from "@/lib/mechanism-template"
 import { parseDomainsYaml } from "@/lib/wiki-config/domains"
 import type { ReviewItem } from "@/stores/review-store"
+import { useWikiStore } from "@/stores/wiki-store"
 import type { MechanismContext } from "./context"
 
 vi.mock("@/commands/fs", () => realFs)
+
+/** The embedding module talks to a vector store; the tests only look at the calls. */
+const embedding = vi.hoisted(() => ({ embedPage: vi.fn(async (..._args: unknown[]) => true) }))
+
+vi.mock("@/lib/embedding", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/embedding")>()),
+  embedPage: embedding.embedPage,
+}))
 
 /** A test can replace what `loadMechanismContext` returns, for a state the real loader never produces. */
 const loader = vi.hoisted(() => ({ override: undefined as MechanismContext | null | undefined }))
@@ -39,9 +48,12 @@ beforeEach(async () => {
   reading = `${root}/reading`
   work = `${root}/work`
   loader.override = undefined
+  embedding.embedPage.mockClear()
 })
 
 afterEach(async () => {
+  useWikiStore.setState({ embeddingConfig: { enabled: false, endpoint: "", apiKey: "", model: "" } })
+  vi.restoreAllMocks()
   await cleanup()
 })
 
@@ -298,6 +310,50 @@ describe("mech:approve-domain", () => {
     expect(parsed.ok && parsed.value.domains["hardware/async-circuits"].description).toBe("Circuits")
   })
 
+  it("adds a domain after a last line that has no line break", async () => {
+    const { ctx } = makeCtx(reading)
+
+    // LF.
+    await setUpReading("version: 1\ndomains:\n  ai/architecture:\n    lens: ai\n    description: Neural networks")
+    await handleMechanismReviewAction(proposal("hardware/async-circuits", "hardware", "Circuits"), "mech:approve-domain", ctx)
+    const lf = await readFileRaw(`${reading}/domains.yaml`)
+    expect(lf).toBe(
+      "version: 1\ndomains:\n  ai/architecture:\n    lens: ai\n    description: Neural networks\n" +
+        "  hardware/async-circuits:\n    lens: hardware\n    description: Circuits\n    whiteboards: []\n",
+    )
+    expect(parseDomainsYaml(lf).ok).toBe(true)
+
+    // CRLF.
+    await setUpReading("version: 1\r\ndomains:\r\n  ai/architecture:\r\n    lens: ai\r\n    description: Neural networks")
+    await handleMechanismReviewAction(proposal("hardware/async-circuits", "hardware", "Circuits"), "mech:approve-domain", ctx)
+    const crlf = await readFileRaw(`${reading}/domains.yaml`)
+    expect(crlf).toBe(lf.replace(/\n/g, "\r\n"))
+    expect(parseDomainsYaml(crlf).ok).toBe(true)
+  })
+
+  it("replaces domains: {} in a CRLF file and keeps its line endings", async () => {
+    const { ctx } = makeCtx(reading)
+
+    await setUpReading("# Keep.\r\nversion: 1\r\ndomains: {}  # none yet\r\n\r\n# Closing note.\r\n")
+    await handleMechanismReviewAction(proposal("ai/architecture", "ai", "Neural networks"), "mech:approve-domain", ctx)
+
+    const text = await readFileRaw(`${reading}/domains.yaml`)
+    expect(text).toBe(
+      "# Keep.\r\nversion: 1\r\ndomains:  # none yet\r\n" +
+        "  ai/architecture:\r\n    lens: ai\r\n    description: Neural networks\r\n    whiteboards: []\r\n" +
+        "\r\n# Closing note.\r\n",
+    )
+    expect(text.replace(/\r\n/g, "")).not.toContain("\n")
+    expect(parseDomainsYaml(text).ok).toBe(true)
+
+    // The same without a final line break, with LF.
+    await setUpReading("version: 1\ndomains: {}")
+    await handleMechanismReviewAction(proposal("ai/architecture", "ai", "Neural networks"), "mech:approve-domain", ctx)
+    expect(await readFileRaw(`${reading}/domains.yaml`)).toBe(
+      "version: 1\ndomains:\n  ai/architecture:\n    lens: ai\n    description: Neural networks\n    whiteboards: []\n",
+    )
+  })
+
   it("adds a domains key when the file has none", async () => {
     await setUpReading("version: 1\n")
     const { ctx } = makeCtx(reading)
@@ -456,6 +512,107 @@ describe("mech:propose-mechanism", () => {
     expect(await readFileRaw(`${dir}/event-driven-computation.md`)).toBe("EXISTING FILE\n")
     expect(await readFileRaw(`${dir}/event-driven-computation-2.md`)).toContain("First body.")
     expect(await readFileRaw(`${dir}/event-driven-computation-3.md`)).toContain("Second body.")
+  })
+
+  it("propose-mechanism never carries a source path from an unclosed frontmatter", async () => {
+    await setUpReading()
+    await setUpWork()
+    const { ctx } = makeCtx(work)
+    const partial = [
+      "---",
+      "type: mechanism",
+      "title: Event-driven computation",
+      "lenses: [hardware]",
+      "sources:",
+      "  - raw/sources/private-notes.md",
+      'also_from: ["raw/sources/other-notes.md"]',
+      "origin: inbox/private-notes.md",
+      "",
+      "# Event-driven computation",
+      "",
+      "One line that states it.",
+      "Taken from inbox/private-notes.md in the notes.",
+      "See raw/sources/other-notes.md for more.",
+      "The last real line.",
+    ].join("\n")
+
+    await handleMechanismReviewAction(
+      mechanismReview({
+        title: "(incomplete) Event-driven computation",
+        description: partial,
+        sourcePath: "inbox/private-notes.md",
+      }),
+      "mech:propose-mechanism",
+      ctx,
+    )
+
+    const written = await readFileRaw(`${reading}/raw/sources/proposals/event-driven-computation.md`)
+    expect(written).not.toContain("raw/sources")
+    expect(written).not.toContain("private-notes")
+    expect(written).not.toContain("other-notes")
+    expect(written).not.toContain("inbox/")
+    expect(written).not.toContain("sources:")
+    // Nothing of the unclosed frontmatter, and the real text stays.
+    expect(written).not.toContain("lenses:")
+    expect(written).toContain("incomplete: true\n---\n\n# Event-driven computation\n\nOne line that states it.\n")
+    expect(written).toContain("The last real line.")
+  })
+
+  it("drops a line with a raw source path from the body of a complete page", async () => {
+    await setUpReading()
+    await setUpWork()
+    const { ctx } = makeCtx(work)
+    const page = [
+      "---",
+      "type: mechanism",
+      "title: Event-driven computation",
+      "---",
+      "# Event-driven computation",
+      "",
+      "Kept line.",
+      "Quoted from raw/sources/private-notes.md directly.",
+      "Heard in C:\\Users\\me\\inbox\\private-notes.md once.",
+      "Another kept line.",
+    ].join("\n")
+
+    await handleMechanismReviewAction(
+      mechanismReview({ description: page, sourcePath: "C:/Users/me/inbox/private-notes.md" }),
+      "mech:propose-mechanism",
+      ctx,
+    )
+
+    const written = await readFileRaw(`${reading}/raw/sources/proposals/event-driven-computation.md`)
+    expect(written).not.toContain("private-notes")
+    expect(written).toContain("Kept line.\nAnother kept line.")
+  })
+
+  it("throws when only an unclosed frontmatter is left", async () => {
+    await setUpReading()
+    await setUpWork()
+    const { ctx } = makeCtx(work)
+
+    await expect(
+      handleMechanismReviewAction(
+        mechanismReview({ title: "(incomplete) X", description: "---\ntype: mechanism\nsources: [\"raw/sources/a.md\"" }),
+        "mech:propose-mechanism",
+        ctx,
+      ),
+    ).rejects.toThrow(/no proposal text/)
+    expect(await fileExists(`${reading}/raw`)).toBe(false)
+  })
+
+  it("strips accents from a Latin title but keeps Japanese kana whole", async () => {
+    await setUpReading()
+    await setUpWork()
+    const { ctx } = makeCtx(work)
+
+    await handleMechanismReviewAction(mechanismReview({ title: "Café résumé handshake" }), "mech:propose-mechanism", ctx)
+    await handleMechanismReviewAction(mechanismReview({ title: "がんばる ラーメン" }), "mech:propose-mechanism", ctx)
+
+    const { listDirectory } = await import("@/commands/fs")
+    const names = (await listDirectory(`${reading}/raw/sources/proposals`)).map((node) => node.name).sort()
+    expect(names).toContain("cafe-resume-handshake.md")
+    expect(names).toContain("がんばる-ラーメン.md")
   })
 
   it("keeps a Chinese title as the file name", async () => {
@@ -705,6 +862,20 @@ describe("mech:replace-source", () => {
     expect(resolveItem).not.toHaveBeenCalled()
   })
 
+  it("throws when the older file is gone, and does not create it again", async () => {
+    await setUpReading()
+    await writeFileRaw(`${reading}/${NEWER}`, "Newer.\n")
+    const { ctx, resolveItem } = makeCtx(reading, { reingest: vi.fn(async () => {}) })
+
+    await expect(handleMechanismReviewAction(duplicateReview(OLDER, NEWER), "mech:replace-source", ctx)).rejects.toThrow(
+      /older source raw\/sources\/handshakes\.md no longer exists/,
+    )
+    expect(await fileExists(`${reading}/${OLDER}`)).toBe(false)
+    expect(await readFileRaw(`${reading}/${NEWER}`)).toBe("Newer.\n")
+    expect(ctx.reingest).not.toHaveBeenCalled()
+    expect(resolveItem).not.toHaveBeenCalled()
+  })
+
   it("throws when the newer file is gone and leaves the older one alone", async () => {
     await setUpReading()
     await writeFileRaw(`${reading}/${OLDER}`, "Older.\n")
@@ -744,7 +915,8 @@ describe("research staging", () => {
     expect(review.sourcePath).toBe(`.llm-wiki/research-staging/${FILE}`)
     expect(review.affectedPages).toEqual([`wiki/queries/${FILE}`])
     expect(review.options.map((option) => option.action)).toContain("mech:accept-research")
-    expect(review.title).toContain(FILE.replace(/\.md$/, ""))
+    expect(review.title).toMatch(/^Research result: async handshakes \([0-9a-f]{8}\)$/)
+    expect(review.title).not.toContain("research-async-handshakes")
     expect(review.description).toContain("Research: async handshakes")
     expect(review.description).toContain("A request line goes high")
     expect(review).not.toHaveProperty("id")
@@ -760,6 +932,31 @@ describe("research staging", () => {
     expect(second.sourcePath).toBe(`.llm-wiki/research-staging/${FILE.replace(/\.md$/, "-2.md")}`)
     expect(second.title).not.toBe(first.title)
     expect(await readFileRaw(`${reading}/${second.sourcePath}`)).toBe("second\n")
+  })
+
+  it("titles the card with the research topic, cut to 80 characters, and keeps ids unique", async () => {
+    await setUpReading()
+    const { reviewIdFor } = await import("@/stores/review-store")
+    const long = `Research: ${"slow handshakes ".repeat(10).trim()}`
+    const longPage = `---\ntype: query\ntitle: ${JSON.stringify(long)}\n---\n\nBody.\n`
+
+    const a = await stageResearchResult(reading, "research-one-2026-06-06-100000-task-1.md", PAGE)
+    const b = await stageResearchResult(reading, "research-one-2026-06-06-100000-task-2.md", PAGE)
+    const c = await stageResearchResult(reading, "research-long-2026-06-06-100000-task-3.md", longPage)
+    const d = await stageResearchResult(reading, "research-bare-2026-06-06-100000-task-4.md", "No frontmatter.\n")
+
+    // The same topic twice: two titles, so two review ids.
+    expect(a.title.startsWith("Research result: async handshakes")).toBe(true)
+    expect(b.title.startsWith("Research result: async handshakes")).toBe(true)
+    expect(a.title).not.toBe(b.title)
+    expect(reviewIdFor(a)).not.toBe(reviewIdFor(b))
+    // The topic part is at most 80 characters.
+    const topic = c.title.replace(/^Research result: /, "").replace(/ \([0-9a-f]{8}\)$/, "")
+    expect(topic.length).toBe(80)
+    expect(topic.endsWith("...")).toBe(true)
+    expect(topic.startsWith("slow handshakes slow handshakes")).toBe(true)
+    // No title in the page: the file name stem stands in.
+    expect(d.title.startsWith("Research result: research-bare-2026-06-06-100000-task-4 (")).toBe(true)
   })
 
   it.each(["", "..", "a/b.md", "..\\x.md", "../x.md", "a\0b.md"])("refuses the file name %j", async (name) => {
@@ -781,6 +978,62 @@ describe("research staging", () => {
     expect(await fileExists(`${reading}/.llm-wiki/research-staging/${FILE}`)).toBe(false)
     expect(resolveItem).toHaveBeenCalledWith("review-r1", "Saved")
     expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  describe("indexing", () => {
+    function enableEmbedding(): void {
+      useWikiStore.setState({
+        embeddingConfig: { enabled: true, endpoint: "http://127.0.0.1:1/v1/embeddings", apiKey: "", model: "test-embed" },
+      })
+    }
+
+    it("mech:accept-research indexes the page at its final wiki/queries path", async () => {
+      await setUpReading()
+      enableEmbedding()
+      await writeFileRaw(`${reading}/wiki/queries/${FILE}`, "A page the user wrote.\n")
+      const review = makeReview({ ...(await stageResearchResult(reading, FILE, PAGE)), id: "review-r1" })
+      const { ctx, resolveItem } = makeCtx(reading)
+
+      await handleMechanismReviewAction(review, "mech:accept-research", ctx)
+
+      // The staged name was taken in wiki/queries, so the page is numbered; the index gets that name.
+      const finalName = FILE.replace(/\.md$/, "-2.md")
+      expect(embedding.embedPage).toHaveBeenCalledTimes(1)
+      expect(embedding.embedPage).toHaveBeenCalledWith(
+        reading,
+        `queries/${finalName.replace(/\.md$/, "")}`,
+        "Research: async handshakes",
+        PAGE,
+        useWikiStore.getState().embeddingConfig,
+      )
+      expect(resolveItem).toHaveBeenCalledWith("review-r1", "Saved")
+    })
+
+    it("mech:accept-research does not index when embedding is off", async () => {
+      await setUpReading()
+      const review = makeReview({ ...(await stageResearchResult(reading, FILE, PAGE)), id: "review-r1" })
+      const { ctx } = makeCtx(reading)
+
+      await handleMechanismReviewAction(review, "mech:accept-research", ctx)
+
+      expect(embedding.embedPage).not.toHaveBeenCalled()
+    })
+
+    it("mech:accept-research still saves and resolves when indexing fails", async () => {
+      await setUpReading()
+      enableEmbedding()
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+      embedding.embedPage.mockRejectedValueOnce(new Error("embedding service is down"))
+      const review = makeReview({ ...(await stageResearchResult(reading, FILE, PAGE)), id: "review-r1" })
+      const { ctx, resolveItem } = makeCtx(reading)
+
+      await expect(handleMechanismReviewAction(review, "mech:accept-research", ctx)).resolves.toBe(true)
+
+      expect(await readFileRaw(`${reading}/wiki/queries/${FILE}`)).toBe(PAGE)
+      expect(resolveItem).toHaveBeenCalledWith("review-r1", "Saved")
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(String(warn.mock.calls[0][1])).toContain("embedding service is down")
+    })
   })
 
   it("mech:accept-research never overwrites a page in wiki/queries", async () => {

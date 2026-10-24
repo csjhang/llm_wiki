@@ -18,6 +18,7 @@ import { copyFile, deleteFile, fileExists, readFile, writeFile } from "@/command
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { normalizePath } from "@/lib/path-utils"
 import { withProjectLock } from "@/lib/project-mutex"
+import { indexResearchPage } from "@/lib/research-index"
 import { DOMAIN_NAME_PATTERN, KNOWN_LENSES, parseDomainsYaml } from "@/lib/wiki-config/domains"
 import { hasOwn } from "@/lib/wiki-config/yaml-util"
 import type { ReviewItem } from "@/stores/review-store"
@@ -254,7 +255,7 @@ async function proposeMechanism(item: ReviewItem, ctx: ReviewActionContext): Pro
 
   const incomplete = INCOMPLETE_PREFIX.test(item.title)
   const title = item.title.replace(INCOMPLETE_PREFIX, "").replace(/\s+/g, " ").trim()
-  const body = proposalBody(item.description)
+  const body = proposalBody(item.description, item.sourcePath)
   if (body === "") throw new Error("The review item has no proposal text to send.")
 
   const frontmatter = [
@@ -286,11 +287,50 @@ async function proposeMechanism(item: ReviewItem, ctx: ReviewActionContext): Pro
   await refresh(ctx)
 }
 
-/** The proposed page without its frontmatter: the original frontmatter names work wiki sources. */
-function proposalBody(content: string): string {
-  const { body } = parseFrontmatter(content)
-  // A page that stopped inside its frontmatter has no closing fence; drop the opening one.
-  return (body === content ? body.replace(/^\s*---[ \t]*\r?\n/, "") : body).trim()
+/**
+ * A line of an unclosed frontmatter: `key: value`, `- item`, or a line indented under a key.
+ * A fragment cut in the middle of a key does not match; it is harmless text.
+ */
+const FRONTMATTER_LINE = /^(?:[A-Za-z_][\w-]*[ \t]*:.*|[ \t]*-(?:[ \t].*)?|[ \t]+\S.*)$/
+const HEADING_LINE = /^#{1,6}(?:[ \t]|$)/
+
+/**
+ * The proposed page without its frontmatter and without any line that names a source file.
+ * The frontmatter of the work wiki lists its raw sources, and the reading wiki must not learn them.
+ * - A closed frontmatter is cut off as a block.
+ * - A page that stopped inside its frontmatter has an opening fence and no closing one: the fence and
+ *   the run of frontmatter lines after it go, up to the first blank line or heading.
+ * - In every case a line that holds `raw/sources/` or the path of the item's own source goes too.
+ */
+function proposalBody(content: string, sourcePath: string | undefined): string {
+  const parsed = parseFrontmatter(content)
+  let lines: string[]
+  if (parsed.rawBlock !== "") {
+    lines = parsed.body.split(/\r?\n/)
+  } else {
+    lines = content.split(/\r?\n/)
+    const first = lines.findIndex((line) => line.trim() !== "")
+    if (first !== -1 && /^---[ \t]*$/.test(lines[first])) {
+      let end = first + 1
+      while (
+        end < lines.length &&
+        lines[end].trim() !== "" &&
+        !HEADING_LINE.test(lines[end]) &&
+        FRONTMATTER_LINE.test(lines[end])
+      ) {
+        end++
+      }
+      lines = lines.slice(end)
+    }
+  }
+  const own = normalizePath(sourcePath ?? "").trim().toLowerCase()
+  return lines
+    .filter((line) => {
+      const path = normalizePath(line).toLowerCase()
+      return !path.includes("raw/sources/") && (own === "" || !path.includes(own))
+    })
+    .join("\n")
+    .trim()
 }
 
 /**
@@ -301,7 +341,7 @@ function proposalSlug(title: string): string {
   const words =
     title
       .normalize("NFD")
-      .replace(/[̀-ͯ]/g, "")
+      .replace(/[\u0300-\u036f]/g, "")
       .normalize("NFKC")
       .toLowerCase()
       .match(SLUG_WORDS) ?? []
@@ -337,6 +377,10 @@ async function replaceSource(item: ReviewItem, ctx: ReviewActionContext): Promis
   }
 
   const pp = projectRoot(ctx.projectPath)
+  // A copy over a missing file would bring back a source that the user deleted.
+  if (!(await fileExists(`${pp}/${older}`))) {
+    throw new Error(`The older source ${older} no longer exists, so there is nothing to replace. The newer source ${newer} stays as it is.`)
+  }
   if (!(await fileExists(`${pp}/${newer}`))) throw new Error(`The newer source ${newer} no longer exists, so it cannot replace ${older}.`)
 
   // A byte copy, not a text copy: reading a PDF or an Office file as text would change it.
@@ -376,6 +420,7 @@ function extensionOf(path: string): string {
 const STAGING_DIR = ".llm-wiki/research-staging"
 const QUERIES_DIR = "wiki/queries"
 const PREVIEW_LENGTH = 600
+const TITLE_TOPIC_LENGTH = 80
 
 /**
  * Hold a deep research result back for approval. Writes it to `.llm-wiki/research-staging/<fileName>`
@@ -403,8 +448,7 @@ export async function stageResearchResult(
   const preview = body.trim()
   return {
     type: "research-result",
-    // The stem is unique, and so is the review id, which comes from the title: two results on one topic stay two items.
-    title: `Research result: ${stem}`,
+    title: researchCardTitle(topic, name),
     description: [
       `Deep research finished: ${topic}`,
       `The result is not in the wiki yet. Save it to add it as ${QUERIES_DIR}/${name}.`,
@@ -419,6 +463,19 @@ export async function stageResearchResult(
   }
 }
 
+/**
+ * `Research result: <topic> (<8 hex>)`. The topic is the research topic, cut to 80 characters. The hex
+ * is a hash of the staged file name, which is unique: the review id comes from the title, so two
+ * results on one topic would otherwise be one item and the second would be lost.
+ */
+function researchCardTitle(pageTitle: string, stagedName: string): string {
+  const topic = pageTitle.replace(/^Research:\s*/i, "").replace(/\s+/g, " ").trim()
+  const characters = Array.from(topic === "" ? pageTitle : topic)
+  const shown =
+    characters.length > TITLE_TOPIC_LENGTH ? `${characters.slice(0, TITLE_TOPIC_LENGTH - 3).join("")}...` : characters.join("")
+  return `Research result: ${shown} (${shortHash(stagedName)})`
+}
+
 async function acceptResearch(item: ReviewItem, ctx: ReviewActionContext): Promise<void> {
   const pp = projectRoot(ctx.projectPath)
   const staged = (item.sourcePath ?? "").trim()
@@ -430,9 +487,10 @@ async function acceptResearch(item: ReviewItem, ctx: ReviewActionContext): Promi
   const from = `${pp}/${STAGING_DIR}/${name}`
   if (!(await fileExists(from))) throw new Error(`The staged research file ${staged} is no longer there.`)
 
-  await withProjectLock(`${pp}\0${QUERIES_DIR}`, async () => {
-    const target = await availableName(`${pp}/${QUERIES_DIR}`, name)
-    await copyFile(from, `${pp}/${QUERIES_DIR}/${target}`)
+  const target = await withProjectLock(`${pp}\0${QUERIES_DIR}`, async () => {
+    const available = await availableName(`${pp}/${QUERIES_DIR}`, name)
+    await copyFile(from, `${pp}/${QUERIES_DIR}/${available}`)
+    return available
   })
   try {
     await deleteFile(from)
@@ -443,6 +501,19 @@ async function acceptResearch(item: ReviewItem, ctx: ReviewActionContext): Promi
 
   ctx.resolveItem(item.id, "Saved")
   await refresh(ctx)
+  await indexAcceptedPage(`${pp}/${QUERIES_DIR}/${target}`, pp)
+}
+
+/** Index the page that was just saved, as deep research does for a page it writes at once. Never throws. */
+async function indexAcceptedPage(pagePath: string, pp: string): Promise<void> {
+  try {
+    const content = await readFile(pagePath)
+    const heading = parseFrontmatter(content).frontmatter?.title
+    const title = typeof heading === "string" && heading.trim() !== "" ? heading.trim() : pagePath.slice(pagePath.lastIndexOf("/") + 1).replace(/\.md$/i, "")
+    await indexResearchPage(pp, pagePath, title, content)
+  } catch (err) {
+    console.warn("[review-actions] could not index the saved research page:", err instanceof Error ? err.message : err)
+  }
 }
 
 /** A file name with no folder part. Throws for anything else. */
