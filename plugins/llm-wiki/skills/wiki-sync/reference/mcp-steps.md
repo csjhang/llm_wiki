@@ -321,9 +321,10 @@ Use it in "Before you start". It belongs to the `llm_wiki` MCP, not to Heptabase
 Use it at the end of Up, when `llm_wiki_status` said that the app runs. It belongs to the `llm_wiki` MCP.
 
 ```json
-{}
+{ "project_id": "<project folder>" }
 ```
 
+- Use the full path of this project folder. The app can have another project open.
 - Save as `llm_wiki_rescan_sources.json`.
 - The tool asks the app to scan the source folder with the source watch rules of the user. The source watch of the app must be on.
 - If the call fails, go on. Tell the user that the app will see the new snapshots at its next scan.

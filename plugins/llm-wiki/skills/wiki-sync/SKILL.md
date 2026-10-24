@@ -133,7 +133,7 @@ node "<plugin dir>/scripts/wiki-tool.mjs" hepta plan-up --project "<project>" --
 10. If you recorded an answer, run the plan command again with the same files. Use the new list of actions.
 11. Handle each `snapshot` action and each `download-pdf` action as the sections below say.
 12. Tell the user where the snapshots are: `raw/sources/heptabase/`.
-13. If `llm_wiki_status` said that the app runs, call `llm_wiki_rescan_sources`. Tell the user that the source watch of the app must be on, or the app does not see the new files.
+13. If `llm_wiki_status` said that the app runs, call `llm_wiki_rescan_sources` with `project_id` set to the project folder. Tell the user that the source watch of the app must be on, or the app does not see the new files.
 14. If the app does not run, remind the user that ingest waits for the app.
 
 The `skipped` counts mean this:
