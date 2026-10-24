@@ -1,0 +1,3 @@
+# The bundle test compares this file byte for byte with a fresh build.
+# Keep LF line endings on every platform.
+plugins/llm-wiki/scripts/wiki-tool.mjs text eol=lf linguist-generated
