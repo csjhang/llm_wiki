@@ -183,6 +183,25 @@ export function parseListWhiteboards(text: string): WhiteboardNode[] {
 }
 
 /**
+ * One whiteboard tree from the pages of a paged list_whiteboards result, in page order.
+ * Each page is parsed on its own, so a whiteboard's parent comes from the indentation
+ * of its own page and a top-level whiteboard of a later page has no parent. A
+ * whiteboard that two pages list is kept once, at its first place.
+ */
+export function joinListWhiteboards(pages: string[]): WhiteboardNode[] {
+  const seen = new Set<string>()
+  const nodes: WhiteboardNode[] = []
+  for (const page of pages) {
+    for (const node of parseListWhiteboards(page)) {
+      if (seen.has(node.id)) continue
+      seen.add(node.id)
+      nodes.push(node)
+    }
+  }
+  return nodes
+}
+
+/**
  * The structure of a whiteboard from read_whiteboard: the header line, then
  * sections with their indented cards, then mind maps. A card line takes its
  * keyword as `type`. Cards after an `(unsectioned)` line, or not indented, are

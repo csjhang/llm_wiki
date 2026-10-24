@@ -60,7 +60,8 @@ afterEach(() => {
 
 interface InitOptions {
   database?: string
-  whiteboards?: string
+  /** One list_whiteboards file, or one per page. */
+  whiteboards?: string | string[]
   ingestTag?: string
   mirrorTag?: string
   roots?: string[]
@@ -78,13 +79,12 @@ function initArgs(project: string, options: InitOptions = {}): string[] {
     project,
     "--database",
     options.database ?? DATABASE,
-    "--whiteboards",
-    options.whiteboards ?? WHITEBOARDS,
     "--ingest-tag",
     options.ingestTag ?? INGEST_TAG,
     "--mirror-tag",
     options.mirrorTag ?? MIRROR_TAG,
   ]
+  for (const path of [options.whiteboards ?? WHITEBOARDS].flat()) args.push("--whiteboards", path)
   for (const root of options.roots ?? [ROOT_A, ROOT_B]) args.push("--root", root)
   for (const board of options.sourceBoards ?? [SOURCE_BOARD]) args.push("--source-board", board)
   for (const board of options.archiveBoards ?? [ARCHIVE_BOARD]) args.push("--archive-board", board)
@@ -382,13 +382,104 @@ describe("hepta init", () => {
     expect(after.whiteboards_cache.items).toHaveLength(9)
   })
 
+  it("finishes an init that stopped after the map was written, without --force", async () => {
+    const project = makeDir()
+    const map = loadCardMap(project)
+    map.pages["wiki/mechanisms/page-a.md"] = {
+      card_id: id(21),
+      content_hash: "abc",
+      last_synced_at: "2026-10-01T00:00:00.000Z",
+      card_updated_at: "2026-10-01T00:00:05.000Z",
+      placements: [],
+      status: "active",
+    }
+    saveCardMap(project, map)
+    expect(existsSync(join(project, "heptabase.yaml"))).toBe(false)
+
+    const result = await runCli(initArgs(project))
+    expect(result.exitCode).toBe(0)
+    expect(existsSync(join(project, "heptabase.yaml"))).toBe(true)
+    expect(loadCardMap(project).pages).toEqual(map.pages)
+  })
+
+  it("strips a byte order mark from the database file", async () => {
+    const project = makeDir()
+    const dir = makeDir()
+    const path = join(dir, "database.json")
+    writeFileSync(path, `\uFEFF${readFileSync(DATABASE, "utf8")}`)
+    const result = await runCli(initArgs(project, { database: path }))
+    expect(result.exitCode).toBe(0)
+  })
+
+  describe("with one whiteboard list file per page", () => {
+    /** The fixture list split in two pages: Archive and Root A, then Root B. */
+    function writePages(dir: string, secondTrailer = ""): [string, string] {
+      const envelope = JSON.parse(readFileSync(WHITEBOARDS, "utf8")) as { content: string }
+      const lines = envelope.content.split("\n\nMore top-level")[0].split("\n")
+      const split = lines.findIndex((line) => line.includes('"Root B"'))
+      const first = join(dir, "page-1.txt")
+      const second = join(dir, "page-2.txt")
+      writeFileSync(
+        first,
+        `${lines.slice(0, split).join("\n")}\n\nMore top-level whiteboards are available. Showing 1-2 of 3. Call list_whiteboards with offset 2 to list the next page.`,
+      )
+      writeFileSync(second, `Whiteboards:\n${lines.slice(split).join("\n")}${secondTrailer}`)
+      return [first, second]
+    }
+
+    it("joins the pages into one tree", async () => {
+      const project = makeDir()
+      const pages = writePages(makeDir())
+      const result = await runCli(initArgs(project, { whiteboards: pages }))
+      expect(result.exitCode).toBe(0)
+      const full = parseListWhiteboards(readFileSync(WHITEBOARDS, "utf8"))
+      expect(loadCardMap(project).whiteboards_cache.items).toEqual(full)
+      expect(result.output.whiteboards_cached).toBe(9)
+    })
+
+    it("finds an id that is on a later page, and not on the first alone", async () => {
+      const pages = writePages(makeDir())
+      const alone = await runCli(initArgs(makeDir(), { whiteboards: pages[0], roots: [ROOT_B] }))
+      expect(alone.exitCode).toBe(2)
+      expect(problemsOf(alone.output)).toEqual([
+        `--root ${ROOT_B} is not in the whiteboard list (the list is partial: showing 1-2 of 3)`,
+      ])
+      const both = await runCli(initArgs(makeDir(), { whiteboards: pages, roots: [ROOT_B] }))
+      expect(both.exitCode).toBe(0)
+    })
+
+    it("does not warn when the last page has no paging trailer", async () => {
+      const result = await runCli(initArgs(makeDir(), { whiteboards: writePages(makeDir()) }))
+      expect(result.exitCode).toBe(0)
+      expect(result.output.warnings).toEqual([])
+    })
+
+    it("warns when the last page still has a paging trailer", async () => {
+      const trailer =
+        "\n\nMore top-level whiteboards are available. Showing 3-3 of 5. Call list_whiteboards with offset 3 to list the next page."
+      const result = await runCli(initArgs(makeDir(), { whiteboards: writePages(makeDir(), trailer) }))
+      expect(result.exitCode).toBe(0)
+      expect(result.output.warnings).toEqual([
+        "the whiteboard list is partial (showing 3-3 of 5), so the map cache holds only these whiteboards",
+      ])
+    })
+
+    it("names the file that cannot be read", async () => {
+      const [first] = writePages(makeDir())
+      const absent = join(makeDir(), "page-2.txt")
+      const result = await runCli(initArgs(makeDir(), { whiteboards: [first, absent] }))
+      expect(result.exitCode).toBe(2)
+      expect(problemsOf(result.output)).toEqual([`cannot read --whiteboards file: ${absent}`])
+    })
+  })
+
   it("exits 2 and writes nothing when the existing map cannot be read", async () => {
     const project = makeDir()
     writeFileSync(join(project, "heptabase-map.json"), "{nope")
     const result = await runCli(initArgs(project))
     expect(result.exitCode).toBe(2)
     expect(problemsOf(result.output)).toHaveLength(1)
-    expect(problemsOf(result.output)[0]).toMatch(/heptabase-map\.json/)
+    expect(problemsOf(result.output)[0]).toMatch(/heptabase-map\.json.*repair or remove heptabase-map\.json/s)
     expect(existsSync(join(project, "heptabase.yaml"))).toBe(false)
     expect(readFileSync(join(project, "heptabase-map.json"), "utf8")).toBe("{nope")
   })

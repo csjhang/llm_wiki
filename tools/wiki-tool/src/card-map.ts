@@ -46,12 +46,21 @@ function emptyCardMap(): CardMap {
 
 /**
  * Read the map of a project. A project without a map gets an empty one. A map that
- * cannot be read as a card map throws an error that names the file.
+ * cannot be read as a card map throws an error that names the file and says to
+ * repair or remove it.
  */
 export function loadCardMap(projectPath: string): CardMap {
   const path = resolveInProject(projectPath, CARD_MAP_FILE)
   if (!existsSync(path)) return emptyCardMap()
+  try {
+    return readCardMap(path)
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error)
+    throw new Error(`${reason}; repair or remove ${CARD_MAP_FILE}`)
+  }
+}
 
+function readCardMap(path: string): CardMap {
   const raw = readJsonFile<unknown>(path)
   if (!isRecord(raw)) throw new Error(`${CARD_MAP_FILE} must be a JSON object`)
   if (raw.version !== 1) throw new Error(`${CARD_MAP_FILE}: version must be the number 1`)

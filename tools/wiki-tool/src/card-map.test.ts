@@ -88,16 +88,16 @@ describe("loadCardMap", () => {
     expect(loadCardMap(project).pages).toEqual({})
   })
 
-  it("names the file when the JSON is invalid", () => {
+  it("names the file when the JSON is invalid and says to repair or remove it", () => {
     const project = makeProject()
     writeFileSync(join(project, "heptabase-map.json"), "{nope")
-    expect(() => loadCardMap(project)).toThrow(/heptabase-map\.json/)
+    expect(() => loadCardMap(project)).toThrow(/heptabase-map\.json.*repair or remove heptabase-map\.json/s)
   })
 
   it("rejects a map of another version", () => {
     const project = makeProject()
     writeFileSync(join(project, "heptabase-map.json"), JSON.stringify({ ...sampleMap(), version: 2 }))
-    expect(() => loadCardMap(project)).toThrow(/heptabase-map\.json.*version/)
+    expect(() => loadCardMap(project)).toThrow(/heptabase-map\.json.*version.*repair or remove/)
   })
 
   it.each(["pages", "sources", "whiteboards_cache"])("rejects a map without %s", (key) => {

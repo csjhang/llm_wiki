@@ -2427,11 +2427,20 @@ function emptyCardMap() {
 }
 /**
 * Read the map of a project. A project without a map gets an empty one. A map that
-* cannot be read as a card map throws an error that names the file.
+* cannot be read as a card map throws an error that names the file and says to
+* repair or remove it.
 */
 function loadCardMap(projectPath) {
 	const path = resolveInProject(projectPath, CARD_MAP_FILE);
 	if (!existsSync(path)) return emptyCardMap();
+	try {
+		return readCardMap(path);
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		throw new Error(`${reason}; repair or remove ${CARD_MAP_FILE}`);
+	}
+}
+function readCardMap(path) {
 	const raw = readJsonFile(path);
 	if (!isRecord(raw)) throw new Error(`${CARD_MAP_FILE} must be a JSON object`);
 	if (raw.version !== 1) throw new Error(`${CARD_MAP_FILE}: version must be the number 1`);
@@ -2525,6 +2534,22 @@ function parseListWhiteboards(text) {
 	return nodes;
 }
 /**
+* One whiteboard tree from the pages of a paged list_whiteboards result, in page order.
+* Each page is parsed on its own, so a whiteboard's parent comes from the indentation
+* of its own page and a top-level whiteboard of a later page has no parent. A
+* whiteboard that two pages list is kept once, at its first place.
+*/
+function joinListWhiteboards(pages) {
+	const seen = /* @__PURE__ */ new Set();
+	const nodes = [];
+	for (const page of pages) for (const node of parseListWhiteboards(page)) {
+		if (seen.has(node.id)) continue;
+		seen.add(node.id);
+		nodes.push(node);
+	}
+	return nodes;
+}
+/**
 * The paging trailer of a list result, such as
 * `More cards are available. Showing 1-3 of 40. Call list_cards with offset 3 to list the next page.`
 * Returns null when the result is not paged or the page is the last one.
@@ -2548,7 +2573,7 @@ function parsePagingTrailer(text) {
 * `wiki-tool hepta init` - write the first draft of heptabase.yaml.
 *
 * Reads the output of the Heptabase `read_database` tool (as a JSON file) and
-* `list_whiteboards` (as a text file), maps the database properties to the keys of
+* `list_whiteboards` (as a text file; one file per page when the list is paged), maps the database properties to the keys of
 * heptabase.yaml by name, checks the ids the user gave, and writes heptabase.yaml
 * and the whiteboard tree of the card map. Nothing is written unless every check
 * passes. The generated text is parsed with parseHeptabaseYaml before it is written.
@@ -2601,11 +2626,11 @@ const OPTION_SPEC = {
 	values: [
 		"project",
 		"database",
-		"whiteboards",
 		"ingest-tag",
 		"mirror-tag"
 	],
 	lists: [
+		"whiteboards",
 		"root",
 		"source-board",
 		"archive-board"
@@ -2623,14 +2648,14 @@ const REQUIRED_OPTIONS = [
 function init(args) {
 	const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC);
 	const problems = [...optionProblems];
-	for (const name of REQUIRED_OPTIONS) if (!(name === "root" ? parsed.lists.root.length > 0 : parsed.values[name] !== void 0)) problems.push(`missing option: --${name}`);
+	for (const name of REQUIRED_OPTIONS) if (!(name in parsed.lists ? parsed.lists[name].length > 0 : parsed.values[name] !== void 0)) problems.push(`missing option: --${name}`);
 	if (problems.length > 0) return {
 		ok: false,
 		problems
 	};
 	const project = parsed.values.project;
 	const databasePath = parsed.values.database;
-	const whiteboardsPath = parsed.values.whiteboards;
+	const whiteboardsPaths = parsed.lists.whiteboards;
 	const roots = unique(parsed.lists.root);
 	const sourceBoards = unique(parsed.lists["source-board"]);
 	const archiveBoards = unique(parsed.lists["archive-board"]);
@@ -2654,11 +2679,11 @@ function init(args) {
 	const database = readDatabase(databasePath, problems);
 	const properties = database ? mapProperties(database.schema, problems, warnings) : {};
 	if (database?.tagId && database.tagId !== tags.mirror) warnings.push(`the database belongs to tag ${database.tagId}, but --mirror-tag is ${tags.mirror}`);
-	const whiteboardsText = readText("--whiteboards", whiteboardsPath, problems);
+	const pages = whiteboardsPaths.map((path) => readText("--whiteboards", path, problems));
 	let tree = [];
-	if (whiteboardsText !== null) {
-		tree = parseListWhiteboards(whiteboardsText);
-		const trailer = parsePagingTrailer(whiteboardsText);
+	if (pages.every((page) => page !== null)) {
+		tree = joinListWhiteboards(pages);
+		const trailer = parsePagingTrailer(pages[pages.length - 1]);
 		const partial = trailer ? `showing ${trailer.shown[0]}-${trailer.shown[1]} of ${trailer.total}` : null;
 		if (tree.length === 0) problems.push("--whiteboards file lists no whiteboards");
 		else {
@@ -2720,7 +2745,7 @@ function isDirectory(path) {
 }
 function readText(option, path, problems) {
 	try {
-		return readFileSync(path, "utf8").replace(/^﻿/, "");
+		return readFileSync(path, "utf8").replace(/^\uFEFF/, "");
 	} catch {
 		problems.push(`cannot read ${option} file: ${path}`);
 		return null;

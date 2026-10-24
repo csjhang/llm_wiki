@@ -9,6 +9,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import {
+  joinListWhiteboards,
   joinReadObjectPages,
   parseListCards,
   parseListWhiteboards,
@@ -201,6 +202,42 @@ describe("parseListWhiteboards", () => {
       `  whiteboard "E" [${id(5)}] 0 cards`,
     ].join("\n")
     expect(parseListWhiteboards(text).map((node) => node.parentId)).toEqual([null, id(1), id(2), null, id(4)])
+  })
+})
+
+describe("joinListWhiteboards", () => {
+  const PAGE_ONE = [
+    `whiteboard "Top 1" [${id(1)}] 0 cards, 1 whiteboard`,
+    `  whiteboard "Child 1" [${id(2)}] 0 cards, 0 whiteboards`,
+    "",
+    "More top-level whiteboards are available. Showing 1-1 of 2. Call list_whiteboards with offset 1 to list the next page.",
+  ].join("\n")
+  const PAGE_TWO = [
+    `whiteboard "Top 2" [${id(3)}] 0 cards, 1 whiteboard`,
+    `  whiteboard "Child 2" [${id(4)}] 0 cards, 0 whiteboards`,
+  ].join("\n")
+
+  it("joins the pages in order and takes each parent from its own page", () => {
+    expect(joinListWhiteboards([PAGE_ONE, PAGE_TWO])).toEqual([
+      { id: id(1), title: "Top 1", parentId: null },
+      { id: id(2), title: "Child 1", parentId: id(1) },
+      { id: id(3), title: "Top 2", parentId: null },
+      { id: id(4), title: "Child 2", parentId: id(3) },
+    ])
+  })
+
+  it("accepts the JSON envelope and the raw text alike", () => {
+    expect(joinListWhiteboards([envelope(PAGE_ONE), PAGE_TWO])).toEqual(joinListWhiteboards([PAGE_ONE, PAGE_TWO]))
+  })
+
+  it("returns what one page holds, and nothing for no pages", () => {
+    expect(joinListWhiteboards([PAGE_ONE])).toEqual(parseListWhiteboards(PAGE_ONE))
+    expect(joinListWhiteboards([])).toEqual([])
+  })
+
+  it("keeps the first of a whiteboard that two pages list", () => {
+    const nodes = joinListWhiteboards([PAGE_ONE, `${PAGE_ONE.split("\n")[0]}\n${PAGE_TWO}`])
+    expect(nodes.map((node) => node.id)).toEqual([id(1), id(2), id(3), id(4)])
   })
 })
 

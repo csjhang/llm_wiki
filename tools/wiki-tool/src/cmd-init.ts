@@ -2,7 +2,7 @@
  * `wiki-tool hepta init` - write the first draft of heptabase.yaml.
  *
  * Reads the output of the Heptabase `read_database` tool (as a JSON file) and
- * `list_whiteboards` (as a text file), maps the database properties to the keys of
+ * `list_whiteboards` (as a text file; one file per page when the list is paged), maps the database properties to the keys of
  * heptabase.yaml by name, checks the ids the user gave, and writes heptabase.yaml
  * and the whiteboard tree of the card map. Nothing is written unless every check
  * passes. The generated text is parsed with parseHeptabaseYaml before it is written.
@@ -19,7 +19,7 @@ import { parseArgs } from "./args"
 import { type CardMap, loadCardMap, saveCardMap } from "./card-map"
 import type { CommandResult } from "./io"
 import { resolveInProject, writeFileAtomic } from "./io"
-import { parseListWhiteboards, parsePagingTrailer, type WhiteboardNode } from "./parse-mcp"
+import { joinListWhiteboards, parsePagingTrailer, type WhiteboardNode } from "./parse-mcp"
 
 const HEPTABASE_YAML = "heptabase.yaml"
 
@@ -36,8 +36,9 @@ const PROPERTY_SPECS: readonly { key: PropertyKey; name: string; type: string }[
 ]
 
 const OPTION_SPEC = {
-  values: ["project", "database", "whiteboards", "ingest-tag", "mirror-tag"],
-  lists: ["root", "source-board", "archive-board"],
+  values: ["project", "database", "ingest-tag", "mirror-tag"],
+  // --whiteboards is given once per page of the list_whiteboards result.
+  lists: ["whiteboards", "root", "source-board", "archive-board"],
   flags: ["force"],
 } as const
 
@@ -61,14 +62,14 @@ export function init(args: string[]): CommandResult {
   const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC)
   const problems = [...optionProblems]
   for (const name of REQUIRED_OPTIONS) {
-    const given = name === "root" ? parsed.lists.root.length > 0 : parsed.values[name] !== undefined
+    const given = name in parsed.lists ? parsed.lists[name].length > 0 : parsed.values[name] !== undefined
     if (!given) problems.push(`missing option: --${name}`)
   }
   if (problems.length > 0) return { ok: false, problems }
 
   const project = parsed.values.project
   const databasePath = parsed.values.database
-  const whiteboardsPath = parsed.values.whiteboards
+  const whiteboardsPaths = parsed.lists.whiteboards
   const roots = unique(parsed.lists.root)
   const sourceBoards = unique(parsed.lists["source-board"])
   const archiveBoards = unique(parsed.lists["archive-board"])
@@ -94,12 +95,12 @@ export function init(args: string[]): CommandResult {
     warnings.push(`the database belongs to tag ${database.tagId}, but --mirror-tag is ${tags.mirror}`)
   }
 
-  // The whiteboards the user named must be in the list.
-  const whiteboardsText = readText("--whiteboards", whiteboardsPath, problems)
+  // The whiteboards the user named must be in the list. Only the last page can say the list goes on.
+  const pages = whiteboardsPaths.map((path) => readText("--whiteboards", path, problems))
   let tree: WhiteboardNode[] = []
-  if (whiteboardsText !== null) {
-    tree = parseListWhiteboards(whiteboardsText)
-    const trailer = parsePagingTrailer(whiteboardsText)
+  if (pages.every((page): page is string => page !== null)) {
+    tree = joinListWhiteboards(pages)
+    const trailer = parsePagingTrailer(pages[pages.length - 1])
     const partial = trailer ? `showing ${trailer.shown[0]}-${trailer.shown[1]} of ${trailer.total}` : null
     if (tree.length === 0) {
       problems.push("--whiteboards file lists no whiteboards")
@@ -164,7 +165,7 @@ function isDirectory(path: string): boolean {
 
 function readText(option: string, path: string, problems: string[]): string | null {
   try {
-    return readFileSync(path, "utf8").replace(/^﻿/, "")
+    return readFileSync(path, "utf8").replace(/^\uFEFF/, "")
   } catch {
     problems.push(`cannot read ${option} file: ${path}`)
     return null
