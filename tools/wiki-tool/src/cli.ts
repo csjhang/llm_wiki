@@ -9,10 +9,11 @@
  * error. Each command group lives in its own file; add its CommandGroup to GROUPS.
  */
 import manifest from "../../../plugins/llm-wiki/.claude-plugin/plugin.json"
+import { HEPTA_GROUP } from "./cmd-hepta"
 import type { CommandGroup, CommandHandler, CommandResult } from "./io"
 
-/** Command groups. The hepta, recut, lint, and fuse groups register here. */
-const GROUPS: readonly CommandGroup[] = []
+/** Command groups. The recut, lint, and fuse groups register here. */
+const GROUPS: readonly CommandGroup[] = [HEPTA_GROUP]
 
 /** Commands that take no group. */
 const TOP_LEVEL_COMMANDS: Record<string, CommandHandler> = {
