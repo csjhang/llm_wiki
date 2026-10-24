@@ -91,3 +91,31 @@ Task 6: implementer STOPPED at the user's request before it wrote anything (tree
 PAUSED 2026-10-24 at the user's request (the user will say when to resume).
 History rewrite (user request 2026-10-24): squashed the Task 2 commit and its fixture fix into 3f75fb1 so no near-real titles remain in history; replayed the later commits unchanged (tree identical); all SHAs in this ledger after 34cfa06 were remapped. Branch force-pushed with lease.
 RESUMED 2026-10-24 at the user's request.
+Task 6: re-dispatched after the resume (base e160ba3, implementer sonnet, same prompt)
+Task 6: implementer DONE_WITH_CONCERNS, commit 8ed526b (vitest 3161 + 1 skipped)
+Ruling Q16 (fix round): persist the user's answer to an `ask`: a `record` event `{"type":"up-decision","cardId","decision":"skip"|"<root id>"}` stored in the map (`up_decisions`), honored by plan-up (skip → counted as skipped; root id → treated as that root); a partial `--whiteboards` list (last page still has a paging trailer) does NOT replace the cached tree (warn only); domain hint picks the domain whose hinted board is the nearest ancestor (or the board itself) of the card's board, omit on a tie. Accept: repeatable --content, edited snapshot skips re-ask, skipped/warnings output, mirror-id refusal, helpers. — Why: one answer per card; never shrink the cache; nearest hint is what the user means. — Cost if wrong: a stale decision until the user records another.
+Task 6: review dispatched (sonnet)
+Task 6: review Approved (0 Critical, 0 Important); controller fix round for Q16 + overwrite guard + quoted domain + failed/mismatched read results + empty-cache warning
+Task 6: minor (deferred): snapshot imports whiteboard-tree helpers from cmd-plan-up (a shared module would be cleaner)
+Task 6: fix round 1 dispatched (resume implementer; fix base 8ed526b)
+Task 6: fix round 1/5 implementer DONE (commit 6cd33ef, vitest 3191 + 1 skipped); carried to Task 7: check --cards status; pass the complete whiteboard list (all pages) before plan-up; scoped re-review dispatched (haiku)
+Task 6: fix round 1/5 (7 addressed, 0 open; commits 8ed526b..6cd33ef)
+Task 6: minor (deferred → SP3 final fix wave): snapshot header comment overclaims "never replaced"; the overwrite guard trusts map.sources without checking raw_path; a non-string status passes; a plan-up test name overclaims; cmd-record comment about asks; `init` still replaces the cached tree with a partial list (same defect Q16 fixed in plan-up)
+Task 6: complete (commits e160ba3..6cd33ef, review clean after 1 fix round)
+Task 7: dispatched (base 6cd33ef, implementer sonnet)
+Task 7: implementer agent aaf554552dd1493ef
+Task 7: implementer DONE_WITH_CONCERNS, commit 9348092 (vitest 3192 + 1 skipped; findLongSentences [] on both files)
+Ruling Q17 (→ SP3 final fix wave, tool + skill): (a) `record created` is run right after `create_object` returns an id, with optional `"setup": false`; the map stores `setup_pending: true`, plan-down plans a `setup` action (tag membership + properties) for such entries before anything else, and `record setup-done` clears it — so a failure after create never duplicates a card; (b) `record feedback` takes repeated `--content` read_object files and stores the plain text (joinReadObjectPages + cardToSnapshotBody), not raw Hepta Markdown. Accept: place_whiteboard_objects added; PDF cards re-listed each run (no record event; the user downloads by hand); the llm_wiki_add_review arguments follow the SP4 plan. — Why: a created card must always be mapped; feedback notes are wiki sources. — Cost if wrong: one more action type.
+Task 7: review dispatched (sonnet)
+Task 7: review Approved (0 Critical, 0 Important)
+Task 7: minor (deferred → SP3 final fix wave): check the new card id after create_object (lowercase UUID, not in the map, one-card list_cards returns the action title) before membership/properties; re-check `updated:` with a one-card list_cards before edit_object_content in update/relink/retire (edit race); say which wins between the clientTaskFailed retry rule and the duplicate warnings for create/place; a card that failed in this run is not retried in the same run; point repeated rules to one place
+Task 7: complete (commits 6cd33ef..9348092, review clean)
+Task 8: dispatched (base 9348092, implementer sonnet)
+Task 8: implementer agent ae21ed746f517c26d
+Task 8: implementer DONE, commit b8b7200 (vitest 3231 + 1 skipped; cargo git_history 78)
+Ruling Q18 (→ SP3 final fix wave unless the review finds worse): add an exported async `commitPathsLocked(p, paths, msg)` = withGitLock + commitPaths so callers cannot forget the lock; before removing a stale lock, re-read it and remove only if it still holds the same pid/started_at that was judged stale (closes the double-remove race); a lock whose pid is not alive on this host counts as stale at once. Accept wiki-undo `{ ok:false, reason:"busy" }` and its SKILL.md line. — Why: a sync helper without the lock is a footgun; the race can let two writers in. — Cost if wrong: a lock from another host is never seen as dead early (it still expires after 10 minutes).
+Task 8: review dispatched (sonnet)
+Task 8: review needs fixes (1 Important: commitPaths half-commits a staged rename — diff follows renames)
+Task 8: minor (deferred): `changed` file list on the command line may hit the OS argument limit for very large folders; a busy lock during crash recovery gives up the cleanup after a warning (pre-existing behavior)
+Task 8: fix round 1 PREPARED (task-8-findings-r1.md; resume the implementer agent ae21ed746f517c26d, or a fresh sonnet implementer with the same brief + findings; fix base b8b7200)
+PAUSED 2026-10-24 at the user's request; scheduled resume in 4 hours. Next after Task 8: SP3 final whole-branch review (opus, range 5429b7f..HEAD) with the deferred minors from Tasks 5–8 and Q17 in the fix wave; then the live test protocol.
