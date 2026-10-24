@@ -30,6 +30,8 @@ import { useTranslation } from "react-i18next"
 import { useAppDialog } from "@/stores/app-dialog-store"
 import { useResearchStore } from "@/stores/research-store"
 import { reviewResearchQueries, reviewResearchTopic, selectedResearchReviews } from "@/lib/review-batch-research"
+import { enqueueSourceIngest } from "@/lib/source-lifecycle"
+import { handleMechanismReviewAction, MECHANISM_ACTION_PREFIX } from "@/lib/mechanism-wiki/review-actions"
 
 const typeConfig: Record<ReviewItem["type"], { icon: typeof AlertTriangle; color: string }> = {
   contradiction: { icon: AlertTriangle, color: "text-amber-500" },
@@ -98,6 +100,29 @@ export function ReviewView() {
   const handleResolve = useCallback(async (id: string, action: string) => {
     const pp = project ? normalizePath(project.path) : ""
     const item = items.find((i) => i.id === id)
+    // Mechanism wiki actions (`mech:`). The handler returns false for any other action.
+    if (project && action.startsWith(MECHANISM_ACTION_PREFIX)) {
+      try {
+        setReviewWorking(id, true)
+        setReviewError(id, null)
+        const handled = await handleMechanismReviewAction(item, action, {
+          projectPath: pp,
+          resolveItem,
+          refresh: () => refreshProjectFileTree(pp, { projectId: project.id, bumpDataVersion: true }),
+          // The app wrote the replaced source itself, so the file watcher does not queue it.
+          reingest: async (sourcePath) => {
+            await enqueueSourceIngest(project, [`${pp}/${sourcePath}`], useWikiStore.getState().llmConfig)
+          },
+        })
+        if (handled) return
+      } catch (err) {
+        console.error("Failed to run mechanism review action:", err)
+        setReviewError(id, err)
+        return
+      } finally {
+        setReviewWorking(id, false)
+      }
+    }
     // Deep Research — must be checked FIRST before any fuzzy matching
     if (action === "__deep_research__" && project) {
       const searchConfig = useWikiStore.getState().searchApiConfig

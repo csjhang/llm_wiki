@@ -12,6 +12,8 @@ import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
 import { useReviewStore } from "@/stores/review-store"
 import { stripBodyWikilinkPathPrefixes } from "./page-merge"
 import { normalizeMalformedWikilinks } from "./ingest-sanitize"
+import { loadMechanismContext } from "./mechanism-wiki/context"
+import { stageResearchResult } from "./mechanism-wiki/review-actions"
 
 const MAX_RESEARCH_SOURCES = 20
 const MIN_RESEARCH_CONTENT_CHARS = 120
@@ -73,6 +75,37 @@ export function addResearchTaskDiscriminator(fileName: string, taskId: string): 
   const safeTaskId = taskId.replace(/[^A-Za-z0-9-]/g, "-").replace(/-+/g, "-")
   const extensionIndex = fileName.toLowerCase().endsWith(".md") ? fileName.length - 3 : fileName.length
   return `${fileName.slice(0, extensionIndex)}-${safeTaskId || "task"}${fileName.slice(extensionIndex)}`
+}
+
+export interface SavedResearchPage {
+  /** Absolute path of the file that was written. */
+  filePath: string
+  /** Project-relative path of the file that was written. */
+  savedPath: string
+  /** True when the page waits for approval in `.llm-wiki/research-staging/` and is not a wiki page yet. */
+  staged: boolean
+}
+
+/**
+ * Write a finished research page. A mechanism wiki (a project with `domains.yaml`) stages the page and
+ * adds a `research-result` review item: the page reaches `wiki/queries/` only when the user approves
+ * it. Every other wiki gets the page in `wiki/queries/` at once.
+ */
+export async function saveResearchPage(
+  projectPath: string,
+  fileName: string,
+  pageContent: string,
+): Promise<SavedResearchPage> {
+  const pp = normalizePath(projectPath)
+  if ((await loadMechanismContext(pp)) !== null) {
+    const review = await stageResearchResult(pp, fileName, pageContent)
+    // The review list belongs to the open project; a result for another project waits in staging.
+    if (isActiveProjectPath(pp)) useReviewStore.getState().addItem(review)
+    return { filePath: `${pp}/${review.sourcePath}`, savedPath: review.sourcePath, staged: true }
+  }
+  const filePath = await makeAvailableResearchFilePath(`${pp}/wiki/queries`, fileName)
+  await writeFile(filePath, pageContent)
+  return { filePath, savedPath: filePath.slice(`${pp}/`.length), staged: false }
 }
 
 export function researchPageIdFromPath(filePath: string): string {
@@ -652,7 +685,6 @@ async function executeResearch(
 
     const { fileName, date } = makeDeepResearchFileName(topic)
     const taskFileName = addResearchTaskDiscriminator(fileName, taskId)
-    const filePath = await makeAvailableResearchFilePath(`${pp}/wiki/queries`, taskFileName)
 
     // Persist only sources cited by the synthesis. Search providers can return
     // broad candidates; listing every candidate makes unused, off-topic hits
@@ -671,8 +703,7 @@ async function executeResearch(
       references,
     )
 
-    await writeFile(filePath, pageContent)
-    const savedPath = filePath.slice(`${pp}/`.length)
+    const { filePath, savedPath, staged } = await saveResearchPage(pp, taskFileName, pageContent)
 
     if (!updateTaskIfActive(pp, taskId, {
       status: "done",
@@ -690,7 +721,7 @@ async function executeResearch(
     // directly. This keeps freshly generated research available to hybrid
     // search without recreating the review-amplifying ingest loop.
     const embeddingConfig = useWikiStore.getState().embeddingConfig
-    if (embeddingConfig.enabled && embeddingConfig.model) {
+    if (!staged && embeddingConfig.enabled && embeddingConfig.model) {
       try {
         const { embedPage, wikiPageIdFromPath } = await import("@/lib/embedding")
         await embedPage(

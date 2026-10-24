@@ -158,10 +158,11 @@ function knownLenses(ctx: MechanismContext): string[] {
 
 // --- mechanism lines ---------------------------------------------------
 
-const WORD = "[a-z0-9\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}\\u30fc]+"
+/** One word of a slug: lower-case letters and digits, or Chinese, Japanese, or Korean text. */
+export const SLUG_WORD = "[a-z0-9\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=Katakana}\\p{Script=Hangul}\\u30fc]+"
 
 /** Kebab-case, where a word may also be Chinese, Japanese, or Korean text. */
-const SLUG_PATTERN = new RegExp(`^${WORD}(?:-${WORD})*$`, "u")
+export const SLUG_PATTERN = new RegExp(`^${SLUG_WORD}(?:-${SLUG_WORD})*$`, "u")
 
 /** `existing:<slug> | <one-line>`. The summary group is missing when the line has no `|`. */
 const MECHANISM_FORM = /^(existing|new)\s*:([^|]*)(?:\|(.*))?$/
