@@ -4,7 +4,7 @@
  * Ids are placeholders (00000000-0000-4000-8000-0000000000NN) and titles are generic.
  */
 import { describe, expect, it } from "vitest"
-import { cardLink, cardToSnapshotBody, type LinkTarget, wikiPageToCard } from "./convert"
+import { cardLink, cardToComparableText, cardToSnapshotBody, type LinkTarget, wikiPageToCard } from "./convert"
 
 function id(n: number): string {
   return `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`
@@ -16,6 +16,7 @@ const CARD_B: LinkTarget = { cardId: id(2), title: "Card B" }
 const UNSYNCED = "（僅在 wiki）"
 const FOOTER_TAIL = "由 wiki 產生，請勿直接編輯。"
 const UNSUPPORTED = "<!-- heptabase: unsupported block -->"
+const IMAGE = "<!-- heptabase: image -->"
 
 type Options = Parameters<typeof wikiPageToCard>[1]
 
@@ -328,9 +329,9 @@ describe("cardToSnapshotBody", () => {
     expect(cardToSnapshotBody(hepta)).toBe(hepta)
   })
 
-  it("keeps escaped brackets in a card link title", () => {
-    const hepta = `[Draft \\[v2\\]](heptabase://card/${id(3)})`
-    expect(cardToSnapshotBody(hepta)).toBe("Draft \\[v2\\]")
+  it("reads a card link whose title has escaped brackets, and unescapes the title", () => {
+    const hepta = `[Draft \\[v2\\]](heptabase://card/${id(3)}) and [Next](heptabase://card/${id(4)})`
+    expect(cardToSnapshotBody(hepta)).toBe("Draft [v2] and Next")
   })
 
   it("strips nested colors and a mention inside a color", () => {
@@ -394,5 +395,118 @@ describe("cardToSnapshotBody", () => {
   it("returns text without hepta markup unchanged", () => {
     const text = "# Title\n\nPlain **text** with [a link](https://example.com) and `code`.\n"
     expect(cardToSnapshotBody(text)).toBe(text)
+  })
+
+  it("unescapes the bracket that Heptabase escapes on read-back", () => {
+    expect(cardToSnapshotBody("# \\[Label] Heading")).toBe("# [Label] Heading")
+  })
+
+  it("unescapes backslash-escaped Markdown punctuation outside code", () => {
+    const hepta = "\\[ \\] \\( \\) \\* \\_ \\# \\| \\\\ \\! \\< \\> \\~"
+    expect(cardToSnapshotBody(hepta)).toBe("[ ] ( ) * _ # | \\ ! < > ~")
+  })
+
+  it("unescapes once: an escaped backslash before a bracket stays a backslash", () => {
+    expect(cardToSnapshotBody("a \\\\\\[b\\\\")).toBe("a \\[b\\")
+  })
+
+  it("leaves a backslash that escapes nothing, and an escaped backtick", () => {
+    expect(cardToSnapshotBody("C:\\path and \\w and \\`not code\\`")).toBe("C:\\path and \\w and \\`not code\\`")
+  })
+
+  it("does not unescape inside code", () => {
+    const hepta = ["Real \\[x] and `\\[x]` and ``\\[y]``.", "", "```md", "\\[z] \\* \\|", "```", ""].join("\n")
+    expect(cardToSnapshotBody(hepta)).toBe(["Real [x] and `\\[x]` and ``\\[y]``.", "", "```md", "\\[z] \\* \\|", "```", ""].join("\n"))
+  })
+
+  it("marks an image of the card", () => {
+    const image = `<image fileId="${id(5)}" sourceObjectId="${id(6)}" sourceObjectType="card" />`
+    expect(cardToSnapshotBody(`Before.\n\n${image}\n\nAfter.`)).toBe(`Before.\n\n${IMAGE}\n\nAfter.`)
+    expect(cardToSnapshotBody(`A ${image} B <IMAGE fileId="${id(7)}"></IMAGE> C`)).toBe(`A ${IMAGE} B ${IMAGE} C`)
+  })
+
+  it("leaves Markdown images and an image tag in code alone", () => {
+    const hepta = ["![pic](https://example.com/a.png)", "", "`<image fileId=\"x\" />`", "", "```html", "<image fileId=\"x\" />", "```"].join("\n")
+    expect(cardToSnapshotBody(hepta)).toBe(hepta)
+  })
+
+  it("takes out the blank line that Heptabase adds after a thematic break and between list items", () => {
+    expect(cardToSnapshotBody("- a\n\n- b\n\n  - c\n\n* d")).toBe("- a\n- b\n  - c\n* d")
+    expect(cardToSnapshotBody("1. d\n\n2) e\n\n10. f")).toBe("1. d\n2) e\n10. f")
+    expect(cardToSnapshotBody("Text.\n\n---\n\nFooter.")).toBe("Text.\n\n---\nFooter.")
+  })
+
+  it("keeps the blank line between a list and a paragraph, and one blank line between paragraphs", () => {
+    expect(cardToSnapshotBody("- a\n\nText.\n\n\n\nMore.")).toBe("- a\n\nText.\n\nMore.")
+  })
+
+  it("keeps blank lines in code", () => {
+    const hepta = "```\n- a\n\n\n- b\n\n---\n\nx\n```"
+    expect(cardToSnapshotBody(hepta)).toBe(hepta)
+  })
+
+  it("makes the card as Heptabase gives it back equal to the card as it was sent", () => {
+    const sent = [
+      "# [Label] Heading",
+      "",
+      `See [\\[Label\\] x](heptabase://card/${id(1)}) and [Other](heptabase://card/${id(2)}).`,
+      "",
+      "- a",
+      "- b",
+      "",
+      "---",
+      `來源：[Source](heptabase://card/${id(3)})`,
+      "由 wiki 產生，請勿直接編輯。",
+    ].join("\n")
+    const readBack = [
+      "# \\[Label] Heading",
+      "",
+      `See [\\[Label\\] x](https://app.heptabase.com/${id(9)}/card/${id(1)}) and [Other](https://app.heptabase.com/${id(9)}/card/${id(2)}).`,
+      "",
+      "- a",
+      "",
+      "- b",
+      "",
+      "---",
+      "",
+      `來源：[Source](https://app.heptabase.com/${id(9)}/card/${id(3)})`,
+      "由 wiki 產生，請勿直接編輯。",
+    ].join("\n")
+    expect(cardToSnapshotBody(readBack)).toBe(cardToSnapshotBody(sent))
+    expect(cardToComparableText(readBack)).toBe(cardToComparableText(sent))
+  })
+})
+
+describe("cardToComparableText", () => {
+  it("writes both forms of a card link the same way, by the card id", () => {
+    const sent = `[Card A](heptabase://card/${id(1)})`
+    const readBack = `[Card A](https://app.heptabase.com/${id(9)}/card/${id(1)})`
+    expect(cardToComparableText(sent)).toBe(cardToComparableText(readBack))
+    expect(cardToComparableText(readBack)).toBe(`[Card A](heptabase://card/${id(1)})`)
+  })
+
+  it("tells a link to another card apart, even with the same title", () => {
+    const one = cardToComparableText(`[Card A](https://app.heptabase.com/${id(9)}/card/${id(1)})`)
+    const other = cardToComparableText(`[Card A](https://app.heptabase.com/${id(9)}/card/${id(2)})`)
+    expect(one).not.toBe(other)
+  })
+
+  it("tells a linked word from a plain one", () => {
+    expect(cardToComparableText(`See [Card A](heptabase://card/${id(1)}).`)).not.toBe(cardToComparableText("See Card A."))
+  })
+
+  it("ignores the case of the id, the space id, and an anchor", () => {
+    const a = cardToComparableText(`[T](https://app.heptabase.com/${id(9)}/card/${id(1).toUpperCase()}#anchor)`)
+    expect(a).toBe(`[T](heptabase://card/${id(1)})`)
+  })
+
+  it("keeps other links, and does not change a link in code", () => {
+    const text = `[Board](https://app.heptabase.com/${id(9)}/whiteboard/${id(4)}) \`https://app.heptabase.com/${id(9)}/card/${id(1)}\``
+    expect(cardToComparableText(text)).toBe(text)
+  })
+
+  it("does the rest like the snapshot: unescapes, strips tags, marks images, takes out the blank lines", () => {
+    const hepta = `\\[a] <hepta-color color="red">b</hepta-color>\n\n- c\n\n- d\n\n<image fileId="${id(5)}" />`
+    expect(cardToComparableText(hepta)).toBe(`[a] b\n\n- c\n- d\n\n${IMAGE}`)
   })
 })

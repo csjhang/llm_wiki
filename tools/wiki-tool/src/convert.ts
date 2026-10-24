@@ -4,8 +4,10 @@
  * wikiPageToCard turns a wiki page into the content of a Heptabase note card:
  * no frontmatter, one H1 title, wikilinks as card links, and the mirror footer.
  * cardToSnapshotBody turns the Hepta Markdown of a card into plain Markdown for a
- * snapshot: mentions, colors, and card links become text, protected regions become
- * a comment. Both are pure, and neither touches fenced code blocks or inline code.
+ * snapshot: mentions, colors, and card links become text, protected regions and images become
+ * a comment. cardToComparableText does the same but keeps a card link, by the card id, so two
+ * texts of a card can be compared. Both also undo what Heptabase changes when it gives a card
+ * back (see convertCard). All are pure, and none touches fenced code blocks or inline code.
  */
 
 /** A Heptabase card a wiki page can link to. */
@@ -31,6 +33,8 @@ const FOOTER_NO_SOURCES = "無"
 const FOOTER_NOTICE = "由 wiki 產生，請勿直接編輯。"
 /** Stands in for a Hepta element the tool cannot represent. */
 const UNSUPPORTED_BLOCK = "<!-- heptabase: unsupported block -->"
+/** Stands in for an image of a card: the file is not part of the text. */
+const IMAGE_MARKER = "<!-- heptabase: image -->"
 
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 
@@ -49,6 +53,15 @@ const CARD_LINK = new RegExp(
     `\\(<?(?:heptabase://card/${UUID}|https://app\\.heptabase\\.com/[^\\s/)]+/card/${UUID})(?:[#?][^\\s)]*)?>?\\)`,
   "gi",
 )
+
+/** An `<image ... />` of a card (or `<image ...></image>`), and a closing tag that has no opening tag. */
+const HEPTA_IMAGE = new RegExp(`<image(?=[\\s/>])${TAG_ATTRIBUTES}>(?:\\s*</image\\s*>)?|</image\\s*>`, "gi")
+
+/** The address of a card as Heptabase writes it back, with the space id and an anchor or query that the sent text never has. */
+const CARD_URL = new RegExp(`https://app\\.heptabase\\.com/[^\\s/)>]+/card/(${UUID})(?:[#?][^\\s)>]*)?`, "gi")
+
+/** A backslash before ASCII punctuation, except the backtick: the backslash is dropped (two backslashes give one). */
+const ESCAPED_PUNCTUATION = /\\([!-/:-@[-_{-~])/g
 
 /** `[title](heptabase://card/<id>)`. Backslashes and brackets in the title are escaped so it cannot end the link text early. */
 export function cardLink(target: LinkTarget): string {
@@ -91,12 +104,68 @@ export function wikiPageToCard(markdown: string, opts: WikiPageToCardOptions): s
   return [title, content, footer].filter((part) => part !== "").join("\n\n")
 }
 
+/** The Hepta Markdown of a card as plain Markdown for a snapshot: a card link is its text. */
 export function cardToSnapshotBody(heptaMarkdown: string): string {
+  return convertCard(heptaMarkdown, "text")
+}
+
+/**
+ * The Hepta Markdown of a card as plain Markdown that can be compared with another text of the same card (the text
+ * that was sent, and the card as it is read back): like the snapshot, but a card link stays a link and is written
+ * as `[text](heptabase://card/<id>)`, so both forms of a link give the same text and a link to another card does not.
+ */
+export function cardToComparableText(heptaMarkdown: string): string {
+  return convertCard(heptaMarkdown, "id")
+}
+
+/**
+ * The one normalizer behind both. Heptabase does not give a card back as it was sent. It writes `[` as `\[`, adds a
+ * blank line after a `---` line and between list items, and writes `heptabase://card/<id>` as
+ * `https://app.heptabase.com/<space>/card/<id>`. This undoes those changes (outside code), so a sent text and its
+ * read-back give the same text; a snapshot gets the same clean text. Mentions and colors lose their tags, an
+ * unsupported block or an image becomes a comment.
+ *
+ * The order matters: a card link is read with its escapes (a title may hold `\[`), and the escapes are
+ * dropped once, after that, so an escaped backslash in front of a bracket keeps its backslash.
+ */
+function convertCard(heptaMarkdown: string, links: "text" | "id"): string {
   const code = maskCode(heptaMarkdown)
   let text = replaceUnsupportedBlocks(code.masked)
+  text = text.replace(HEPTA_IMAGE, IMAGE_MARKER)
   text = text.replace(HEPTA_INLINE_TAG, "")
-  text = text.replace(CARD_LINK, "$1")
-  return code.restore(text)
+  text = links === "text" ? text.replace(CARD_LINK, "$1") : text.replace(CARD_URL, (_match, cardId: string) => `heptabase://card/${cardId.toLowerCase()}`)
+  text = text.replace(ESCAPED_PUNCTUATION, "$1")
+  return code.restore(tightenBlankLines(text))
+}
+
+const BLANK_LINE = /^[ \t]*$/
+const THEMATIC_BREAK = /^ {0,3}-{3,}[ \t]*$/
+const LIST_ITEM = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]/
+
+/**
+ * Takes out the blank line after a `---` line and between two list items, and reduces any other run of blank lines
+ * to one. A code region is one placeholder here, so its blank lines stay.
+ */
+function tightenBlankLines(text: string): string {
+  const lines = text.split("\n")
+  const out: string[] = []
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!BLANK_LINE.test(lines[index])) {
+      out.push(lines[index])
+      continue
+    }
+    let end = index
+    while (end + 1 < lines.length && BLANK_LINE.test(lines[end + 1])) end += 1
+    const before = out[out.length - 1]
+    const after = lines[end + 1]
+    const atEdge = before === undefined || after === undefined
+    const afterBreak = before !== undefined && THEMATIC_BREAK.test(before) && after !== undefined
+    const betweenItems = before !== undefined && after !== undefined && LIST_ITEM.test(before) && LIST_ITEM.test(after)
+    // A run at the start or the end of the text is kept as one blank line.
+    if (!afterBreak && !betweenItems) out.push(atEdge ? lines[index] : "")
+    index = end
+  }
+  return out.join("\n")
 }
 
 /** Removes a leading `---` frontmatter block. */

@@ -558,6 +558,79 @@ describe("hepta record", () => {
       expect((await feedback(project, card)).output.note).toBeNull()
     })
 
+    /** The text as the wiki sent it, and as Heptabase gives it back: `[` escaped, blank lines added, links with the space id. */
+    const SENT_LINKED = [
+      "# [Label] Heading",
+      "",
+      `See [\\[Label\\] x](heptabase://card/${id(22)}) and [Other](heptabase://card/${id(23)}).`,
+      "",
+      "- a",
+      "- b",
+      "",
+      "---",
+      `來源：[Source](heptabase://card/${id(24)})`,
+      "由 wiki 產生，請勿直接編輯。",
+    ].join("\n")
+    const READ_BACK = [
+      "# \\[Label] Heading",
+      "",
+      `See [\\[Label\\] x](https://app.heptabase.com/${id(40)}/card/${id(22)}) and [Other](https://app.heptabase.com/${id(40)}/card/${id(23)}).`,
+      "",
+      "- a",
+      "",
+      "- b",
+      "",
+      "---",
+      "",
+      `來源：[Source](https://app.heptabase.com/${id(40)}/card/${id(24)})`,
+      "由 wiki 產生，請勿直接編輯。",
+    ].join("\n")
+    const noteBody = (project: string, note: unknown): string => parseFrontmatter(readFileSync(join(project, note as string), "utf8")).body
+
+    it("takes the card as Heptabase gives it back for the text that was sent", async () => {
+      const project = await sentProject(SENT_LINKED)
+      const result = await feedback(project, READ_BACK)
+      expect(result.output).toEqual({ ok: true, event: "feedback", page: PAGE, note: null, reason: "same as sent" })
+      expect(existsSync(join(project, "raw"))).toBe(false)
+    })
+
+    it("shows a line the user added to a card that Heptabase changed, and nothing else", async () => {
+      const project = await sentProject(SENT_LINKED)
+      const added = READ_BACK.replace("- b\n", "- b\n\n- [Idea] the user wrote this\n")
+      const result = await feedback(project, added)
+      expect(result.output.note).toBe(NOTE)
+      expect(noteBody(project, result.output.note)).toBe(
+        `User edits in Heptabase to the mirror card of ${PAGE}.\n\n## Added\n\n- [Idea] the user wrote this\n`,
+      )
+    })
+
+    it("shows a changed line as it is written, without the escapes of Heptabase", async () => {
+      const project = await sentProject(SENT_LINKED)
+      const result = await feedback(project, READ_BACK.replace("# \\[Label] Heading", "# \\[Label] Other heading"))
+      expect(noteBody(project, result.output.note)).toBe(
+        `User edits in Heptabase to the mirror card of ${PAGE}.\n\n## Added\n\n# [Label] Other heading\n\n## Removed\n\n# [Label] Heading\n`,
+      )
+    })
+
+    it("sees a link that points to another card, and a word that the user linked", async () => {
+      const project = await sentProject(SENT_LINKED)
+      const other = READ_BACK.replace(`/card/${id(23)}`, `/card/${id(25)}`)
+      const body = noteBody(project, (await feedback(project, other)).output.note)
+      expect(body).toContain(`## Added\n\nSee [[Label] x](heptabase://card/${id(22)}) and [Other](heptabase://card/${id(25)}).\n`)
+      expect(body).toContain(`## Removed\n\nSee [[Label] x](heptabase://card/${id(22)}) and [Other](heptabase://card/${id(23)}).\n`)
+
+      const linked = READ_BACK.replace("- a\n", `- [a](https://app.heptabase.com/${id(40)}/card/${id(26)})\n`)
+      expect(noteBody(project, (await feedback(project, linked)).output.note)).toContain(`## Added\n\n- [a](heptabase://card/${id(26)})\n`)
+    })
+
+    it("marks an image that the user added", async () => {
+      const project = await sentProject(SENT_LINKED)
+      const image = `<image fileId="${id(50)}" sourceObjectId="${id(51)}" sourceObjectType="card" />`
+      const result = await feedback(project, READ_BACK.replace("- a\n", `${image}\n\n- a\n`))
+      expect(noteBody(project, result.output.note)).toContain("## Added\n\n<!-- heptabase: image -->\n")
+      expect(noteBody(project, result.output.note)).not.toContain("## Removed")
+    })
+
     it("uses the whole card text when there is no sent text, or no difference of lines to show", async () => {
       const none = await sentProject(null)
       const whole = await feedback(none, "# Event Driven\n\nText of the user.")

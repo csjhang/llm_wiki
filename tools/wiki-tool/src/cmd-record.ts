@@ -30,8 +30,10 @@
  * `.llm-wiki/hepta/sent/<card id>.md`. Nothing is copied when the page has no outbox file.
  *
  * A `feedback` event reads the card the skill saved (`--content`, the pages of the `read_object` result) and compares
- * it with the sent text, both as plain Markdown. When they are the same (white space aside), the card is as the wiki
- * wrote it: no note is written. Else the lines the user added and removed are saved as a note under
+ * it with the sent text, both as plain Markdown after the same normalizer (`cardToComparableText`), which undoes what
+ * Heptabase changes when it gives a card back: `[` written as `\[`, a blank line after a `---` line and between list
+ * items, and a card link written with the space id (links are compared by the card id). When they are the same (white
+ * space aside), the card is as the wiki wrote it: no note is written. Else the lines the user added and removed are saved as a note under
  * `raw/sources/heptabase/`, so the next ingest reads the user's change and not the text of the wiki. Without a sent
  * text the note holds the whole card. Either way the event records the time of that edit (`cardUpdatedAt`, the
  * `updatedAt` of the card) in the map, so plan-down reports one edit once.
@@ -46,7 +48,7 @@ import { UUID_PATTERN } from "@/lib/wiki-config/types"
 import { isRecord } from "@/lib/wiki-config/yaml-util"
 import { parseArgs, parseNowOption } from "./args"
 import { type CardMap, contentHash, loadCardMap, type PageEntry, saveCardMap } from "./card-map"
-import { cardToSnapshotBody } from "./convert"
+import { cardToComparableText } from "./convert"
 import { outboxFile, sentFile } from "./hepta-files"
 import { type CommandResult, isDirectory, resolveInProject, writeFileAtomic } from "./io"
 import {
@@ -424,9 +426,10 @@ function recordFeedback(context: RecordContext): CommandResult {
   const cardText = readContentFiles(context.content, cardId === "" ? null : cardId, problems)
   if (problems.length > 0 || !existing || cardUpdatedAt === undefined || cardText === null) return fail(problems)
 
-  const card = cardToSnapshotBody(cardText)
+  // Heptabase does not give a card back as it was sent: both texts go through the same normalizer before they are compared.
+  const card = cardToComparableText(cardText)
   const sentText = readSent(context.project, existing.card_id)
-  const sent = sentText === null ? null : cardToSnapshotBody(sentText)
+  const sent = sentText === null ? null : cardToComparableText(sentText)
 
   let note: string | null = null
   let reason: string | undefined

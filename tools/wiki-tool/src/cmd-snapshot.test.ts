@@ -177,6 +177,13 @@ describe("hepta snapshot", () => {
     expect(parseFrontmatter(read(project, rawPath())).body).toBe("# Plain\n\n1\tone\n2\ttwo\n")
   })
 
+  it("writes the card as the user wrote it: no escapes of Heptabase, no image tag", async () => {
+    const project = makeProject()
+    const image = `<image fileId="${id(50)}" sourceObjectId="${id(51)}" sourceObjectType="card" />`
+    await snapshot(project, { text: `# \\[x] y\n\n- a\n\n- b\n\n${image}\n` })
+    expect(parseFrontmatter(read(project, rawPath())).body).toBe("# [x] y\n\n- a\n- b\n\n<!-- heptabase: image -->\n")
+  })
+
   it("writes an empty body for a card without lines", async () => {
     const project = makeProject()
     const { exitCode } = await snapshot(project, { text: `card "Empty" [${CARD}] 0 lines` })
