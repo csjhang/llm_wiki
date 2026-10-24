@@ -624,16 +624,44 @@ describe("checkDuplicateSource", () => {
     expect(result?.review?.type).toBe("duplicate-source")
   })
 
-  it("adds no review when the new text is shorter or less than 20% longer", async () => {
+  it("adds no review when the new text is shorter", async () => {
     await seed("raw/sources/a.md", LONG_BASE)
-    const slightlyLonger = `${LONG_BASE} ${LONG_BASE.slice(0, 600)}`
     const shorter = LONG_BASE.slice(0, 5000)
-    const first = await checkDuplicateSource(project, `${project}/raw/sources/b.md`, slightlyLonger)
-    const second = await checkDuplicateSource(project, `${project}/raw/sources/c.md`, shorter)
-    expect(first?.hit.reason).toBe("text")
-    expect(first?.review).toBeNull()
-    expect(second?.hit.reason).toBe("text")
-    expect(second?.review).toBeNull()
+    const result = await checkDuplicateSource(project, `${project}/raw/sources/c.md`, shorter)
+    expect(result?.hit.reason).toBe("text")
+    expect(result?.review).toBeNull()
+  })
+
+  it("adds no review when a text within the sample is less than 20% longer", async () => {
+    await seed("raw/sources/a.md", MEDIUM_BASE)
+    const slightlyLonger = `${MEDIUM_BASE} ${MEDIUM_BASE.slice(0, 200)}`
+    expect(slightlyLonger.length).toBeLessThan(4000)
+    const result = await checkDuplicateSource(project, `${project}/raw/sources/b.md`, slightlyLonger)
+    expect(result?.hit.reason).toBe("text")
+    expect(result?.review).toBeNull()
+  })
+
+  it("adds a review for a longer copy of a text past the sample, however little it adds", async () => {
+    // The 4,000-character sample sees none of the new text, so the 20% rule cannot be trusted here.
+    const excerpt = Array.from({ length: 700 }, (_, i) => `word${i}x`).join(" ").slice(0, 5000)
+    const fifteenPercent = Array.from({ length: 200 }, (_, i) => `extra${i}y`).join(" ").slice(0, 750)
+    await seed("raw/sources/a.md", excerpt)
+
+    const result = await checkDuplicateSource(project, `${project}/raw/sources/b.md`, `${excerpt} ${fifteenPercent}`)
+
+    expect(excerpt).toHaveLength(5000)
+    expect(result?.hit.reason).toBe("text")
+    expect(result?.review?.type).toBe("duplicate-source")
+    expect(result?.review?.description).toContain("NEWER: raw/sources/b.md")
+    expect(result?.review?.description).toContain("15% more text")
+  })
+
+  it("adds a review when the original is past the sample and the copy adds one character", async () => {
+    await seed("raw/sources/a.md", LONG_BASE)
+
+    const result = await checkDuplicateSource(project, `${project}/raw/sources/b.md`, `${LONG_BASE} more`)
+
+    expect(result?.review?.type).toBe("duplicate-source")
   })
 
   it("drops a stale fingerprint instead of reporting a hit", async () => {

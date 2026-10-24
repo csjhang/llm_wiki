@@ -152,7 +152,7 @@ function invalidDomainPath(keyword: string, path: string): string {
 }
 
 /** The lenses a new domain may use: the built-in ones and the stems of `lenses/*.md`, as `domains.yaml` allows. */
-function knownLenses(ctx: MechanismContext): string[] {
+export function knownLenses(ctx: MechanismContext): string[] {
   return [...new Set([...KNOWN_LENSES, ...Object.keys(ctx.lenses)])]
 }
 
@@ -163,6 +163,26 @@ export const SLUG_WORD = "[a-z0-9\\p{Script=Han}\\p{Script=Hiragana}\\p{Script=K
 
 /** Kebab-case, where a word may also be Chinese, Japanese, or Korean text. */
 export const SLUG_PATTERN = new RegExp(`^${SLUG_WORD}(?:-${SLUG_WORD})*$`, "u")
+
+/** A slug becomes a file name, so it stays well inside the limits of file systems. */
+export const SLUG_MAX_LENGTH = 80
+
+/** File names that Windows reserves, with or without an extension. A slug has no dot, so it is the whole name. */
+const WINDOWS_RESERVED_NAMES: ReadonlySet<string> = new Set([
+  "con",
+  "prn",
+  "aux",
+  "nul",
+  ...[1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((n) => [`com${n}`, `lpt${n}`]),
+])
+
+/** Why `slug` cannot be a file name stem, or null when it can. */
+export function slugProblem(slug: string): "pattern" | "too-long" | "reserved" | null {
+  if (!SLUG_PATTERN.test(slug)) return "pattern"
+  if (slug.length > SLUG_MAX_LENGTH) return "too-long"
+  if (WINDOWS_RESERVED_NAMES.has(slug)) return "reserved"
+  return null
+}
 
 /** `existing:<slug> | <one-line>`. The summary group is missing when the line has no `|`. */
 const MECHANISM_FORM = /^(existing|new)\s*:([^|]*)(?:\|(.*))?$/
@@ -179,8 +199,15 @@ function readMechanismLine(
   const [, kind, slugText, summaryText] = match
   const slug = slugText.trim()
   const summary = (summaryText ?? "").trim()
-  if (!SLUG_PATTERN.test(slug)) {
+  const slugIssue = slugProblem(slug)
+  if (slugIssue === "pattern") {
     return { problem: `MECHANISM slug "${shorten(slug)}" is not kebab-case (or Chinese, Japanese, or Korean text): "${shorten(line)}".` }
+  }
+  if (slugIssue === "too-long") {
+    return { problem: `MECHANISM slug "${shorten(slug)}" is longer than ${SLUG_MAX_LENGTH} characters: "${shorten(line)}".` }
+  }
+  if (slugIssue === "reserved") {
+    return { problem: `MECHANISM slug "${slug}" is a reserved file name on Windows: "${shorten(line)}".` }
   }
   if (summary === "") {
     return { problem: `MECHANISM line has no one-line summary after "|": "${shorten(line)}".` }

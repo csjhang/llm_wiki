@@ -229,6 +229,23 @@ describe("ingest and duplicate sources", () => {
     expect(reviews[0].description.split("\n")).toContain("EXISTING: raw/sources/a.md")
   })
 
+  it("a copy of a 5,000-character excerpt with 15% more text still gets a duplicate-source review", async () => {
+    await mechanismWiki()
+    // The fingerprint sees the first 4,000 characters; the new text lies beyond them.
+    const excerpt = Array.from({ length: 700 }, (_, i) => `word${i}x`).join(" ").slice(0, 5000)
+    const fifteenPercent = Array.from({ length: 200 }, (_, i) => `extra${i}y`).join(" ").slice(0, 750)
+    await ingest("raw/sources/a.md", excerpt)
+    mockStreamChat.mockClear()
+
+    const written = await ingest("raw/sources/web/b.md", `${excerpt} ${fifteenPercent}`)
+
+    expect(mockStreamChat).not.toHaveBeenCalled()
+    expect(written).toEqual([summaryOf("a.md")])
+    const reviews = useReviewStore.getState().items.filter((item) => item.type === "duplicate-source")
+    expect(reviews).toHaveLength(1)
+    expect(reviews[0].description.split("\n")).toContain("NEWER: raw/sources/web/b.md")
+  })
+
   it("a second hit from the same entry point does not list it twice", async () => {
     await mechanismWiki()
     await ingest("raw/sources/a.md", ARTICLE)

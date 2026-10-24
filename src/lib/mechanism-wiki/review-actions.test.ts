@@ -696,6 +696,20 @@ describe("mech:propose-mechanism", () => {
     expect(names.filter((name) => name.endsWith("-2.md"))).toHaveLength(1)
   })
 
+  it("does not name a proposal after a file name that Windows reserves", async () => {
+    await setUpReading()
+    await setUpWork()
+    const { ctx } = makeCtx(work)
+
+    await handleMechanismReviewAction(mechanismReview({ title: "CON" }), "mech:propose-mechanism", ctx)
+    await handleMechanismReviewAction(mechanismReview({ title: "Lpt1" }), "mech:propose-mechanism", ctx)
+
+    const { listDirectory } = await import("@/commands/fs")
+    const names = (await listDirectory(`${reading}/raw/sources/proposals`)).map((node) => node.name)
+    expect(names).toHaveLength(2)
+    for (const name of names) expect(name).toMatch(/^proposal-[0-9a-f]{8}\.md$/)
+  })
+
   it("cuts a long title to 80 characters and never makes a path from a title", async () => {
     await setUpReading()
     await setUpWork()

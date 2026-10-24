@@ -694,6 +694,28 @@ describe("ingest prompts and the mechanism context", () => {
     }
   })
 
+  it("turns a new-domain REVIEW block of the model into a new-domain review with the approve action", async () => {
+    llm.analysis = "## Decisions\nDOMAIN: ai/architecture\n"
+    llm.generation = [
+      CONCEPT_WITHOUT_DOMAIN,
+      [
+        "---REVIEW: new-domain | Cognition---",
+        "The source fits a domain that is not listed.",
+        "PROPOSAL: cognition/attention | ai | How attention works",
+        "OPTIONS: Approve | Skip",
+        "---END REVIEW---",
+      ].join("\n"),
+      "---REVIEW: new-domain | Broken---\nNo proposal line here.\n---END REVIEW---",
+    ].join("\n\n")
+    const project = await mechanismProject()
+    await ingest(project)
+
+    expect(reviewSummary()).toEqual([["new-domain", "New domain: cognition/attention"]])
+    const [review] = useReviewStore.getState().items
+    expect(review.options.map((option) => option.action)).toEqual(["mech:approve-domain", "Skip"])
+    expect(review.description).toContain("PROPOSAL: cognition/attention | ai | How attention works")
+  })
+
   it("applies the rules to a page that the truncation repair writes", async () => {
     llm.analysis = "## Decisions\nDOMAIN: ai/architecture\n"
     llm.generation = CONCEPT_WITHOUT_DOMAIN.replace("\n---END FILE---", "")

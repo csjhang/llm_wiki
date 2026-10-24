@@ -534,6 +534,45 @@ describe("parseAnalysisDecisions", () => {
       expect(result.problems).toHaveLength(7)
     })
 
+    it("rejects a slug longer than 80 characters", () => {
+      const ok = `${"a".repeat(39)}-${"b".repeat(40)}`
+      const long = `${ok}c`
+      const cjk = "事".repeat(81)
+      expect(ok).toHaveLength(80)
+      const result = mechanismResult(
+        `MECHANISM: new:${ok} | Fits`,
+        `MECHANISM: new:${long} | Too long`,
+        `MECHANISM: new:${cjk} | Too long`,
+      )
+
+      expect(result.mechanisms.map((m) => m.slug)).toEqual([ok])
+      expect(result.problems).toHaveLength(2)
+      expect(result.problems[0]).toContain("80 characters")
+    })
+
+    it("rejects the file names that Windows reserves", () => {
+      const reserved = ["con", "prn", "aux", "nul", ...[1, 2, 3, 4, 5, 6, 7, 8, 9].flatMap((n) => [`com${n}`, `lpt${n}`])]
+      const result = mechanismResult(...reserved.map((slug) => `MECHANISM: new:${slug} | Reserved`))
+
+      expect(result.mechanisms).toEqual([])
+      expect(result.problems).toHaveLength(reserved.length)
+      expect(result.problems[0]).toContain("reserved")
+    })
+
+    it("accepts a slug that only starts with, or ends in, a reserved name", () => {
+      const result = mechanismResult(
+        "MECHANISM: new:console | Ok",
+        "MECHANISM: new:con-trol | Ok",
+        "MECHANISM: new:com10 | Ok",
+        "MECHANISM: new:com0 | Ok",
+        "MECHANISM: new:lpt0 | Ok",
+        "MECHANISM: new:null | Ok",
+      )
+
+      expect(result.mechanisms.map((m) => m.slug)).toEqual(["console", "con-trol", "com10", "com0", "lpt0", "null"])
+      expect(result.problems).toEqual([])
+    })
+
     it("accepts a CJK slug", () => {
       const result = mechanismResult(
         "MECHANISM: new:事件驅動計算 | 只有事件到達時才工作",

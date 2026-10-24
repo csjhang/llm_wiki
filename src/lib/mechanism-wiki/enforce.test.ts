@@ -723,4 +723,96 @@ describe("enforceMechanismRules", () => {
       expect(enforce(generation).text).toBe(generation)
     })
   })
+  // --- new-domain review blocks of the model -----------------------------------------------
+
+  describe("new-domain review blocks", () => {
+    const concept = block("wiki/concepts/a.md", page("concept", ["domain: ai/architecture"]))
+
+    function newDomainBlock(body: string, title = "Cognition"): string {
+      return `---REVIEW: new-domain | ${title}---\n${body}\n---END REVIEW---`
+    }
+
+    it("converts a new-domain review block with a proposal line", () => {
+      const proposal = newDomainBlock(
+        [
+          "The source belongs to a domain that is not listed yet.",
+          "PROPOSAL: cognition/attention | ai | How attention works",
+          "OPTIONS: Approve | Skip",
+        ].join("\n"),
+      )
+      const result = enforce(`${concept}\n${proposal}\n`)
+
+      expect(result.text).toBe(concept)
+      expect(result.reviews).toEqual([
+        proposedDomainReview(
+          { ...emptyDecisions(null), proposedDomain: { path: "cognition/attention", lens: "ai", description: "How attention works" } },
+          SOURCE_PATH,
+        ),
+      ])
+      expect(result.reviews[0].type).toBe("new-domain")
+      expect(result.reviews[0].options).toEqual([
+        { label: "Approve", action: "mech:approve-domain" },
+        { label: "Skip", action: "Skip" },
+      ])
+      expect(result.reviews[0].description).toContain("PROPOSAL: cognition/attention | ai | How attention works")
+      expect(result.notes).toContain('Moved the new-domain review "Cognition" to the review queue')
+    })
+
+    it("keeps a description that holds a bar", () => {
+      const result = enforce(newDomainBlock("PROPOSAL: cognition/attention | ai | Focus | and selection"))
+
+      expect(result.reviews[0].description).toContain("PROPOSAL: cognition/attention | ai | Focus | and selection")
+    })
+
+    it("accepts a lens that has a lens file in the wiki", () => {
+      const result = enforce(newDomainBlock("PROPOSAL: sales/pitch | business | How a pitch works"))
+
+      expect(result.reviews).toHaveLength(1)
+    })
+
+    it("drops a new-domain review block without a usable proposal and says so", () => {
+      const bodies: Array<[string, string]> = [
+        ["no proposal line", "Please add the domain cognition/attention."],
+        ["missing description", "PROPOSAL: cognition/attention | ai"],
+        ["empty description", "PROPOSAL: cognition/attention | ai |   "],
+        ["invalid name", "PROPOSAL: Cognition Attention | ai | How attention works"],
+        ["unknown lens", "PROPOSAL: cognition/attention | psychology | How attention works"],
+      ]
+      for (const [reason, body] of bodies) {
+        const result = enforce(`${concept}\n${newDomainBlock(body)}\n`)
+
+        expect(result.text, reason).toBe(concept)
+        expect(result.reviews, reason).toEqual([])
+        expect(result.notes.some((note) => note.startsWith('Dropped the new-domain review "Cognition"')), reason).toBe(true)
+      }
+    })
+
+    it("drops a new-domain review block for a domain that is listed or already proposed", () => {
+      const listed = enforce(newDomainBlock("PROPOSAL: ai/architecture | ai | Neural networks"))
+      expect(listed.reviews).toEqual([])
+      expect(listed.notes.some((note) => note.includes("already listed"))).toBe(true)
+
+      const decisions = decide({
+        domain: null,
+        proposedDomain: { path: "cognition/attention", lens: "ai", description: "How attention works" },
+      })
+      const proposed = enforce(newDomainBlock("PROPOSAL: cognition/attention | ai | How attention works"), { decisions })
+      expect(proposed.reviews).toEqual([])
+      expect(proposed.notes.some((note) => note.includes("already proposed"))).toBe(true)
+    })
+
+    it("does not queue the same domain twice from two blocks", () => {
+      const body = "PROPOSAL: cognition/attention | ai | How attention works"
+      const result = enforce([newDomainBlock(body), newDomainBlock(body, "Again")].join("\n"))
+
+      expect(result.reviews).toHaveLength(1)
+    })
+
+    it("leaves other review blocks to the upstream parser", () => {
+      const other = "---REVIEW: suggestion | A gap---\nA gap.\nOPTIONS: Create Page | Skip\n---END REVIEW---"
+      const result = enforce(`${other}\n${newDomainBlock("PROPOSAL: cognition/attention | ai | How attention works")}\n`)
+
+      expect(result.text).toBe(`${other}\n`)
+    })
+  })
 })

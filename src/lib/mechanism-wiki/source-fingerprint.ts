@@ -49,7 +49,10 @@ const BODY_URL_MIN_SCORE = 0.5
 const SAMPLE_CHARS = 4_000
 /** Lines at the top of a source that are searched for a URL when the frontmatter has none. */
 const URL_SCAN_LINES = 20
-/** A newer copy is worth a review when it has at least 6/5 of the characters of the older one. */
+/**
+ * A newer copy is worth a review when it has at least 6/5 of the characters of the older one. When
+ * either text is longer than the sample, the sample cannot tell how much was added, so any longer copy is.
+ */
 const LONGER_NUMERATOR = 6
 const LONGER_DENOMINATOR = 5
 
@@ -93,7 +96,10 @@ export interface DuplicateSkip {
    * earlier and recorded against that page.
    */
   original: Fingerprint
-  /** Set when the new copy has at least 20% more text than the original. */
+  /**
+   * Set when the new copy has more text than the original: at least 20% more, or any more when either text
+   * is longer than the 4,000-character sample.
+   */
   review: NewReview | null
 }
 
@@ -520,8 +526,10 @@ export async function checkDuplicateSource(
 }
 
 /**
- * Review item for a copy with at least 20% more text than the original. Its description ends with
- * the two raw source paths on lines of their own, which `mech:replace-source` reads.
+ * Review item for a copy with more text than the original: at least 20% more, or any more when either
+ * text is longer than the sample (the comparison saw only the first 4,000 characters, so the rest of a
+ * longer copy would be dropped unseen). Its description ends with the two raw source paths on lines
+ * of their own, which `mech:replace-source` reads.
  */
 function duplicateReview(
   pp: string,
@@ -532,7 +540,9 @@ function duplicateReview(
   summaryPath: string,
   newLength: number,
 ): NewReview | null {
-  if (newLength <= original.length || newLength * LONGER_DENOMINATOR < original.length * LONGER_NUMERATOR) return null
+  if (newLength <= original.length) return null
+  const beyondSample = Math.max(newLength, original.length) > SAMPLE_CHARS
+  if (!beyondSample && newLength * LONGER_DENOMINATOR < original.length * LONGER_NUMERATOR) return null
 
   const newName = sourceIdentityForPath(pp, relativePath)
   const oldName = sourceIdentityForPath(pp, original.sourcePath)

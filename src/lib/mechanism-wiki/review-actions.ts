@@ -24,7 +24,7 @@ import { MECHANISM_SECTIONS, removeSection } from "@/lib/wiki-config/section-hea
 import { hasOwn } from "@/lib/wiki-config/yaml-util"
 import type { ReviewItem } from "@/stores/review-store"
 import { listMarkdownFiles, loadMechanismContext } from "./context"
-import { SLUG_PATTERN, SLUG_WORD } from "./decisions"
+import { SLUG_MAX_LENGTH, SLUG_WORD, slugProblem } from "./decisions"
 
 /** The option actions of the mechanism review items start with this. */
 export const MECHANISM_ACTION_PREFIX = "mech:"
@@ -235,7 +235,6 @@ function yamlScalar(value: string): string {
 
 const PROPOSALS_DIR = "raw/sources/proposals"
 const INCOMPLETE_PREFIX = /^\s*\(incomplete\)\s*/i
-const SLUG_MAX_LENGTH = 80
 const SLUG_WORDS = new RegExp(SLUG_WORD, "gu")
 /** How many numbered copies of one proposal name are tried before giving up. */
 const MAX_COPIES = 1000
@@ -377,7 +376,7 @@ function proposalSlug(title: string): string {
     slug += character
   }
   slug = slug.replace(/-+$/, "")
-  return SLUG_PATTERN.test(slug) ? slug : `proposal-${shortHash(title)}`
+  return slugProblem(slug) === null ? slug : `proposal-${shortHash(title)}`
 }
 
 /** FNV-1a, 32 bits, as 8 hex digits. */

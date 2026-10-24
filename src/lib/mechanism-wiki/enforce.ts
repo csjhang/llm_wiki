@@ -11,6 +11,8 @@
  *    hypothesis pages, which carry `from_domain` and `to_domain` instead.
  * 3. A wiki that cannot write mechanism pages gets no mechanism page. Each page becomes a
  *    `new-mechanism` review item, and so does each `new-mechanism` REVIEW block of the model.
+ *    A `new-domain` REVIEW block of the model becomes a `new-domain` review item when its body
+ *    holds a usable `PROPOSAL:` line, and is dropped with a note otherwise.
  * 4. A domain that the analysis proposes becomes a `new-domain` review item. That review comes
  *    from `proposedDomainReview`, which the caller calls once per ingest, not once per pass.
  * 5. A page whose path exists already with another domain gets a suffixed path (spec 5.5), so the same
@@ -31,9 +33,11 @@ import type { ParsedFileBlock } from "@/lib/ingest"
 import { sanitizeIngestedFileContent } from "@/lib/ingest-sanitize"
 import { normalizePath } from "@/lib/path-utils"
 import type { ReviewItem } from "@/stores/review-store"
+import { DOMAIN_NAME_PATTERN } from "@/lib/wiki-config/domains"
 import { hasOwn } from "@/lib/wiki-config/yaml-util"
 import { canWriteMechanismPages, lensForDomain } from "./context"
 import type { MechanismContext } from "./context"
+import { knownLenses } from "./decisions"
 import type { AnalysisDecisions } from "./types"
 
 type NewReview = Omit<ReviewItem, "id" | "resolved" | "createdAt">
@@ -142,6 +146,8 @@ class Rules {
   /** The domain that pages without one get. */
   private readonly domain: string | null
   private readonly lenses: string[]
+  /** Domains that a `new-domain` review already asks for: the proposal of the analysis, then each block taken. */
+  private readonly proposedDomains: Set<string>
   /** Existing pages by lower-case path: file systems differ in case, a wiki must not depend on it. */
   private readonly existing: ReadonlyMap<string, string | null>
 
@@ -154,6 +160,7 @@ class Rules {
     this.canWrite = canWriteMechanismPages(ctx)
     this.domain = decisions.domain ?? decisions.proposedDomain?.path ?? null
     this.lenses = defaultLenses(ctx, decisions)
+    this.proposedDomains = new Set(decisions.proposedDomain === null ? [] : [decisions.proposedDomain.path])
     this.existing = new Map([...existingPages].map(([path, domain]) => [normalizePath(path).toLowerCase(), domain]))
   }
 
@@ -270,7 +277,7 @@ class Rules {
   }
 
   /**
-   * Rule 3, for REVIEW blocks. Takes the `new-mechanism` REVIEW blocks out of
+   * Rule 3, for REVIEW blocks. Takes the `new-mechanism` and `new-domain` REVIEW blocks out of
    * text between FILE blocks and returns the other lines. The upstream parser
    * would read an unknown type as `confirm` and lose the action.
    */
@@ -281,8 +288,10 @@ class Rules {
     let from = 0
     let changed = false
     for (const match of text.matchAll(new RegExp(REVIEW_BLOCK_REGEX.source, REVIEW_BLOCK_REGEX.flags))) {
-      if (match[1].trim().toLowerCase() !== "new-mechanism") continue
-      this.proposeMechanismFromReview(match[2].trim(), match[3].trim())
+      const type = match[1].trim().toLowerCase()
+      if (type !== "new-mechanism" && type !== "new-domain") continue
+      if (type === "new-mechanism") this.proposeMechanismFromReview(match[2].trim(), match[3].trim())
+      else this.proposeDomainFromReview(match[2].trim(), match[3].trim())
       // Take the line break after the block, or the one before it when the block ends the text.
       let start = match.index
       let end = start + match[0].length
@@ -296,6 +305,35 @@ class Rules {
     kept += text.slice(from)
     if (kept.endsWith("\n") && !text.endsWith("\n")) kept = kept.slice(0, -1)
     return kept === "" ? [] : kept.split("\n")
+  }
+
+  /**
+   * A `new-domain` REVIEW block of the model. The app asks for the approval of a domain with a
+   * `PROPOSAL: <path> | <lens> | <description>` line, so the block is kept only when it has a
+   * usable one. A block for a domain that is listed or already asked for is dropped as well.
+   */
+  private proposeDomainFromReview(title: string, body: string): void {
+    const drop = (reason: string): void => {
+      this.notes.push(`Dropped the new-domain review "${title}": ${reason}`)
+    }
+    const line = /^PROPOSAL:[ \t]*(.*)$/m.exec(body)
+    const parts = line === null ? [] : line[1].split("|")
+    const path = (parts[0] ?? "").trim()
+    const lens = (parts[1] ?? "").trim()
+    const description = oneLine(parts.slice(2).join("|"))
+    if (parts.length < 3 || description === "") return drop('it has no "PROPOSAL: <path> | <lens> | <description>" line')
+    if (!DOMAIN_NAME_PATTERN.test(path)) return drop(`"${path}" is not a valid domain path`)
+    if (!knownLenses(this.ctx).includes(lens)) return drop(`"${lens}" is not a known lens`)
+    if (hasOwn(this.ctx.domains.domains, path)) return drop(`"${path}" is already listed in domains.yaml`)
+    if (this.proposedDomains.has(path)) return drop(`"${path}" is already proposed`)
+
+    this.proposedDomains.add(path)
+    const review = proposedDomainReview(
+      { domain: null, proposedDomain: { path, lens, description }, mechanisms: [], problems: [] },
+      this.sourcePath,
+    )
+    if (review !== null) this.reviews.push(review)
+    this.notes.push(`Moved the new-domain review "${title}" to the review queue`)
   }
 
   private proposeMechanismFromReview(title: string, body: string): void {
