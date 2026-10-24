@@ -196,13 +196,13 @@ async function readWikiFile(path: string): Promise<WikiFile> {
   return { exists: true, text: await readOptional(path) }
 }
 
-interface MarkdownFile {
+export interface MarkdownFile {
   stem: string
   path: string
 }
 
-/** Direct `.md` children of a folder, sorted by name. A missing folder is empty. */
-async function listMarkdownFiles(dir: string): Promise<MarkdownFile[]> {
+/** Direct `.md` children of a folder, sorted by name. A missing folder is empty. Exported for the index code. */
+export async function listMarkdownFiles(dir: string): Promise<MarkdownFile[]> {
   let nodes: FileNode[]
   try {
     nodes = await listDirectory(dir, { maxDepth: 1 })

@@ -1,13 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from "vitest"
-
-vi.mock("@/commands/fs", () => ({ listDirectory: vi.fn() }))
-
-import { listDirectory } from "@/commands/fs"
+import { describe, expect, it } from "vitest"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
-import type { FileNode } from "@/types/wiki"
 import type { LensDoc, MechanismContext } from "./context"
-import { listMechanismSlugsStub, parseAnalysisDecisions } from "./decisions"
+import { parseAnalysisDecisions } from "./decisions"
 
 const DOMAINS: DomainsConfig = {
   version: 1,
@@ -596,56 +591,5 @@ describe("parseAnalysisDecisions", () => {
       expect(result.problems.length).toBeGreaterThanOrEqual(2)
       expect(result.problems.join("\n")).toContain("Domain: ai/architecture")
     })
-  })
-})
-
-describe("listMechanismSlugsStub", () => {
-  const mockList = vi.mocked(listDirectory)
-
-  beforeEach(() => {
-    mockList.mockReset()
-  })
-
-  function file(name: string, isDir = false): FileNode {
-    return { name, path: `/lib/wiki/mechanisms/${name}`, is_dir: isDir, children: [] }
-  }
-
-  it("returns the stems of the markdown files in wiki/mechanisms of the library", async () => {
-    mockList.mockResolvedValue([
-      file("event-driven-computing.md"),
-      file("事件驅動.md"),
-      file("notes.txt"),
-      file("archive", true),
-      file("old.md", true),
-      file(".md"),
-    ])
-
-    const slugs = await listMechanismSlugsStub("/lib")
-
-    expect([...slugs].sort()).toEqual(["event-driven-computing", "事件驅動"])
-    expect(mockList).toHaveBeenCalledWith("/lib/wiki/mechanisms", { maxDepth: 1 })
-  })
-
-  it("does not double the slash of a library path that ends with one", async () => {
-    mockList.mockResolvedValue([])
-
-    await listMechanismSlugsStub("/lib/")
-
-    expect(mockList).toHaveBeenCalledWith("/lib/wiki/mechanisms", { maxDepth: 1 })
-  })
-
-  it("returns an empty set without a library path", async () => {
-    const slugs = await listMechanismSlugsStub(null)
-
-    expect(slugs.size).toBe(0)
-    expect(mockList).not.toHaveBeenCalled()
-  })
-
-  it("returns an empty set when the folder cannot be listed", async () => {
-    mockList.mockRejectedValue(new Error("no such folder"))
-
-    const slugs = await listMechanismSlugsStub("/lib")
-
-    expect(slugs.size).toBe(0)
   })
 })

@@ -1,20 +1,25 @@
-import { describe, expect, it } from "vitest"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import { MECHANISM_TEMPLATE_FILES } from "@/lib/mechanism-template"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
 import { MECHANISM_SECTIONS } from "@/lib/wiki-config/section-headings"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
 import { extractLensPromptText } from "./context"
 import type { LensDoc, MechanismContext } from "./context"
+import { buildScopedIndexText } from "./domain-index"
 import {
   appendPromptSection,
   buildAnalysisAddendum,
   buildGenerationAddendum,
   domainHintFromSource,
   prepareMechanismPrompts,
-  scopedIndexText,
 } from "./prompts"
 import { emptyDecisions } from "./types"
 import type { AnalysisDecisions } from "./types"
+
+// The scoped index reads the wiki; the prompts only use its text.
+vi.mock("./domain-index", () => ({ buildScopedIndexText: vi.fn() }))
+
+const mockScopedIndex = vi.mocked(buildScopedIndexText)
 
 const DOMAINS: DomainsConfig = {
   version: 1,
@@ -453,13 +458,17 @@ describe("domainHintFromSource", () => {
 })
 
 describe("prepareMechanismPrompts", () => {
-  it("bundles the index, both addenda, and the hint", () => {
+  beforeEach(() => {
+    mockScopedIndex.mockReset()
+    mockScopedIndex.mockResolvedValue("# Scoped index\n")
+  })
+
+  it("bundles the index, both addenda, and the hint", async () => {
     const ctx = makeCtx()
     const source = "---\ndomain: ai/architecture\n---\n\nText"
-    const prompts = prepareMechanismPrompts(ctx, "# Index\n- [[a]]", source, "English")
+    const prompts = await prepareMechanismPrompts(ctx, source, "English")
 
     expect(prompts.hint).toBe("ai/architecture")
-    expect(prompts.index).toBe("# Index\n- [[a]]")
     expect(prompts.analysis).toBe(buildAnalysisAddendum(ctx, "ai/architecture"))
     expect(prompts.chunkAnalysis).toBe(buildAnalysisAddendum(ctx, "ai/architecture", { chunked: true }))
     const d = emptyDecisions("ai/architecture")
@@ -467,18 +476,28 @@ describe("prepareMechanismPrompts", () => {
     expect(prompts.reservedChars).toBeGreaterThan(prompts.analysis.length)
   })
 
-  it("passes the output language to the generation addendum", () => {
+  it("uses the scoped index of the hinted domain as the index", async () => {
     const ctx = makeCtx()
-    const prompts = prepareMechanismPrompts(ctx, "", "Text", "Traditional Chinese")
+    const prompts = await prepareMechanismPrompts(ctx, "---\ndomain: ai/architecture\n---\n\nText", "English")
+
+    expect(prompts.index).toBe("# Scoped index\n")
+    expect(mockScopedIndex).toHaveBeenCalledTimes(1)
+    expect(mockScopedIndex).toHaveBeenCalledWith("/projects/wiki", ctx, "ai/architecture")
+  })
+
+  it("asks for the index without a domain when the source names none", async () => {
+    const ctx = makeCtx()
+    await prepareMechanismPrompts(ctx, "Text", "English")
+
+    expect(mockScopedIndex).toHaveBeenCalledWith("/projects/wiki", ctx, null)
+  })
+
+  it("passes the output language to the generation addendum", async () => {
+    const ctx = makeCtx()
+    const prompts = await prepareMechanismPrompts(ctx, "Text", "Traditional Chinese")
 
     expect(prompts.hint).toBeNull()
     expect(prompts.generation(emptyDecisions(null))).toContain("## 組成")
-  })
-})
-
-describe("scopedIndexText", () => {
-  it("returns the full index until the domain index lands", () => {
-    expect(scopedIndexText(makeCtx(), "# Index\n- [[a]]\n", "ai/architecture")).toBe("# Index\n- [[a]]\n")
   })
 })
 

@@ -46,7 +46,9 @@ import type { MultimodalConfig } from "@/stores/wiki-store"
 import { BASE_GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { loadMechanismContext } from "@/lib/mechanism-wiki/context"
 import { checkDuplicateSource, noteOtherEntryPoint, recordFingerprint } from "@/lib/mechanism-wiki/source-fingerprint"
-import { listMechanismSlugsStub, parseAnalysisDecisions } from "@/lib/mechanism-wiki/decisions"
+import { parseAnalysisDecisions } from "@/lib/mechanism-wiki/decisions"
+import { listMechanismSlugs, rebuildDomainIndex } from "@/lib/mechanism-wiki/domain-index"
+import { isDomainIndexPath } from "@/lib/mechanism-wiki/domain-index-render"
 import { enforceMechanismRules, proposedDomainReview } from "@/lib/mechanism-wiki/enforce"
 import { appendPromptSection, prepareMechanismPrompts } from "@/lib/mechanism-wiki/prompts"
 import type { AnalysisDecisions } from "@/lib/mechanism-wiki/types"
@@ -1078,12 +1080,13 @@ async function autoIngestImpl(
   }
 
   const mechanism = mechanismCtx
-    ? prepareMechanismPrompts(mechanismCtx, index, sourceContent, getOutputLanguage(sourceContent))
+    ? await prepareMechanismPrompts(mechanismCtx, sourceContent, getOutputLanguage(sourceContent))
     : null
+  // A mechanism wiki sends its scoped index instead of wiki/index.md.
   const promptIndex = mechanism?.index ?? index
 
   const stableContextLength =
-    schema.length + purpose.length + index.length + overview.length + (mechanism?.reservedChars ?? 0)
+    schema.length + purpose.length + promptIndex.length + overview.length + (mechanism?.reservedChars ?? 0)
   const sourceBudget = computeIngestSourceBudget(llmConfig.maxContextSize, stableContextLength)
   let sourceContext = enrichedSourceContent
   let precomputedAnalysis = ""
@@ -1185,7 +1188,7 @@ async function autoIngestImpl(
   let mechanismGeneration: string | undefined
   let mechanismDecisions: AnalysisDecisions | undefined
   if (mechanism && mechanismCtx) {
-    const existingMechanisms = await listMechanismSlugsStub(mechanismCtx.mechanismLibraryPath)
+    const existingMechanisms = await listMechanismSlugs(mechanismCtx.mechanismLibraryPath)
     const decisions = parseAnalysisDecisions(analysis, mechanismCtx, mechanism.hint, existingMechanisms)
     if (decisions.problems.length > 0) {
       console.warn(`[ingest:mechanism] decision problems for "${fileName}":`, decisions.problems)
@@ -1473,7 +1476,14 @@ async function autoIngestImpl(
   }
 
   try {
-    if (await updateWikiIndexDeterministically(pp, writtenPaths)) {
+    if (mechanismCtx) {
+      // A mechanism wiki builds a domain-first index (wiki/index.md and wiki/indexes/*.md). Every
+      // file it writes is a written file, so version history commits and restores it with the rest.
+      await rebuildDomainIndex(pp, mechanismCtx, (indexFile) => {
+        writtenPaths.push(indexFile)
+        onFileWritten?.(indexFile)
+      })
+    } else if (await updateWikiIndexDeterministically(pp, writtenPaths)) {
       writtenPaths.push("wiki/index.md")
       onFileWritten?.("wiki/index.md")
     }
@@ -1665,7 +1675,7 @@ async function autoIngestImpl(
       for (const wpath of writtenPaths) {
         const pageId = wikiPageIdFromPath(pp, wpath)
         const pageStem = wpath.split("/").pop()?.replace(/\.md$/, "") ?? ""
-        if (!pageId || ["index", "log", "overview"].includes(pageStem)) continue
+        if (!pageId || ["index", "log", "overview"].includes(pageStem) || isDomainIndexPath(wpath)) continue
         try {
           const content = await readFile(`${pp}/${wpath}`)
           const fmTitle = parseFrontmatter(content).frontmatter?.title
@@ -1746,7 +1756,8 @@ function isListingPath(relativePath: string): boolean {
 
 export function isAppManagedAggregatePath(relativePath: string): boolean {
   const normalized = relativePath.replace(/\\/g, "/").toLowerCase()
-  return normalized === "wiki/index.md" || normalized === "wiki/overview.md"
+  // wiki/indexes/ holds the domain index files that a mechanism wiki builds.
+  return normalized === "wiki/index.md" || normalized === "wiki/overview.md" || isDomainIndexPath(normalized)
 }
 
 const CJK_OUTPUT_LANGUAGES = new Set(["Chinese", "Traditional Chinese", "Japanese", "Korean"])
@@ -1842,7 +1853,8 @@ async function updateWikiOverviewDeterministically(
   const candidates = Array.from(new Set(writtenPaths.map(normalizePath))).filter((path) =>
     path.startsWith("wiki/")
       && path.endsWith(".md")
-      && !AGGREGATE_WIKI_PATHS.includes(path as (typeof AGGREGATE_WIKI_PATHS)[number]),
+      && !AGGREGATE_WIKI_PATHS.includes(path as (typeof AGGREGATE_WIKI_PATHS)[number])
+      && !isDomainIndexPath(path),
   )
   if (candidates.length === 0) return false
 

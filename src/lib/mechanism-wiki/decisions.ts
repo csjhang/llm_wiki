@@ -8,11 +8,8 @@
  * never throws: a line that cannot be used is dropped and described in
  * `problems`, and the lines that can be used still count.
  */
-import { listDirectory } from "@/commands/fs"
-import { normalizePath } from "@/lib/path-utils"
 import { DOMAIN_NAME_PATTERN, domainParent, KNOWN_LENSES } from "@/lib/wiki-config/domains"
 import { hasOwn } from "@/lib/wiki-config/yaml-util"
-import type { FileNode } from "@/types/wiki"
 import type { MechanismContext } from "./context"
 import { emptyDecisions } from "./types"
 import type { AnalysisDecisions, MechanismDecision } from "./types"
@@ -263,30 +260,4 @@ function scanHeadings(lines: string[]): Heading[] {
     }
   })
   return headings
-}
-
-// --- existing mechanisms -----------------------------------------------
-
-/**
- * The slugs of the mechanism pages in the library: the stems of the `*.md`
- * files in `<libraryPath>/wiki/mechanisms/`. Empty when the library path is
- * null or the folder cannot be listed.
- *
- * Stub: Task 7 replaces it with `listMechanismSlugs`, which reads the
- * mechanism index.
- */
-export async function listMechanismSlugsStub(libraryPath: string | null): Promise<Set<string>> {
-  if (libraryPath === null) return new Set()
-  const dir = `${normalizePath(libraryPath).replace(/\/+$/, "")}/wiki/mechanisms`
-  let nodes: FileNode[]
-  try {
-    nodes = await listDirectory(dir, { maxDepth: 1 })
-  } catch {
-    return new Set()
-  }
-  return new Set(
-    nodes
-      .filter((node) => !node.is_dir && node.name.endsWith(".md") && node.name.length > ".md".length)
-      .map((node) => node.name.slice(0, -".md".length)),
-  )
 }

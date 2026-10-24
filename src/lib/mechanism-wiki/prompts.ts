@@ -17,6 +17,7 @@ import type { SectionHeading } from "@/lib/wiki-config/section-headings"
 import { hasOwn } from "@/lib/wiki-config/yaml-util"
 import { canWriteMechanismPages, extractLensFieldsText, lensForDomain } from "./context"
 import type { MechanismContext } from "./context"
+import { buildScopedIndexText } from "./domain-index"
 import { emptyDecisions } from "./types"
 import type { AnalysisDecisions, MechanismDecision } from "./types"
 
@@ -349,24 +350,15 @@ function mechanismInstruction(
   return `- ${label}: write wiki/mechanisms/${mechanism.slug}.md as a new mechanism page. The page that you write for this source is its first instance.`
 }
 
-// --- index -------------------------------------------------------------
-
-/**
- * Index text for the analysis and generation prompts of a mechanism wiki.
- * Until the domain index lands, this is the full index. Task 7 replaces it
- * with `buildScopedIndexText`: the index of the hinted domain plus the
- * mechanism index.
- */
-export function scopedIndexText(_ctx: MechanismContext, fullIndex: string, _domain: string | null): string {
-  return fullIndex
-}
-
 // --- ingest hook -------------------------------------------------------
 
 export interface MechanismIngestPrompts {
   /** The domain that the source names, when `domains.yaml` lists it. */
   hint: string | null
-  /** Index text for the analysis and generation prompts. */
+  /**
+   * Index text for the analysis and generation prompts: the root index, the mechanism index,
+   * and the index of the hinted domain (`buildScopedIndexText`). It replaces `wiki/index.md`.
+   */
   index: string
   /** Appended to the analysis system prompt. */
   analysis: string
@@ -379,19 +371,18 @@ export interface MechanismIngestPrompts {
 }
 
 /** Everything that `ingest.ts` needs from a mechanism wiki to build its prompts. */
-export function prepareMechanismPrompts(
+export async function prepareMechanismPrompts(
   ctx: MechanismContext,
-  fullIndex: string,
   sourceContent: string,
   outputLanguage: string,
-): MechanismIngestPrompts {
+): Promise<MechanismIngestPrompts> {
   const hint = domainHintFromSource(sourceContent, ctx)
   const analysis = buildAnalysisAddendum(ctx, hint)
   const chunkAnalysis = buildAnalysisAddendum(ctx, hint, { chunked: true })
   const generation = (decisions: AnalysisDecisions): string => buildGenerationAddendum(ctx, decisions, outputLanguage)
   return {
     hint,
-    index: scopedIndexText(ctx, fullIndex, hint),
+    index: await buildScopedIndexText(ctx.projectPath, ctx, hint),
     analysis,
     chunkAnalysis,
     generation,

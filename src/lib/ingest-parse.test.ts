@@ -748,6 +748,13 @@ describe("application-managed aggregate boundaries", () => {
     expect(isAppManagedAggregatePath("wiki/entities/index.md")).toBe(false)
   })
 
+  it("treats the domain index files in wiki/indexes/ as application-managed", () => {
+    expect(isAppManagedAggregatePath("wiki/indexes/hardware--async-circuits.md")).toBe(true)
+    expect(isAppManagedAggregatePath("wiki/indexes/_mechanisms.md")).toBe(true)
+    expect(isAppManagedAggregatePath("wiki\\Indexes\\ai.md")).toBe(true)
+    expect(isAppManagedAggregatePath("wiki/concepts/indexes/x.md")).toBe(false)
+  })
+
   it("bounds recent entries and preserves following sections", () => {
     const existing = [
       "# Wiki Index",
