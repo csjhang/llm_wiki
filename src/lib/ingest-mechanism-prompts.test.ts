@@ -342,8 +342,9 @@ describe("ingest prompts and the mechanism context", () => {
     ].join("\n")
     const project = await mechanismProject()
     await writeFileRaw(`${project}/wiki/mechanisms/event-driven-computing.md`, "---\ntype: mechanism\n---\n\n# Event-driven computing\n")
-    const { ctx, index } = await mechanismIndex(project)
-    const expected = await expectedPrompts(project, SOURCE_TEXT, index)
+    const { ctx } = await mechanismIndex(project)
+    // The analysis decided ai/architecture, so generation carries the index of that domain.
+    const expected = await expectedPrompts(project, SOURCE_TEXT, await buildScopedIndexText(project, ctx, "ai/architecture"))
     await ingest(project)
 
     const generation = capturedCalls().find(isGeneration)
@@ -545,6 +546,47 @@ describe("ingest prompts and the mechanism context", () => {
     }
   })
 
+  it("gives generation and review the page list of the decided domain, not of the hint", async () => {
+    // The source names no domain, so the analysis index has the root and mechanism indexes only.
+    llm.analysis = "## Decisions\nDOMAIN: ai/architecture\n"
+    llm.generation = ["---REVIEW: suggestion | A gap---", "A gap in the wiki.", "OPTIONS: Create Page | Skip", "---END REVIEW---"].join("\n")
+    const project = await mechanismProject()
+    await writeFileRaw(
+      `${project}/wiki/concepts/spikes.md`,
+      "---\ntype: concept\ntitle: Spikes\ndomain: ai/architecture\n---\n\n# Spikes\n",
+    )
+    await writeFileRaw(
+      `${project}/wiki/concepts/handshake.md`,
+      "---\ntype: concept\ntitle: Handshake\ndomain: hardware/async-circuits\n---\n\n# Handshake\n",
+    )
+    await ingest(project)
+
+    const calls = capturedCalls()
+    const analysis = calls.find(isAnalysis)
+    expect(analysis?.system).not.toContain("[[spikes]]")
+    expect(analysis?.system).not.toContain("[[handshake]]")
+    for (const call of [calls.find(isGeneration), calls.find(isReviewStage)]) {
+      expect(call).toBeDefined()
+      expect(call?.system).toContain("# ai/architecture\n\n## Concept\n\n- [[spikes]] — Spikes")
+      expect(call?.system).not.toContain("[[handshake]]")
+    }
+  })
+
+  it("gives generation the index of the domain that the source names when the analysis names none", async () => {
+    const source = "---\ndomain: ai/architecture\n---\n\n# A note\n\nA network of spikes.\n"
+    const project = await mechanismProject(source)
+    await writeFileRaw(
+      `${project}/wiki/concepts/spikes.md`,
+      "---\ntype: concept\ntitle: Spikes\ndomain: ai/architecture\n---\n\n# Spikes\n",
+    )
+    await ingest(project)
+
+    const calls = capturedCalls()
+    for (const call of [calls.find(isAnalysis), calls.find(isGeneration)]) {
+      expect(call?.system).toContain("# ai/architecture\n\n## Concept\n\n- [[spikes]] — Spikes")
+    }
+  })
+
   // --- what ingest writes from the generation -----------------------------
 
   /** A concept page the way a model writes it when it forgets the domain. */
@@ -678,6 +720,49 @@ describe("ingest prompts and the mechanism context", () => {
     const queued = addItems.mock.calls.flatMap(([items]) => items)
     expect(queued.filter((item) => item.type === "new-domain")).toHaveLength(1)
     expect(await fs.readFile(`${project}/wiki/concepts/attention.md`, "utf8")).toMatch(/^domain: cognition\/attention$/m)
+  })
+
+  const HARDWARE_ATTENTION = "---\ntype: concept\ntitle: Attention\ndomain: hardware/async-circuits\nsources: [\"other.md\"]\n---\n\n# Attention\n\nA circuit looks at one wire.\n"
+
+  it("writes a page of the same slug in another domain under a suffixed path", async () => {
+    llm.analysis = "## Decisions\nDOMAIN: ai/architecture\n"
+    llm.generation = CONCEPT_WITHOUT_DOMAIN
+    const project = await mechanismProject()
+    await writeFileRaw(`${project}/wiki/concepts/attention.md`, HARDWARE_ATTENTION)
+    await ingest(project)
+
+    // The page of the other domain is as it was.
+    expect(await fs.readFile(`${project}/wiki/concepts/attention.md`, "utf8")).toBe(HARDWARE_ATTENTION)
+    const suffixed = await fs.readFile(`${project}/wiki/concepts/attention--architecture.md`, "utf8")
+    expect(suffixed).toMatch(/^domain: ai\/architecture$/m)
+    expect(suffixed).toContain("Attention weighs the parts of an input.")
+    // Each page is in the index of its own domain.
+    expect(await fs.readFile(`${project}/wiki/indexes/ai--architecture.md`, "utf8")).toContain("[[attention--architecture]]")
+    expect(await fs.readFile(`${project}/wiki/indexes/hardware--async-circuits.md`, "utf8")).toContain("[[attention]]")
+  })
+
+  it("writes into the page of the same slug when the domain is the same", async () => {
+    llm.analysis = "## Decisions\nDOMAIN: ai/architecture\n"
+    llm.generation = CONCEPT_WITHOUT_DOMAIN
+    const project = await mechanismProject()
+    await writeFileRaw(`${project}/wiki/concepts/attention.md`, HARDWARE_ATTENTION.replace("hardware/async-circuits", "ai/architecture"))
+    await ingest(project)
+
+    await expect(fs.access(`${project}/wiki/concepts/attention--architecture.md`)).rejects.toThrow()
+    expect(await fs.readFile(`${project}/wiki/concepts/attention.md`, "utf8")).toContain("Attention weighs the parts of an input.")
+  })
+
+  it("keeps the suffixed path of a page that the truncation repair writes", async () => {
+    llm.analysis = "## Decisions\nDOMAIN: ai/architecture\n"
+    llm.generation = CONCEPT_WITHOUT_DOMAIN.replace("\n---END FILE---", "")
+    llm.repair = CONCEPT_WITHOUT_DOMAIN
+    const project = await mechanismProject()
+    await writeFileRaw(`${project}/wiki/concepts/attention.md`, HARDWARE_ATTENTION)
+    // The repaired page was written and counts as recovered: the ingest does not fail.
+    await expect(ingest(project)).resolves.toBeUndefined()
+
+    expect(await fs.readFile(`${project}/wiki/concepts/attention.md`, "utf8")).toBe(HARDWARE_ATTENTION)
+    expect(await fs.readFile(`${project}/wiki/concepts/attention--architecture.md`, "utf8")).toMatch(/^domain: ai\/architecture$/m)
   })
 
   it("sends a type: mechanism page of a work wiki to review wherever the model put it", async () => {

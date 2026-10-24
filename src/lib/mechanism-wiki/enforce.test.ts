@@ -72,13 +72,18 @@ function page(type: string, extra: string[] = [], title = "Attention"): string {
 
 function enforce(
   generation: string,
-  options: { ctx?: MechanismContext; decisions?: AnalysisDecisions } = {},
+  options: {
+    ctx?: MechanismContext
+    decisions?: AnalysisDecisions
+    existingPages?: ReadonlyMap<string, string | null>
+  } = {},
 ) {
   return enforceMechanismRules(
     generation,
     options.ctx ?? makeCtx(),
     options.decisions ?? decide(),
     SOURCE_PATH,
+    options.existingPages,
   )
 }
 
@@ -572,5 +577,150 @@ describe("enforceMechanismRules", () => {
   it("returns text without blocks unchanged", () => {
     expect(enforce("---RESUME COMPLETE---").text).toBe("---RESUME COMPLETE---")
     expect(enforce("").text).toBe("")
+  })
+  // --- the same slug in two domains (spec 5.5) ---------------------------------------------
+
+  describe("same slug in two domains", () => {
+    const AI = "ai/architecture"
+    const HARDWARE = "hardware/async-circuits"
+    const ATTENTION = "wiki/concepts/attention.md"
+
+    it("same slug in another domain gets a suffixed path", () => {
+      const concept = page("concept")
+      const result = enforce(block(ATTENTION, concept), {
+        decisions: decide({ domain: HARDWARE }),
+        existingPages: new Map([[ATTENTION, AI]]),
+      })
+
+      expect(result.text.startsWith("---FILE: wiki/concepts/attention--async-circuits.md---\n")).toBe(true)
+      const pages = contentsByPath(result.text)
+      expect(Object.keys(pages)).toEqual(["wiki/concepts/attention--async-circuits.md"])
+      expect(pages["wiki/concepts/attention--async-circuits.md"]).toContain(`domain: ${HARDWARE}`)
+      expect(result.renames).toEqual([
+        { from: ATTENTION, to: "wiki/concepts/attention--async-circuits.md" },
+      ])
+      expect(result.notes).toContain(
+        `Renamed ${ATTENTION} to wiki/concepts/attention--async-circuits.md: the page exists in domain "${AI}". Links in other pages are not rewritten.`,
+      )
+    })
+
+    it("uses the domain that the model wrote, not the decided one, to tell the pages apart", () => {
+      const concept = page("concept", [`domain: ${AI}`])
+      const result = enforce(block(ATTENTION, concept), {
+        decisions: decide({ domain: HARDWARE }),
+        existingPages: new Map([[ATTENTION, HARDWARE]]),
+      })
+
+      expect(Object.keys(contentsByPath(result.text))).toEqual(["wiki/concepts/attention--architecture.md"])
+    })
+
+    it("same slug in the same domain is not renamed", () => {
+      const generation = block(ATTENTION, page("concept", [`domain: ${AI}`]))
+      const result = enforce(generation, { existingPages: new Map([[ATTENTION, AI]]) })
+
+      expect(result.text).toBe(generation)
+      expect(result.renames).toEqual([])
+      expect(result.notes).toEqual([])
+    })
+
+    it("is not renamed when the same slug is in the same domain after the rules added the domain", () => {
+      const result = enforce(block(ATTENTION, page("concept")), { existingPages: new Map([[ATTENTION, AI]]) })
+
+      expect(Object.keys(contentsByPath(result.text))).toEqual([ATTENTION])
+      expect(result.renames).toEqual([])
+    })
+
+    it("uses the full domain path when the suffixed path holds another domain", () => {
+      const existingPages = new Map<string, string | null>([
+        [ATTENTION, AI],
+        ["wiki/concepts/attention--async-circuits.md", "business/franchising"],
+      ])
+      const result = enforce(block(ATTENTION, page("concept")), {
+        decisions: decide({ domain: HARDWARE }),
+        existingPages,
+      })
+
+      expect(Object.keys(contentsByPath(result.text))).toEqual(["wiki/concepts/attention--hardware--async-circuits.md"])
+    })
+
+    it("writes into the suffixed page of its own domain when the page is ingested again", () => {
+      const existingPages = new Map<string, string | null>([
+        [ATTENTION, AI],
+        ["wiki/concepts/attention--async-circuits.md", HARDWARE],
+      ])
+      const result = enforce(block(ATTENTION, page("concept")), {
+        decisions: decide({ domain: HARDWARE }),
+        existingPages,
+      })
+
+      expect(Object.keys(contentsByPath(result.text))).toEqual(["wiki/concepts/attention--async-circuits.md"])
+    })
+
+    it("does not rename a page that exists without a domain", () => {
+      const result = enforce(block(ATTENTION, page("concept")), { existingPages: new Map([[ATTENTION, null]]) })
+
+      expect(Object.keys(contentsByPath(result.text))).toEqual([ATTENTION])
+    })
+
+    it("matches the path of an existing page without regard to case", () => {
+      const result = enforce(block("wiki/concepts/Attention.md", page("concept")), {
+        decisions: decide({ domain: HARDWARE }),
+        existingPages: new Map([[ATTENTION, AI]]),
+      })
+
+      expect(Object.keys(contentsByPath(result.text))).toEqual(["wiki/concepts/Attention--async-circuits.md"])
+    })
+
+    it("leaves source summary, mechanism, hypothesis, and app pages alone", () => {
+      const source = block("wiki/sources/note.md", page("source", ['sources: ["note.md"]'], "Note"))
+      const mechanism = block("wiki/mechanisms/backpressure.md", page("mechanism", ["lenses: [ai]", "instances: []"], "Backpressure"))
+      const hypothesis = block(
+        "wiki/hypotheses/h.md",
+        page("hypothesis", [`from_domain: ${AI}`, `to_domain: ${HARDWARE}`], "H"),
+      )
+      const log = block("wiki/log.md", "## entry")
+      const existingPages = new Map<string, string | null>([
+        ["wiki/sources/note.md", HARDWARE],
+        ["wiki/mechanisms/backpressure.md", null],
+        ["wiki/hypotheses/h.md", AI],
+        ["wiki/log.md", null],
+      ])
+      const result = enforce([source, mechanism, hypothesis, log].join("\n\n"), { existingPages })
+
+      expect(Object.keys(contentsByPath(result.text))).toEqual([
+        "wiki/sources/note.md",
+        "wiki/mechanisms/backpressure.md",
+        "wiki/hypotheses/h.md",
+        "wiki/log.md",
+      ])
+      expect(result.renames).toEqual([])
+    })
+
+    it("does not rewrite links in other blocks, and renames only the page that collides", () => {
+      const other = page("concept", ["domain: ai/architecture"], "Other").replace("Body text.", "See [[attention]].")
+      const generation = [block(ATTENTION, page("concept")), block("wiki/concepts/other.md", other)].join("\n\n")
+      const result = enforce(generation, {
+        decisions: decide({ domain: HARDWARE }),
+        existingPages: new Map([[ATTENTION, AI]]),
+      })
+
+      const pages = contentsByPath(result.text)
+      expect(Object.keys(pages)).toEqual(["wiki/concepts/attention--async-circuits.md", "wiki/concepts/other.md"])
+      expect(pages["wiki/concepts/other.md"]).toBe(other)
+    })
+
+    it("keeps the closing line and the line breaks of a renamed block", () => {
+      const generation = `--- FILE: ${ATTENTION} ---\r\n${page("concept", [`domain: ${HARDWARE}`]).replace(/\n/g, "\r\n")}\r\n---END FILE---\r\n`
+      const result = enforce(generation, { existingPages: new Map([[ATTENTION, AI]]) })
+
+      expect(result.text.startsWith("---FILE: wiki/concepts/attention--async-circuits.md---\r\n")).toBe(true)
+      expect(result.text.endsWith("\r\n---END FILE---\r\n")).toBe(true)
+    })
+
+    it("changes nothing without the map of existing pages", () => {
+      const generation = block(ATTENTION, page("concept", [`domain: ${AI}`]))
+
+      expect(enforce(generation).text).toBe(generation)
+    })
   })
 })

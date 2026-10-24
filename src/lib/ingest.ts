@@ -47,7 +47,7 @@ import { BASE_GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { loadMechanismContext } from "@/lib/mechanism-wiki/context"
 import { checkDuplicateSource, noteOtherEntryPoint, recordFingerprint } from "@/lib/mechanism-wiki/source-fingerprint"
 import { parseAnalysisDecisions } from "@/lib/mechanism-wiki/decisions"
-import { listMechanismSlugs, rebuildDomainIndex } from "@/lib/mechanism-wiki/domain-index"
+import { buildScopedIndexText, listMechanismSlugs, rebuildDomainIndex, scanWikiPages } from "@/lib/mechanism-wiki/domain-index"
 import { isDomainIndexPath } from "@/lib/mechanism-wiki/domain-index-render"
 import { enforceMechanismRules, proposedDomainReview } from "@/lib/mechanism-wiki/enforce"
 import { appendPromptSection, prepareMechanismPrompts } from "@/lib/mechanism-wiki/prompts"
@@ -1187,6 +1187,9 @@ async function autoIngestImpl(
   // the head of the final digest of a long source) sets the generation rules.
   let mechanismGeneration: string | undefined
   let mechanismDecisions: AnalysisDecisions | undefined
+  // The analysis ran on the index of the domain that the source names (the hint). Generation and the
+  // review stage see the page list of the domain that the analysis decided on, which can be another.
+  let generationIndex = promptIndex
   if (mechanism && mechanismCtx) {
     const existingMechanisms = await listMechanismSlugs(mechanismCtx.mechanismLibraryPath)
     const decisions = parseAnalysisDecisions(analysis, mechanismCtx, mechanism.hint, existingMechanisms)
@@ -1195,6 +1198,11 @@ async function autoIngestImpl(
     }
     mechanismGeneration = mechanism.generation(decisions)
     mechanismDecisions = decisions
+    generationIndex = await buildScopedIndexText(
+      pp,
+      mechanismCtx,
+      decisions.domain ?? decisions.proposedDomain?.path ?? mechanism.hint,
+    )
   }
   let generation = ""
   let generationError: string | null = null
@@ -1202,7 +1210,7 @@ async function autoIngestImpl(
 
   try {
     const generationSystemPrompt = appendPromptSection(
-      buildGenerationPrompt(schema, purpose, promptIndex, sourceIdentity, overview, sourceContext, sourceSummaryPath),
+      buildGenerationPrompt(schema, purpose, generationIndex, sourceIdentity, overview, sourceContext, sourceSummaryPath),
       mechanismGeneration,
     )
     await streamChat(
@@ -1293,7 +1301,7 @@ async function autoIngestImpl(
             role: "system",
             content: buildReviewSuggestionPrompt(
               purpose,
-              promptIndex,
+              generationIndex,
               sourceIdentity,
               analysis,
               sourceContext,
@@ -1336,11 +1344,20 @@ async function autoIngestImpl(
   await migrateLegacySourceSummaryIfSafe(pp, sourceIdentity, sourceSummaryPath, onFileWritten)
   // Mechanism wiki: fix domains and mechanism pages in the generated text before it is written.
   const mechanismReviews: Omit<ReviewItem, "id" | "resolved" | "createdAt">[] = []
+  // The pages that exist before this ingest writes, with their domains: a page of the same slug in
+  // another domain must not be overwritten (spec 5.5).
+  const existingPages: ReadonlyMap<string, string | null> | undefined = mechanismCtx && mechanismDecisions
+    ? new Map((await scanWikiPages(pp)).map((existing) => [existing.path, existing.domain]))
+    : undefined
+  // Pages that the rules gave another path, by the path the model wrote. The repair of a truncated
+  // block is matched against the path that the model wrote, not against the one that was written.
+  const renamedByRules = new Map<string, string>()
   const enforceMechanism = (text: string): string => {
     if (!mechanismCtx || !mechanismDecisions) return text
-    const enforced = enforceMechanismRules(text, mechanismCtx, mechanismDecisions, sp)
+    const enforced = enforceMechanismRules(text, mechanismCtx, mechanismDecisions, sp, existingPages)
     mechanismReviews.push(...enforced.reviews)
     for (const note of enforced.notes) console.log(`[ingest:mechanism] ${note}`)
+    for (const { from, to } of enforced.renames) renamedByRules.set(normalizePath(from), normalizePath(to))
     return enforced.text
   }
   // The proposal of a new domain is one review item per ingest, not one per pass over the text.
@@ -1447,7 +1464,7 @@ async function autoIngestImpl(
           repairResult.completedInputPaths.map(normalizePath),
         )
         const recoveredPaths = filteredRepair.paths.filter((path) =>
-          completedInputPathKeys.has(normalizePath(path)),
+          completedInputPathKeys.has(renamedByRules.get(normalizePath(path)) ?? normalizePath(path)),
         )
         for (const path of repairResult.writtenPaths) {
           if (!writtenPaths.some((writtenPath) => normalizePath(writtenPath) === normalizePath(path))) {

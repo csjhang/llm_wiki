@@ -13,6 +13,8 @@
  *    `new-mechanism` review item, and so does each `new-mechanism` REVIEW block of the model.
  * 4. A domain that the analysis proposes becomes a `new-domain` review item. That review comes
  *    from `proposedDomainReview`, which the caller calls once per ingest, not once per pass.
+ * 5. A page whose path exists already with another domain gets a suffixed path (spec 5.5), so the same
+ *    slug in two domains stays two pages. This needs the map of existing pages; without it nothing is renamed.
  *
  * A mechanism page is a page under `wiki/mechanisms/` or a page with `type: mechanism`: the
  * writer moves a typed page to the folder of its type after these rules ran. A hypothesis page is
@@ -43,17 +45,23 @@ export interface EnforceResult {
   reviews: NewReview[]
   /** One short English line for each change, for the activity log. */
   notes: string[]
+  /** FILE blocks that got another path because the same slug exists in another domain. */
+  renames: Array<{ from: string; to: string }>
 }
 
 const MECHANISM_DIR = "wiki/mechanisms/"
 const HYPOTHESIS_DIR = "wiki/hypotheses/"
+const SOURCES_DIR = "wiki/sources/"
 /** How many lines from the top `declaredType` reads when the frontmatter does not parse. */
 const TYPE_LINE_WINDOW = 30
 /** Pages that the app maintains or that hold no domain. Lower case. */
 const EXEMPT_PAGES = new Set(["wiki/index.md", "wiki/log.md", "wiki/overview.md"])
 
-/** What to write for a FILE block: the block as it is, other content, or nothing. */
-type BlockOutcome = { kind: "keep" } | { kind: "edit"; content: string } | { kind: "drop" }
+/**
+ * What to write for a FILE block: the block as it is, other content and/or another path, or nothing.
+ * An edit without `content` keeps the lines of the block as they are.
+ */
+type BlockOutcome = { kind: "keep" } | { kind: "edit"; content?: string; path?: string } | { kind: "drop" }
 
 const KEEP: BlockOutcome = { kind: "keep" }
 
@@ -62,13 +70,19 @@ const PROPOSE_MECHANISM_OPTIONS = [
   { label: "Skip", action: "Skip" },
 ]
 
+/**
+ * `existingPages` maps the path of each page of the wiki to its domain (null when it has none). With
+ * it, a page that would overwrite a page of another domain is renamed. The caller builds it once from
+ * the pages on disk; chat ingest passes none.
+ */
 export function enforceMechanismRules(
   generation: string,
   ctx: MechanismContext,
   decisions: AnalysisDecisions,
   sourcePath: string,
+  existingPages?: ReadonlyMap<string, string | null>,
 ): EnforceResult {
-  const rules = new Rules(ctx, decisions, sourcePath)
+  const rules = new Rules(ctx, decisions, sourcePath, existingPages)
   const { blocks, truncatedPaths } = parseFileBlocks(generation)
   const lines = generation.split("\n")
   const out: string[] = []
@@ -84,7 +98,11 @@ export function enforceMechanismRules(
     if (outcome.kind === "keep") {
       out.push(...lines.slice(span.open, span.close + 1))
     } else if (outcome.kind === "edit") {
-      out.push(lines[span.open], ...outcome.content.split("\n"), lines[span.close])
+      out.push(
+        outcome.path === undefined ? lines[span.open] : openerFor(outcome.path, lines[span.open]),
+        ...(outcome.content === undefined ? lines.slice(span.open + 1, span.close) : outcome.content.split("\n")),
+        lines[span.close],
+      )
     }
     cursor = span.close + 1
   }
@@ -106,7 +124,12 @@ export function enforceMechanismRules(
   }
   out.push(...rules.takeReviewBlocks(lines.slice(cursor, tailEnd)))
 
-  return { text: out.join("\n"), reviews: rules.reviews, notes: rules.notes }
+  return { text: out.join("\n"), reviews: rules.reviews, notes: rules.notes, renames: rules.renames }
+}
+
+/** The opener line of a block at `path`. A carriage return at the end of `previous` stays. */
+function openerFor(path: string, previous: string): string {
+  return `---FILE: ${path}---${previous.endsWith("\r") ? "\r" : ""}`
 }
 
 // --- the rules ---------------------------------------------------------
@@ -115,18 +138,23 @@ class Rules {
   readonly canWrite: boolean
   readonly reviews: NewReview[] = []
   readonly notes: string[] = []
+  readonly renames: Array<{ from: string; to: string }> = []
   /** The domain that pages without one get. */
   private readonly domain: string | null
   private readonly lenses: string[]
+  /** Existing pages by lower-case path: file systems differ in case, a wiki must not depend on it. */
+  private readonly existing: ReadonlyMap<string, string | null>
 
   constructor(
     private readonly ctx: MechanismContext,
     decisions: AnalysisDecisions,
     private readonly sourcePath: string,
+    existingPages: ReadonlyMap<string, string | null> = new Map(),
   ) {
     this.canWrite = canWriteMechanismPages(ctx)
     this.domain = decisions.domain ?? decisions.proposedDomain?.path ?? null
     this.lenses = defaultLenses(ctx, decisions)
+    this.existing = new Map([...existingPages].map(([path, domain]) => [normalizePath(path).toLowerCase(), domain]))
   }
 
   enforceBlock(block: ParsedFileBlock): BlockOutcome {
@@ -139,7 +167,7 @@ class Rules {
     }
     if (!lower.startsWith("wiki/") || !lower.endsWith(".md") || EXEMPT_PAGES.has(lower)) return KEEP
     if (lower.startsWith(HYPOTHESIS_DIR) || declaredType(block.content) === "hypothesis") return KEEP
-    return this.fixDomain(path, block.content)
+    return this.keepDomainsApart(path, block.content, this.fixDomain(path, block.content))
   }
 
   /** Rule 1. */
@@ -196,6 +224,35 @@ class Rules {
       return KEEP
     }
     return edited.changed ? { kind: "edit", content: edited.content } : KEEP
+  }
+
+  /**
+   * Rule 5. A page whose path exists with another domain than the page will have is a different page
+   * of the same slug: it goes to `<dir>/<slug>--<last segment of the domain>.md`. When that path holds
+   * a third domain, the whole domain path is used, with `--` for each `/`. A page of the same domain
+   * keeps its path, and so does a page that has no domain. The source summary page keeps its path too:
+   * ingest writes it at one fixed path. Links in other pages are not rewritten.
+   */
+  private keepDomainsApart(path: string, original: string, outcome: BlockOutcome): BlockOutcome {
+    if (this.existing.size === 0 || path.toLowerCase().startsWith(SOURCES_DIR)) return outcome
+    const domain = frontmatterDomain(outcome.kind === "edit" && outcome.content !== undefined ? outcome.content : original)
+    const held = this.existing.get(path.toLowerCase()) ?? null
+    if (domain === null || held === null || held === domain) return outcome
+
+    const stem = path.slice(0, -".md".length)
+    const short = `${stem}--${domain.split("/").pop()}.md`
+    const target = this.holdsOtherDomain(short, domain) ? `${stem}--${domain.replace(/\//g, "--")}.md` : short
+    this.renames.push({ from: path, to: target })
+    this.notes.push(
+      `Renamed ${path} to ${target}: the page exists in domain "${held}". Links in other pages are not rewritten.`,
+    )
+    return { kind: "edit", content: outcome.kind === "edit" ? outcome.content : undefined, path: target }
+  }
+
+  /** True when a page of another domain than `domain` is at `path`. */
+  private holdsOtherDomain(path: string, domain: string): boolean {
+    const held = this.existing.get(path.toLowerCase()) ?? null
+    return held !== null && held !== domain
   }
 
   /** Rule 3, for a FILE block. `titlePrefix` marks a page that the model did not finish. */
@@ -307,6 +364,19 @@ function declaredType(content: string): string | null {
     if (match !== null) return match[1].toLowerCase()
   }
   return null
+}
+
+/** The `domain` of the frontmatter of a page, or null when it has none or the page has no frontmatter. */
+function frontmatterDomain(content: string): string | null {
+  let domain: string | null = null
+  editFrontmatter(content, (fm) => {
+    const at = findKey(fm, "domain")
+    if (at === -1) return false
+    const value = scalarValue(fm, at)
+    domain = value === "" || value === "null" || value === "~" ? null : value
+    return false
+  })
+  return domain
 }
 
 function fileStem(path: string): string {
