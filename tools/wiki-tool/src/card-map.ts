@@ -22,6 +22,11 @@ export interface PageEntry {
   card_updated_at: string
   placements: string[]
   status: "active" | "retired"
+  /**
+   * The `updatedAt` of the mirror card at the last edit that `hepta record` saved as feedback.
+   * An edit at or before this time is handled: plan-down does not report it again.
+   */
+  feedback_card_updated_at?: string
 }
 
 export interface SourceEntry {

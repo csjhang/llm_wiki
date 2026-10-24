@@ -1,14 +1,18 @@
 /**
- * The wiki pages that are mirrored to Heptabase, and the card body of each.
+ * The wiki pages that are mirrored to Heptabase, the card body and property values of each,
+ * and the hash that the card map keeps for them.
  *
- * plan-down uses this to decide what to send. record uses it to hash a body when the
- * event does not bring the hash. Reading is limited to `<project>/wiki/` and to the
- * snapshot files the card map names, and every path goes through resolveInProject.
+ * plan-down uses this to decide what to send. record uses it to hash a page when the event
+ * does not bring the hash. Reading is limited to the project config files, `<project>/wiki/`,
+ * and the snapshot files the card map names, and every path goes through resolveInProject.
  */
-import { type Dirent, readdirSync, readFileSync } from "node:fs"
+import { type Dirent, readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { posix } from "node:path"
 import { type FrontmatterValue, parseFrontmatter } from "@/lib/frontmatter"
-import type { CardMap } from "./card-map"
+import { type HeptabaseConfig, parseHeptabaseYaml, type PropertyKey } from "@/lib/wiki-config/heptabase-config"
+import type { ParseResult } from "@/lib/wiki-config/types"
+import { parseWikiYaml, type WikiIdentity } from "@/lib/wiki-config/wiki-identity"
+import { type CardMap, contentHash } from "./card-map"
 import { type LinkTarget, wikiPageToCard } from "./convert"
 import { resolveInProject } from "./io"
 
@@ -107,29 +111,55 @@ function loadWikiPage(project: string, path: string): WikiPage {
   return parseWikiPage(path, readFileSync(resolveInProject(project, path), "utf8"))
 }
 
+export interface ReadPagesOptions {
+  /** Accept a project that has no `wiki/` folder at all. Any other read error still throws. */
+  allowMissingWiki?: boolean
+}
+
 /**
- * Every page under `wiki/`, sorted by path. The pages of the app are left out. A file that is
- * listed but cannot be read throws: a page that is merely unreadable must not look deleted.
+ * Every page under `wiki/`, sorted by path. The pages of the app are left out. A folder or file that
+ * cannot be read throws: a page that is merely unreadable must not look deleted. Links to files and
+ * folders are followed; a link that leads nowhere is skipped, and a folder is read once.
  */
-export function readWikiPages(project: string): WikiPage[] {
+export function readWikiPages(project: string, options: ReadPagesOptions = {}): WikiPage[] {
   const paths: string[] = []
-  collectMarkdown(project, "wiki", paths)
+  const root = resolveInProject(project, "wiki")
+  const visited = new Set<string>()
+  try {
+    visited.add(realpathSync(root))
+  } catch (error) {
+    if (options.allowMissingWiki && errorCode(error) === "ENOENT") return []
+    throw error
+  }
+  collectMarkdown(project, "wiki", visited, paths)
   return paths.sort(compareText).map((path) => loadWikiPage(project, path))
 }
 
-function collectMarkdown(project: string, directory: string, found: string[]): void {
-  let entries: Dirent[]
-  try {
-    entries = readdirSync(resolveInProject(project, directory), { withFileTypes: true })
-  } catch {
-    return
-  }
+function errorCode(error: unknown): string | undefined {
+  return error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined
+}
+
+function collectMarkdown(project: string, directory: string, visited: Set<string>, found: string[]): void {
+  const entries: Dirent[] = readdirSync(resolveInProject(project, directory), { withFileTypes: true })
   for (const entry of entries) {
     if (entry.name.startsWith(".")) continue
     const path = `${directory}/${entry.name}`
-    if (entry.isDirectory()) {
-      if (path.toLowerCase() !== SKIPPED_DIRECTORY) collectMarkdown(project, path, found)
-    } else if (entry.isFile() && entry.name.toLowerCase().endsWith(".md") && !SKIPPED_PAGES.has(path.toLowerCase())) {
+    const absolute = resolveInProject(project, path)
+    let stats
+    try {
+      stats = statSync(absolute)
+    } catch (error) {
+      // A link that leads nowhere has no page to read.
+      if (errorCode(error) === "ENOENT") continue
+      throw error
+    }
+    if (stats.isDirectory()) {
+      if (path.toLowerCase() === SKIPPED_DIRECTORY) continue
+      const real = realpathSync(absolute)
+      if (visited.has(real)) continue
+      visited.add(real)
+      collectMarkdown(project, path, visited, found)
+    } else if (stats.isFile() && entry.name.toLowerCase().endsWith(".md") && !SKIPPED_PAGES.has(path.toLowerCase())) {
       found.push(path)
     }
   }
@@ -213,4 +243,105 @@ function snapshotTitle(project: string, rawPath: string): string {
     // The file is missing or outside the project: use the name.
   }
   return fileStem(rawPath)
+}
+
+// --- config ------------------------------------------------------------
+
+export interface ProjectConfig {
+  heptabase: HeptabaseConfig
+  wiki: WikiIdentity
+}
+
+/**
+ * heptabase.yaml and wiki.yaml of a project. Every issue of a parser becomes a problem, and a
+ * file that cannot be read does too. Returns null when there is any problem.
+ */
+export function readProjectConfig(project: string, problems: string[]): ProjectConfig | null {
+  const heptabase = readConfigFile(project, "heptabase.yaml", parseHeptabaseYaml, problems)
+  const wiki = readConfigFile(project, "wiki.yaml", parseWikiYaml, problems)
+  return heptabase && wiki ? { heptabase, wiki } : null
+}
+
+function readConfigFile<T>(
+  project: string,
+  name: string,
+  parse: (text: string) => ParseResult<T>,
+  problems: string[],
+): T | null {
+  const path = resolveInProject(project, name)
+  let text: string
+  try {
+    text = readFileSync(path, "utf8").replace(/^\uFEFF/, "")
+  } catch {
+    problems.push(`cannot read ${name}: ${path}`)
+    return null
+  }
+  const result = parse(text)
+  if (result.ok) return result.value
+  for (const issue of result.issues) {
+    problems.push(`invalid ${name}: ${issue.path === "" ? "" : `${issue.path}: `}${issue.message}`)
+  }
+  return null
+}
+
+// --- properties and hash -----------------------------------------------
+
+export interface PropertyEdit {
+  propertyId: string
+  type: "select" | "text" | "date"
+  /** A select value is the option name, a text value a string, a date value `{ start: <ISO time> }`. */
+  value: unknown
+}
+
+export type EditEntry = readonly [PropertyKey, PropertyEdit["type"], unknown]
+
+/** The edits of the properties that heptabase.yaml names, for the values that are not null. */
+export function editsOf(ids: HeptabaseConfig["properties"], entries: readonly EditEntry[]): PropertyEdit[] {
+  const edits: PropertyEdit[] = []
+  for (const [key, type, value] of entries) {
+    const propertyId = ids[key]
+    if (propertyId !== undefined && value !== null) edits.push({ propertyId, type, value })
+  }
+  return edits
+}
+
+export function frontmatterText(page: WikiPage, key: string): string | null {
+  const value = page.frontmatter[key]
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null
+}
+
+/**
+ * The properties of an active card: domain (not for a mechanism; `to_domain` for a hypothesis),
+ * page type, wiki, status, page path, and for a hypothesis its status and strength. `last synced`
+ * is added only when `syncedOn` is given: it changes on every sync, so it is not part of the hash.
+ */
+export function pageProperties(
+  page: WikiPage,
+  config: { properties: HeptabaseConfig["properties"]; wikiId: string },
+  syncedOn?: { start: string },
+): PropertyEdit[] {
+  const domain =
+    page.type === "mechanism" ? null : frontmatterText(page, page.type === "hypothesis" ? "to_domain" : "domain")
+  const entries: EditEntry[] = [
+    ["domain", "select", domain],
+    ["page_type", "select", page.type],
+    ["wiki", "select", config.wikiId],
+    ["status", "select", "active"],
+    ["wiki_page", "text", page.path],
+  ]
+  if (syncedOn) entries.push(["last_synced", "date", syncedOn])
+  if (page.type === "hypothesis") {
+    entries.push(["hypothesis_status", "select", frontmatterText(page, "status")])
+    entries.push(["strength", "select", frontmatterText(page, "strength")])
+  }
+  return editsOf(config.properties, entries)
+}
+
+/**
+ * The hash that the card map keeps for a card: the card body and the property values, without the
+ * sync date. A change of either one makes the hash another one.
+ */
+export function cardHash(body: string, properties: readonly PropertyEdit[]): string {
+  const values = properties.map(({ propertyId, type, value }) => ({ propertyId, type, value }))
+  return contentHash(JSON.stringify({ body, properties: values }))
 }

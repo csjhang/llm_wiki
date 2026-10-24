@@ -11,24 +11,34 @@
  * written as plain text. When no create, update, or retire is left, pass 2 plans a `relink`
  * for each page whose card was sent with such a link.
  *
- * The map keeps the hash of the card body that was sent. A page is planned again when the
- * hash of its body now is another one. The hash covers the title, the links, and the
- * footer, as well as the text. It does not cover the property values.
+ * The map keeps the hash of the card that was sent. A page is planned again when the hash of
+ * its card now is another one. The hash covers the body (title, text, links, footer) and the
+ * property values, but not the sync date.
+ *
+ * A mirror card that the user edited is never overwritten: its page gets a `skip-edited`, whether
+ * the page changed or not, until `hepta record` saves the edit as feedback. Two safety rules keep a
+ * read error from looking like a deleted wiki: an unreadable `wiki/` folder stops the command, and a
+ * plan that would retire most of the cards retires none.
  */
 import { readFileSync } from "node:fs"
-import { type HeptabaseConfig, parseHeptabaseYaml, type PropertyKey } from "@/lib/wiki-config/heptabase-config"
-import { type ParseResult, UUID_PATTERN } from "@/lib/wiki-config/types"
-import { parseWikiYaml } from "@/lib/wiki-config/wiki-identity"
+import type { HeptabaseConfig, PropertyKey } from "@/lib/wiki-config/heptabase-config"
+import { UUID_PATTERN } from "@/lib/wiki-config/types"
 import { isRecord } from "@/lib/wiki-config/yaml-util"
 import { parseArgs, parseNowOption } from "./args"
 import { type CardMap, contentHash, loadCardMap, type PageEntry } from "./card-map"
 import { readDatabase } from "./cmd-init"
-import { type CommandResult, isDirectory, resolveInProject } from "./io"
+import { type CommandResult, isDirectory } from "./io"
 import {
+  cardHash,
   compareText,
   createRenderer,
+  editsOf,
+  frontmatterText,
   isSyncable,
   type MirrorRenderer,
+  type PropertyEdit,
+  pageProperties,
+  readProjectConfig,
   readWikiPages,
   RETIRED_BODY,
   RETIRED_TITLE_PREFIX,
@@ -37,12 +47,7 @@ import {
 } from "./mirror-pages"
 import { type CardRef, parseListCards } from "./parse-mcp"
 
-export interface PropertyEdit {
-  propertyId: string
-  type: "select" | "text" | "date"
-  /** A select value is the option name, a text value a string, a date value `{ start: <ISO time> }`. */
-  value: unknown
-}
+export type { PropertyEdit }
 
 /**
  * What the skill does for a page. `contentHash` is the hash of `body`: the skill gives it back
@@ -87,6 +92,9 @@ const OPTION_SPEC = {
 /** A card counts as edited when it changed this long after the last sync. */
 const EDIT_GRACE_MS = 60_000
 
+/** A plan that retires this many cards, and more than half of the active ones, is refused. */
+const MASS_RETIRE_MINIMUM = 5
+
 /** Up to this many links, every mix of resolved and unresolved links is tried. */
 const MAX_ENUMERATED_LINKS = 10
 
@@ -103,8 +111,7 @@ export function planDown(args: string[]): CommandResult {
   if (problems.length > 0 || project === undefined) return { ok: false, problems }
   if (!isDirectory(project)) return { ok: false, problems: [`project folder not found: ${project}`] }
 
-  const heptabase = readConfig(project, "heptabase.yaml", parseHeptabaseYaml, problems)
-  const wiki = readConfig(project, "wiki.yaml", parseWikiYaml, problems)
+  const config = readProjectConfig(project, problems)
   let map: CardMap | null = null
   try {
     map = loadCardMap(project)
@@ -118,47 +125,27 @@ export function planDown(args: string[]): CommandResult {
     const database = readDatabase(parsed.values.database, problems)
     if (database) options = indexOptions(database.schema)
   }
-  if (heptabase && options) checkConfiguredProperties(heptabase, options, problems)
-  if (problems.length > 0 || !heptabase || !wiki || !map || !now) return { ok: false, problems }
+  if (config && options) checkConfiguredProperties(config.heptabase, options, problems)
+  if (problems.length > 0 || !config || !map || !now) return { ok: false, problems }
 
-  const pages = readWikiPages(project)
+  // A project that has no active card yet may have no wiki folder. Otherwise a missing folder is an error,
+  // because every card would look like a page that was deleted.
+  const hasActiveCard = Object.values(map.pages).some((entry) => entry.status === "active")
+  const pages = readWikiPages(project, { allowMissingWiki: !hasActiveCard })
   const plan = planPages({
     project,
     map,
     pages,
     cards,
     options,
-    properties: heptabase.properties,
-    wikiId: wiki.id,
+    properties: config.heptabase.properties,
+    wikiId: config.wiki.id,
     syncedOn: { start: `${now.toISOString().slice(0, 10)}T00:00:00.000Z` },
   })
   return { ok: true, pass: plan.pass, actions: plan.actions, problems: plan.problems }
 }
 
 // --- inputs ------------------------------------------------------------
-
-/** Read and parse a config file of the project. Every issue of the parser becomes a problem. */
-function readConfig<T>(
-  project: string,
-  name: string,
-  parse: (text: string) => ParseResult<T>,
-  problems: string[],
-): T | null {
-  const path = resolveInProject(project, name)
-  let text: string
-  try {
-    text = readFileSync(path, "utf8").replace(/^\uFEFF/, "")
-  } catch {
-    problems.push(`cannot read ${name}: ${path}`)
-    return null
-  }
-  const result = parse(text)
-  if (result.ok) return result.value
-  for (const issue of result.issues) {
-    problems.push(`invalid ${name}: ${issue.path === "" ? "" : `${issue.path}: `}${issue.message}`)
-  }
-  return null
-}
 
 /** The cards of the `list_cards` files, by id. A later file wins for a card that two files list. */
 function readMirrorCards(paths: readonly string[], problems: string[]): Map<string, CardRef> {
@@ -251,6 +238,9 @@ function planPages(input: PlanInput): { pass: 1 | 2; actions: DownAction[]; prob
     if (plan.place) actions.push(plan.place)
   }
 
+  const refusal = refuseMassRetire(input, actions)
+  if (refusal) problems.push({ page: "wiki/", problem: refusal })
+
   // A relink waits until nothing is left to create, update, or retire: those change which pages have a card.
   const pending = actions.some((action) => action.op === "create" || action.op === "update" || action.op === "retire")
   if (!pending) actions.push(...relinks)
@@ -258,32 +248,47 @@ function planPages(input: PlanInput): { pass: 1 | 2; actions: DownAction[]; prob
   return { pass: !pending && relinks.length > 0 ? 2 : 1, actions, problems }
 }
 
+/**
+ * A wiki folder that cannot be read right is the likely cause of many pages that seem deleted. When the plan
+ * would retire at least 5 cards and more than half of the active ones, it retires none of them and says so.
+ * Returns the problem, or null when the plan is fine.
+ */
+function refuseMassRetire(input: PlanInput, actions: DownAction[]): string | null {
+  const retires = actions.filter((action) => action.op === "retire").length
+  const active = Object.values(input.map.pages).filter((entry) => entry.status === "active").length
+  if (retires < MASS_RETIRE_MINIMUM || retires * 2 <= active) return null
+  for (let index = actions.length - 1; index >= 0; index -= 1) {
+    if (actions[index].op === "retire") actions.splice(index, 1)
+  }
+  return `refusing to retire ${retires} of ${active} mirror cards; check the wiki folder`
+}
+
 /** A mapped page whose file is not there (or is not a wiki page any more). */
 function planGone(input: PlanInput, path: string, entry: PageEntry | undefined): PagePlan {
   if (!entry || entry.status !== "active") return { blockers: [], notes: [] }
   const card = input.cards.get(entry.card_id)
-  return finish(input, retire(input, path, entry, card?.title ?? slugOfPath(path)), undefined, [])
+  return finish(input, path, retire(input, path, entry, card?.title ?? slugOfPath(path)), undefined, [])
 }
 
 function planPage(input: PlanInput, renderer: MirrorRenderer, page: WikiPage, entry: PageEntry | undefined): PagePlan {
   const none: PagePlan = { blockers: [], notes: [] }
-  if (!entry) return isSyncable(page) ? finish(input, create(input, renderer, page), undefined, []) : none
+  if (!entry) return isSyncable(page) ? finish(input, page.path, create(input, renderer, page), undefined, []) : none
   if (entry.status === "active" && !page.hasFrontmatter) {
     // The card stays as it is: a broken page is not a reason to retire it.
     return { blockers: ["the frontmatter of this page cannot be read, so its card is left as it is"], notes: [] }
   }
   if (!isSyncable(page)) {
-    return entry.status === "active" ? finish(input, retire(input, page.path, entry, page.title), undefined, []) : none
+    return entry.status === "active" ? finish(input, page.path, retire(input, page.path, entry, page.title), undefined, []) : none
   }
 
   const resolved: string[] = []
   const body = renderer.render(page, new Set(), (slug) => {
     if (!resolved.includes(slug)) resolved.push(slug)
   })
-  const hash = contentHash(body)
+  const hash = cardHash(body, pageProperties(page, input))
   let main: DownAction | undefined
   if (entry.status !== "active" || hash !== entry.content_hash) {
-    const linksOnly = entry.status === "active" && onlyLinksChanged(renderer, page, entry.content_hash, resolved)
+    const linksOnly = entry.status === "active" && onlyLinksChanged(input, renderer, page, entry.content_hash, resolved)
     main = linksOnly
       ? { op: "relink", page: page.path, cardId: entry.card_id, body, contentHash: hash }
       : {
@@ -293,11 +298,11 @@ function planPage(input: PlanInput, renderer: MirrorRenderer, page: WikiPage, en
           title: page.title,
           body,
           contentHash: hash,
-          properties: pageProperties(input, page),
+          properties: pageProperties(page, input, input.syncedOn),
         }
   }
   const { place, notes } = entry.status === "active" ? placement(page, entry) : { place: undefined, notes: [] }
-  return finish(input, main, place, notes)
+  return finish(input, page.path, main, place, notes)
 }
 
 function create(input: PlanInput, renderer: MirrorRenderer, page: WikiPage): DownAction {
@@ -307,8 +312,8 @@ function create(input: PlanInput, renderer: MirrorRenderer, page: WikiPage): Dow
     page: page.path,
     title: page.title,
     body,
-    contentHash: contentHash(body),
-    properties: pageProperties(input, page),
+    contentHash: cardHash(body, pageProperties(page, input)),
+    properties: pageProperties(page, input, input.syncedOn),
   }
 }
 
@@ -329,28 +334,38 @@ function retire(input: PlanInput, path: string, entry: PageEntry, title: string)
 }
 
 /**
- * Applies the two checks that every plan of a page passes: a card that the user edited is not
- * overwritten, and a select value must be an option of the database.
+ * Applies the two checks that every plan of a page passes. A card that the user edited is not
+ * overwritten: the page gets a `skip-edited` instead of its action, or alone when it has none.
+ * And a select value must be an option of the database.
  */
-function finish(input: PlanInput, main: DownAction | undefined, place: DownAction | undefined, notes: string[]): PagePlan {
+function finish(
+  input: PlanInput,
+  path: string,
+  main: DownAction | undefined,
+  place: DownAction | undefined,
+  notes: string[],
+): PagePlan {
+  const entry = input.map.pages[path]
   let checked = main
-  if (main && (main.op === "update" || main.op === "relink" || main.op === "retire")) {
-    const edited = editedCard(input, main.cardId, main.page)
-    if (edited) checked = edited
-  }
+  // The edit of a retired card matters only when the page wants to write to it.
+  if (entry && (entry.status === "active" || main)) checked = editedCard(input, entry, path) ?? main
   const blockers = checked && "properties" in checked ? missingOptions(checked.properties, input.options) : []
   return { main: checked, place, blockers, notes }
 }
 
-/** A `skip-edited` action when the card changed after the last sync of the page. */
-function editedCard(input: PlanInput, cardId: string, path: string): DownAction | null {
-  const entry = input.map.pages[path]
-  const card = input.cards.get(cardId)
-  if (!entry || !card?.updatedAt) return null
+/**
+ * A `skip-edited` action when the card changed more than 60 seconds after the last sync of the page,
+ * and after the last edit that `hepta record` saved as feedback.
+ */
+function editedCard(input: PlanInput, entry: PageEntry, path: string): DownAction | null {
+  const card = input.cards.get(entry.card_id)
+  if (!card?.updatedAt) return null
   const changed = Date.parse(card.updatedAt)
   const synced = Date.parse(entry.last_synced_at)
   if (Number.isNaN(changed) || Number.isNaN(synced) || changed - synced <= EDIT_GRACE_MS) return null
-  return { op: "skip-edited", page: path, cardId, cardUpdatedAt: card.updatedAt }
+  const handled = entry.feedback_card_updated_at === undefined ? Number.NaN : Date.parse(entry.feedback_card_updated_at)
+  if (changed <= handled) return null
+  return { op: "skip-edited", page: path, cardId: entry.card_id, cardUpdatedAt: card.updatedAt }
 }
 
 // --- links -------------------------------------------------------------
@@ -359,9 +374,16 @@ function editedCard(input: PlanInput, cardId: string, path: string): DownAction 
  * True when the hash the map keeps is the hash of this page with some of its card links written
  * as plain text: the page was sent before those pages had a card, and nothing else changed.
  */
-function onlyLinksChanged(renderer: MirrorRenderer, page: WikiPage, storedHash: string, resolved: string[]): boolean {
+function onlyLinksChanged(
+  input: PlanInput,
+  renderer: MirrorRenderer,
+  page: WikiPage,
+  storedHash: string,
+  resolved: string[],
+): boolean {
+  const properties = pageProperties(page, input)
   for (const unresolved of unresolvedSets(resolved)) {
-    if (contentHash(renderer.render(page, unresolved)) === storedHash) return true
+    if (cardHash(renderer.render(page, unresolved), properties) === storedHash) return true
   }
   return false
 }
@@ -383,42 +405,6 @@ function* unresolvedSets(slugs: readonly string[]): Generator<Set<string>> {
 }
 
 // --- properties --------------------------------------------------------
-
-type EditEntry = readonly [PropertyKey, PropertyEdit["type"], unknown]
-
-/** The edits of the properties that heptabase.yaml names, for the values that are not null. */
-function editsOf(ids: HeptabaseConfig["properties"], entries: readonly EditEntry[]): PropertyEdit[] {
-  const edits: PropertyEdit[] = []
-  for (const [key, type, value] of entries) {
-    const propertyId = ids[key]
-    if (propertyId !== undefined && value !== null) edits.push({ propertyId, type, value })
-  }
-  return edits
-}
-
-function frontmatterText(page: WikiPage, key: string): string | null {
-  const value = page.frontmatter[key]
-  return typeof value === "string" && value.trim() !== "" ? value.trim() : null
-}
-
-/** The properties of an active card: domain (not for a mechanism), page type, wiki, status, page path, sync date. */
-function pageProperties(input: PlanInput, page: WikiPage): PropertyEdit[] {
-  const domain =
-    page.type === "mechanism" ? null : frontmatterText(page, page.type === "hypothesis" ? "to_domain" : "domain")
-  const entries: EditEntry[] = [
-    ["domain", "select", domain],
-    ["page_type", "select", page.type],
-    ["wiki", "select", input.wikiId],
-    ["status", "select", "active"],
-    ["wiki_page", "text", page.path],
-    ["last_synced", "date", input.syncedOn],
-  ]
-  if (page.type === "hypothesis") {
-    entries.push(["hypothesis_status", "select", frontmatterText(page, "status")])
-    entries.push(["strength", "select", frontmatterText(page, "strength")])
-  }
-  return editsOf(input.properties, entries)
-}
 
 /** One message for each select value that is not an option of its property. Empty without a database. */
 function missingOptions(properties: readonly PropertyEdit[], options: OptionIndex | null): string[] {

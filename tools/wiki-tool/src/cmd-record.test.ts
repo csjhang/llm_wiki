@@ -7,7 +7,7 @@ import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "no
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { parseFrontmatter } from "@/lib/frontmatter"
-import { contentHash, loadCardMap } from "./card-map"
+import { contentHash, loadCardMap, saveCardMap } from "./card-map"
 import { runCli } from "./cli"
 import type { CommandResult } from "./io"
 import { id, makeProject, pageText, removeProjects } from "./test-project"
@@ -18,6 +18,7 @@ const NOW = "2026-10-24T08:15:30.000Z"
 const PAGE = "wiki/mechanisms/event-driven.md"
 const HASH_A = "a".repeat(64)
 const HASH_B = "b".repeat(64)
+const EDITED = "2026-10-24T09:00:00.000Z"
 
 async function record(project: string, event: unknown): Promise<{ exitCode: number; output: CommandResult }> {
   const text = typeof event === "string" ? event : JSON.stringify(event)
@@ -64,7 +65,7 @@ describe("hepta record", () => {
       const project = makeProject({ [PAGE]: mechanism() })
       const planned = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW])
       const [action] = planned.output.actions as { contentHash: string; body: string }[]
-      expect(action.contentHash).toBe(contentHash(action.body))
+      expect(action.contentHash).toMatch(/^[0-9a-f]{64}$/)
 
       await record(project, { type: "created", page: PAGE, cardId: id(21), cardUpdatedAt: NOW })
       expect(loadCardMap(project).pages[PAGE].content_hash).toBe(action.contentHash)
@@ -98,6 +99,21 @@ describe("hepta record", () => {
       expect(result.exitCode).toBe(2)
       expect(result.output.problems).toEqual([expect.stringContaining(id(21))])
       expect(loadCardMap(project).pages[PAGE].card_id).toBe(id(21))
+    })
+
+    it("refuses a card that another page or a source already holds", async () => {
+      const project = await createdProject({ "wiki/mechanisms/other.md": mechanism("Other") })
+      const other = await record(project, { type: "created", page: "wiki/mechanisms/other.md", cardId: id(21), cardUpdatedAt: NOW, contentHash: HASH_B })
+      expect(other.exitCode).toBe(2)
+      expect(other.output.problems).toEqual([expect.stringContaining(PAGE)])
+
+      const map = loadCardMap(project)
+      map.sources[id(70)] = { raw_path: `raw/sources/heptabase/${id(70)}.md`, card_updated_at: NOW, ingest_commit: null }
+      saveCardMap(project, map)
+      const source = await record(project, { type: "created", page: "wiki/mechanisms/other.md", cardId: id(70), cardUpdatedAt: NOW, contentHash: HASH_B })
+      expect(source.exitCode).toBe(2)
+      expect(source.output.problems).toEqual([expect.stringContaining("source")])
+      expect(Object.keys(loadCardMap(project).pages)).toEqual([PAGE])
     })
 
     it("rejects fields that are missing or wrong", async () => {
@@ -216,7 +232,7 @@ describe("hepta record", () => {
     it("writes a note snapshot", async () => {
       const project = await createdProject()
       const content = "# Event Driven\n\nA line the user added.\n\nSecond paragraph with: colons and --- dashes.\n"
-      const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), content })
+      const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content })
       expect(result.exitCode).toBe(0)
       const relative = `raw/sources/heptabase/feedback-${id(21)}-202610240815.md`
       expect(result.output).toEqual({ ok: true, event: "feedback", page: PAGE, written: relative })
@@ -230,41 +246,67 @@ describe("hepta record", () => {
       expect(parsed.body.trim()).toBe(content.trim())
     })
 
-    it("leaves the map as it is", async () => {
+    it("records the time of the edit it handled and nothing else", async () => {
       const project = await createdProject()
-      const before = readFileSync(join(project, "heptabase-map.json"), "utf8")
-      await record(project, { type: "feedback", page: PAGE, cardId: id(21), content: "Edited." })
-      expect(readFileSync(join(project, "heptabase-map.json"), "utf8")).toBe(before)
+      const before = loadCardMap(project).pages[PAGE]
+      await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content: "Edited." })
+      expect(loadCardMap(project).pages[PAGE]).toEqual({ ...before, feedback_card_updated_at: EDITED })
+    })
+
+    it("needs the time of the edit", async () => {
+      const project = await createdProject()
+      for (const cardUpdatedAt of [undefined, "yesterday"]) {
+        const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt, content: "Edited." })
+        expect(result.exitCode).toBe(2)
+        expect(result.output.problems).toEqual([expect.stringContaining("cardUpdatedAt")])
+      }
+      expect(existsSync(join(project, "raw"))).toBe(false)
+    })
+
+    it("does not overwrite a note of the same minute", async () => {
+      const project = await createdProject()
+      const written: string[] = []
+      for (const content of ["First.", "Second.", "Third."]) {
+        const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content })
+        written.push(result.output.written as string)
+      }
+      const stem = `raw/sources/heptabase/feedback-${id(21)}-202610240815`
+      expect(written).toEqual([`${stem}.md`, `${stem}-2.md`, `${stem}-3.md`])
+      expect(written.map((path) => parseFrontmatter(readFileSync(join(project, path), "utf8")).body.trim())).toEqual([
+        "First.",
+        "Second.",
+        "Third.",
+      ])
     })
 
     it("titles the note by the file name when the page is gone", async () => {
       const project = await createdProject()
       rmSync(join(project, PAGE))
-      const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), content: "Edited." })
+      const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content: "Edited." })
       const parsed = parseFrontmatter(readFileSync(join(project, result.output.written as string), "utf8"))
       expect(parsed.frontmatter?.title).toBe("Feedback on event-driven")
     })
 
     it("keeps a title that needs quoting", async () => {
       const project = await createdProject({ [PAGE]: mechanism('Quote: "x" # y') })
-      const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), content: "Edited." })
+      const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content: "Edited." })
       const parsed = parseFrontmatter(readFileSync(join(project, result.output.written as string), "utf8"))
       expect(parsed.frontmatter?.title).toBe('Feedback on Quote: "x" # y')
     })
 
     it("needs the card of the page and a safe card id", async () => {
       const project = await createdProject()
-      const wrongCard = await record(project, { type: "feedback", page: PAGE, cardId: id(22), content: "Edited." })
+      const wrongCard = await record(project, { type: "feedback", page: PAGE, cardId: id(22), cardUpdatedAt: EDITED, content: "Edited." })
       expect(wrongCard.exitCode).toBe(2)
       expect(wrongCard.output.problems).toEqual([expect.stringContaining(id(21))])
 
-      const traversal = await record(project, { type: "feedback", page: PAGE, cardId: "../../escape", content: "Edited." })
+      const traversal = await record(project, { type: "feedback", page: PAGE, cardId: "../../escape", cardUpdatedAt: EDITED, content: "Edited." })
       expect(traversal.exitCode).toBe(2)
       expect(existsSync(join(project, "raw"))).toBe(false)
 
-      const unmapped = await record(project, { type: "feedback", page: "wiki/other.md", cardId: id(21), content: "Edited." })
+      const unmapped = await record(project, { type: "feedback", page: "wiki/other.md", cardId: id(21), cardUpdatedAt: EDITED, content: "Edited." })
       expect(unmapped.exitCode).toBe(2)
-      const empty = await record(project, { type: "feedback", page: PAGE, cardId: id(21), content: "  \n" })
+      const empty = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content: "  \n" })
       expect(empty.exitCode).toBe(2)
       expect(empty.output.problems).toEqual([expect.stringContaining("content")])
     })

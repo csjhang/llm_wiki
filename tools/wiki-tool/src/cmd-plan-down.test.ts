@@ -5,13 +5,14 @@
  * hepta group. Results of earlier steps (create, record) come from the commands themselves,
  * the way the wiki-sync skill uses them. Ids are placeholders and titles are generic.
  */
-import { readFileSync, rmSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
-import { type CardMap, contentHash, saveCardMap } from "./card-map"
+import { type CardMap, contentHash, loadCardMap, saveCardMap } from "./card-map"
 import { runCli } from "./cli"
-import type { DownAction } from "./cmd-plan-down"
+import type { DownAction, PropertyEdit } from "./cmd-plan-down"
+import { cardHash } from "./mirror-pages"
 import { id, makeProject, pageText, PROPERTY_IDS, removeProjects, writeProjectFile } from "./test-project"
 
 const FIXTURES = fileURLToPath(new URL("../fixtures/", import.meta.url))
@@ -56,6 +57,15 @@ async function recordUpdated(project: string, action: DownAction, now = NOW): Pr
   await record(project, { type: "updated", page: action.page, cardUpdatedAt: now, contentHash: action.contentHash }, now)
 }
 
+/** The hash of a create or update action: the body and the properties, without the sync date. */
+function hashOf(action: DownAction): string {
+  if (action.op !== "create" && action.op !== "update") throw new Error("not a create or update action")
+  return cardHash(
+    action.body,
+    action.properties.filter((property) => property.propertyId !== PROPERTY_IDS.last_synced),
+  )
+}
+
 function mechanism(title: string, body = "Body text.", extra: Record<string, string | string[]> = {}): string {
   return pageText({ type: "mechanism", title, sources: ["a.md"], ...extra }, body)
 }
@@ -98,6 +108,13 @@ describe("hepta plan-down", () => {
     const result = await plan(project)
     expect(result.exitCode).toBe(0)
     const body = `# Event Driven\n\nBody text.\n\n---\n來源：無\n${FOOTER_NOTICE}`
+    const properties: PropertyEdit[] = [
+      { propertyId: PROPERTY_IDS.page_type, type: "select", value: "mechanism" },
+      { propertyId: PROPERTY_IDS.wiki, type: "select", value: "test" },
+      { propertyId: PROPERTY_IDS.status, type: "select", value: "active" },
+      { propertyId: PROPERTY_IDS.wiki_page, type: "text", value: MECHANISM_PATH },
+      { propertyId: PROPERTY_IDS.last_synced, type: "date", value: { start: "2026-10-24T00:00:00.000Z" } },
+    ]
     expect(result.output).toEqual({
       ok: true,
       pass: 1,
@@ -108,14 +125,9 @@ describe("hepta plan-down", () => {
           page: MECHANISM_PATH,
           title: "Event Driven",
           body,
-          contentHash: contentHash(body),
-          properties: [
-            { propertyId: PROPERTY_IDS.page_type, type: "select", value: "mechanism" },
-            { propertyId: PROPERTY_IDS.wiki, type: "select", value: "test" },
-            { propertyId: PROPERTY_IDS.status, type: "select", value: "active" },
-            { propertyId: PROPERTY_IDS.wiki_page, type: "text", value: MECHANISM_PATH },
-            { propertyId: PROPERTY_IDS.last_synced, type: "date", value: { start: "2026-10-24T00:00:00.000Z" } },
-          ],
+          // The hash covers the body and the properties, but not the sync date.
+          contentHash: cardHash(body, properties.slice(0, 4)),
+          properties,
         },
       ],
     })
@@ -187,11 +199,12 @@ describe("hepta plan-down", () => {
         cardId: id(21),
         title: "Event Driven",
         body,
-        contentHash: contentHash(body),
+        contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
         properties: expect.any(Array),
       },
     ])
     const update = changed[0]
+    expect(update.op === "update" && update.contentHash).toBe(hashOf(update))
     expect(update.op === "update" && update.properties.map((property) => property.propertyId)).toEqual([
       PROPERTY_IDS.page_type,
       PROPERTY_IDS.wiki,
@@ -207,6 +220,36 @@ describe("hepta plan-down", () => {
     writeProjectFile(project, MECHANISM_PATH, mechanism("Event Driven Systems"))
     const [action] = (await plan(project)).output.actions
     expect(action).toMatchObject({ op: "update", title: "Event Driven Systems" })
+  })
+
+  it("plans update when only a property value changed", async () => {
+    const concept = (domain: string) =>
+      pageText({ type: "concept", title: "Idea", sources: ["a.md", "b.md"], domain })
+    const hypothesis = (fields: Record<string, string>) =>
+      pageText({ type: "hypothesis", title: "Idea", sources: ["a.md"], to_domain: "ai/x", status: "draft", strength: "surface", ...fields })
+    const cases: { path: string; before: string; after: string }[] = [
+      { path: "wiki/concepts/idea.md", before: concept("ai/x"), after: concept("ai/y") },
+      { path: "wiki/hypotheses/idea.md", before: hypothesis({}), after: hypothesis({ to_domain: "ai/y" }) },
+      { path: "wiki/hypotheses/idea.md", before: hypothesis({}), after: hypothesis({ status: "testing" }) },
+      { path: "wiki/hypotheses/idea.md", before: hypothesis({}), after: hypothesis({ strength: "structural" }) },
+    ]
+    for (const { path, before, after } of cases) {
+      const project = makeProject({ [path]: before })
+      await recordCreated(project, (await plan(project)).output.actions[0], id(21))
+      expect((await plan(project)).output.actions).toEqual([])
+      writeProjectFile(project, path, after)
+      const [action] = (await plan(project)).output.actions
+      expect(action).toMatchObject({ op: "update", cardId: id(21) })
+      // The card body is the same; the update carries the new property value.
+      expect(action.op === "update" && action.properties.length).toBeGreaterThan(0)
+    }
+  })
+
+  it("does not plan an update for a new sync date", async () => {
+    const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+    await recordCreated(project, (await plan(project)).output.actions[0], id(21))
+    const later = await runCli(["hepta", "plan-down", "--project", project, "--now", "2026-12-01T00:00:00Z"])
+    expect(later.output.actions).toEqual([])
   })
 
   it("detects user edits", async () => {
@@ -233,11 +276,56 @@ describe("hepta plan-down", () => {
     expect((await plan(project, ["--mirror-cards", beyond])).output.actions.map((a) => a.op)).toEqual(["skip-edited"])
   })
 
-  it("does not report an edited card whose page did not change", async () => {
+  it("reports an edited card even when its page did not change", async () => {
     const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
     await recordCreated(project, (await plan(project)).output.actions[0], id(21))
     const edited = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: "2026-10-24T09:00:00.000Z" }])
-    expect((await plan(project, ["--mirror-cards", edited])).output.actions).toEqual([])
+    expect((await plan(project, ["--mirror-cards", edited])).output.actions).toEqual([
+      { op: "skip-edited", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: "2026-10-24T09:00:00.000Z" },
+    ])
+    // A card within the 60 seconds is not an edit.
+    const quiet = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: "2026-10-24T08:01:00.000Z" }])
+    expect((await plan(project, ["--mirror-cards", quiet])).output.actions).toEqual([])
+  })
+
+  it("one edit yields one feedback", async () => {
+    const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+    await recordCreated(project, (await plan(project)).output.actions[0], id(21))
+    const editedAt = "2026-10-24T09:00:00.000Z"
+    const list = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: editedAt }])
+
+    const first = await plan(project, ["--mirror-cards", list])
+    expect(first.output.actions.map((action) => action.op)).toEqual(["skip-edited"])
+    await record(project, { type: "feedback", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: editedAt, content: "Edited." })
+
+    // The edit is handled: no second skip-edited for it.
+    expect((await plan(project, ["--mirror-cards", list])).output.actions).toEqual([])
+
+    // A change of the page now plans a normal update.
+    writeProjectFile(project, MECHANISM_PATH, mechanism("Event Driven", "Changed body."))
+    expect((await plan(project, ["--mirror-cards", list])).output.actions.map((action) => action.op)).toEqual(["update"])
+
+    // A later edit is a new edit.
+    const later = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: "2026-10-24T10:00:00.000Z" }])
+    expect((await plan(project, ["--mirror-cards", later])).output.actions).toEqual([
+      { op: "skip-edited", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: "2026-10-24T10:00:00.000Z" },
+    ])
+  })
+
+  it("gives no action to a card that is not in the map, even when it is edited and has the title of a page", async () => {
+    const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+    const strangers = writeMirrorList(project, [{ id: id(99), title: "Event Driven", updated: "2026-10-24T12:00:00.000Z" }])
+
+    // The page has no card yet: it is created, whatever cards have its title.
+    const created = await plan(project, ["--mirror-cards", strangers])
+    expect(created.output.actions.map((action) => [action.op, action.page])).toEqual([["create", MECHANISM_PATH]])
+    await recordCreated(project, created.output.actions[0], id(21))
+
+    // The page has a card: the other card is still not touched.
+    writeProjectFile(project, MECHANISM_PATH, mechanism("Event Driven", "Changed body."))
+    const changed = await plan(project, ["--mirror-cards", strangers])
+    expect(changed.output.actions).toMatchObject([{ op: "update", cardId: id(21) }])
+    expect(JSON.stringify(changed.output)).not.toContain(id(99))
   })
 
   it("reads the mirror cards from several list files", async () => {
@@ -764,6 +852,111 @@ describe("hepta plan-down", () => {
     const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
     await plan(project)
     expect(() => readFileSync(join(project, "heptabase-map.json"))).toThrow()
+  })
+
+  describe("when the wiki folder cannot be read", () => {
+    const PAGES = Array.from({ length: 10 }, (_unused, index) => `wiki/mechanisms/page-${String(index + 1).padStart(2, "0")}.md`)
+
+    /** A project whose map has the first `mapped` pages, and whose folder has the pages from `from` on. */
+    async function projectWithPages(mapped: number, from: number): Promise<string> {
+      const files: Record<string, string> = { "wiki/overview.md": "Overview.\n" }
+      for (const path of PAGES.slice(from)) files[path] = mechanism(path)
+      const project = makeProject(files)
+      const entries: Record<string, { card_id: string; content_hash: string }> = {}
+      PAGES.slice(0, mapped).forEach((path, index) => {
+        entries[path] = { card_id: id(21 + index), content_hash: "x" }
+      })
+      saveCardMap(project, mapOf(entries))
+      return project
+    }
+
+    it("stops when wiki is not a folder", async () => {
+      const project = makeProject({ wiki: "not a folder" })
+      const result = await plan(project)
+      expect(result.exitCode).toBe(1)
+      expect(result.output.problems).toEqual([expect.stringContaining("unexpected error")])
+    })
+
+    it("stops when wiki is missing but the map has active cards", async () => {
+      const project = makeProject()
+      saveCardMap(project, mapOf({ [MECHANISM_PATH]: { card_id: id(21), content_hash: "x" } }))
+      const result = await plan(project)
+      expect(result.exitCode).toBe(1)
+      expect(result.output.problems).toEqual([expect.stringContaining("ENOENT")])
+    })
+
+    it("accepts a missing wiki when the map has no active card", async () => {
+      const project = makeProject()
+      saveCardMap(project, mapOf({ [MECHANISM_PATH]: { card_id: id(21), content_hash: "x", status: "retired" } }))
+      expect((await plan(project)).output).toMatchObject({ ok: true, actions: [] })
+      expect((await plan(makeProject())).output).toMatchObject({ ok: true, actions: [] })
+    })
+
+    it.skipIf(process.getuid?.() === 0)("stops when a folder cannot be read", async () => {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      await recordCreated(project, (await plan(project)).output.actions[0], id(21))
+      const folder = join(project, "wiki/mechanisms")
+      chmodSync(folder, 0o000)
+      try {
+        const result = await plan(project)
+        expect(result.exitCode).toBe(1)
+        expect(result.output.problems).toEqual([expect.stringContaining("EACCES")])
+      } finally {
+        chmodSync(folder, 0o755)
+      }
+    })
+
+    it("follows a link to a page, a link to a folder, and survives a link loop", async () => {
+      const project = makeProject({
+        "elsewhere/outside.md": mechanism("Outside"),
+        "elsewhere/inner/deep.md": mechanism("Deep"),
+        "wiki/mechanisms/real.md": mechanism("Real"),
+      })
+      mkdirSync(join(project, "wiki/linked"), { recursive: true })
+      symlinkSync(join(project, "elsewhere/outside.md"), join(project, "wiki/linked/outside.md"))
+      symlinkSync(join(project, "elsewhere/inner"), join(project, "wiki/inner"), "dir")
+      symlinkSync(join(project, "wiki"), join(project, "wiki/mechanisms/loop"), "dir")
+      symlinkSync(join(project, "wiki/missing.md"), join(project, "wiki/broken.md"))
+      const result = await plan(project)
+      expect(result.exitCode).toBe(0)
+      expect(result.output.actions.map((action) => action.page)).toEqual([
+        "wiki/inner/deep.md",
+        "wiki/linked/outside.md",
+        "wiki/mechanisms/real.md",
+      ])
+    })
+
+    it("refuses to retire more than half of the cards", async () => {
+      // Ten active cards; the folder holds the last four pages only, so six cards would be retired.
+      const project = await projectWithPages(10, 6)
+      const result = await plan(project)
+      expect(result.exitCode).toBe(0)
+      expect(result.output.actions.filter((action) => action.op === "retire")).toEqual([])
+      expect(result.output.problems).toEqual([
+        { page: "wiki/", problem: "refusing to retire 6 of 10 mirror cards; check the wiki folder" },
+      ])
+    })
+
+    it("retires exactly half of the cards, and fewer than five", async () => {
+      const half = await plan(await projectWithPages(10, 5))
+      expect(half.output.actions.filter((action) => action.op === "retire")).toHaveLength(5)
+      expect(half.output.problems).toEqual([])
+
+      // Four of four cards: all of them go, as there are fewer than five.
+      const few = await plan(await projectWithPages(4, 4))
+      expect(few.output.actions.filter((action) => action.op === "retire")).toHaveLength(4)
+      expect(few.output.problems).toEqual([])
+    })
+
+    it("does not count retired cards", async () => {
+      const project = await projectWithPages(6, 6)
+      const map = loadCardMap(project)
+      for (const path of PAGES.slice(0, 3)) map.pages[path].status = "retired"
+      saveCardMap(project, map)
+      // Three active cards, all gone: fewer than five.
+      const result = await plan(project)
+      expect(result.output.actions.filter((action) => action.op === "retire")).toHaveLength(3)
+    })
   })
 
   describe("when the inputs are wrong", () => {
