@@ -491,3 +491,90 @@ describe("mergePageContent — LLM failure fallback", () => {
     expect(out).toContain("new body content")
   })
 })
+
+// ──────────────────────────────────────────────────────────────────
+// Lists of a mechanism wiki — instances, lenses, also_from
+// ──────────────────────────────────────────────────────────────────
+
+describe("mergePageContent — lists of a mechanism wiki", () => {
+  const MECHANISM_EXISTING = PAGE(
+    'type: mechanism\ntitle: Event-driven\nlenses: [hardware]\ninstances: [async-handshake]\nsources: ["a.md"]',
+    "old body content here",
+  )
+  const MECHANISM_INCOMING = PAGE(
+    'type: mechanism\ntitle: Event-driven\nlenses: [ai]\ninstances: [spike-driven-neuron]\nsources: ["b.md"]',
+    "new body content here",
+  )
+
+  it("keeps instances and lenses of the first domain when the merger fails", async () => {
+    const merger = vi.fn().mockRejectedValue(new Error("LLM rate limited"))
+    const out = await mergePageContent(MECHANISM_INCOMING, MECHANISM_EXISTING, merger, baseOpts)
+
+    expect(out).toMatch(/instances:\s*\[\s*"async-handshake",\s*"spike-driven-neuron"\s*\]/)
+    expect(out).toMatch(/lenses:\s*\[\s*"hardware",\s*"ai"\s*\]/)
+  })
+
+  it("keeps instances and lenses of the first domain when the merger answers without frontmatter", async () => {
+    const merger = vi.fn().mockResolvedValue("raw markdown with no frontmatter at all")
+    const out = await mergePageContent(MECHANISM_INCOMING, MECHANISM_EXISTING, merger, baseOpts)
+
+    expect(out).toMatch(/instances:\s*\[\s*"async-handshake",\s*"spike-driven-neuron"\s*\]/)
+    expect(out).toMatch(/lenses:\s*\[\s*"hardware",\s*"ai"\s*\]/)
+  })
+
+  it("re-applies the lists on top of a merger answer that dropped them", async () => {
+    const merger = vi.fn().mockResolvedValue(PAGE(
+      'type: mechanism\ntitle: Event-driven\nlenses: [ai]\ninstances: [spike-driven-neuron]\nsources: ["a.md", "b.md"]',
+      "merged body that is long enough to clear the seventy percent threshold",
+    ))
+    const out = await mergePageContent(MECHANISM_INCOMING, MECHANISM_EXISTING, merger, baseOpts)
+
+    expect(out).toMatch(/instances:\s*\[\s*"async-handshake",\s*"spike-driven-neuron"\s*\]/)
+    expect(out).toMatch(/lenses:\s*\[\s*"hardware",\s*"ai"\s*\]/)
+  })
+
+  it("keeps instances and lenses when a corrected source replaces the body", async () => {
+    const existing = PAGE(
+      'type: mechanism\ntitle: Event-driven\nlenses: [hardware]\ninstances: [async-handshake]\nsources: ["b.md"]',
+      "obsolete body",
+    )
+    const merger = vi.fn()
+    const out = await mergePageContent(MECHANISM_INCOMING, existing, merger, {
+      ...baseOpts,
+      replaceExistingBody: true,
+    })
+
+    expect(out).toContain("new body content here")
+    expect(out).toMatch(/instances:\s*\[\s*"async-handshake",\s*"spike-driven-neuron"\s*\]/)
+    expect(out).toMatch(/lenses:\s*\[\s*"hardware",\s*"ai"\s*\]/)
+    expect(merger).not.toHaveBeenCalled()
+  })
+
+  it("keeps also_from of a source page when a corrected source replaces the body", async () => {
+    const existing = PAGE(
+      'type: source\ntitle: Article\nsources: ["a.md"]\nalso_from:\n  - raw/sources/copy.md',
+      "obsolete summary",
+    )
+    const incoming = PAGE('type: source\ntitle: Article\nsources: ["a.md"]', "corrected summary")
+    const out = await mergePageContent(incoming, existing, vi.fn(), {
+      ...baseOpts,
+      replaceExistingBody: true,
+    })
+
+    expect(out).toContain("corrected summary")
+    expect(out).toMatch(/also_from:\s*\[\s*"raw\/sources\/copy.md"\s*\]/)
+  })
+
+  it("leaves a plain page without these lists exactly as it was", async () => {
+    // A page that the existing copy lacks the fields on is not touched: nothing to preserve.
+    const existing = PAGE('type: entity\ntitle: Foo\ntags: [old]\nsources: ["a.md"]', "old body content here")
+    const incoming = PAGE(
+      'type: entity\ntitle: Foo\ntags: [old]\nlenses: [ai]\ninstances: [x]\nalso_from: [y]\nsources: ["a.md"]',
+      "new body content here",
+    )
+    const merger = vi.fn().mockRejectedValue(new Error("down"))
+    const out = await mergePageContent(incoming, existing, merger, baseOpts)
+
+    expect(out).toBe(incoming)
+  })
+})

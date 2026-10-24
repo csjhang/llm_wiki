@@ -8,7 +8,8 @@
  * Production wires this up against `streamChat`; tests use mocks.
  *
  * Three layers of protection:
- *   1. Frontmatter array fields (sources / tags / related) — always
+ *   1. Frontmatter array fields (sources / tags / related, and the lists of
+ *      a mechanism wiki: instances / lenses / also_from) — always
  *      union-merged at the application layer regardless of whether
  *      the LLM is involved. Zero-cost, deterministic.
  *   2. Body — if old and new bodies differ, ask the LLM to produce
@@ -27,8 +28,15 @@ import { parseFrontmatter } from "./frontmatter"
 import { mergeArrayFieldsIntoContent } from "./sources-merge"
 import { normalizeMalformedWikilinks } from "./ingest-sanitize"
 
-/** Frontmatter array fields unioned across re-ingests. */
-const UNION_FIELDS = ["sources", "tags", "related"] as const
+/**
+ * Frontmatter array fields unioned across re-ingests.
+ *
+ * `instances` and `lenses` are the lists of a mechanism page: each domain adds its own entry, so
+ * a page rewritten from one source must keep the entries of the others. `also_from` lists the
+ * other entry points of a source summary page. A page whose existing copy lacks one of these
+ * fields is not touched (see `mergeArrayFieldsIntoContent`), so a plain wiki is unaffected.
+ */
+const UNION_FIELDS = ["sources", "tags", "related", "instances", "lenses", "also_from"] as const
 
 /**
  * Frontmatter scalar fields whose existing value MUST survive an

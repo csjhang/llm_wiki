@@ -21,9 +21,13 @@ import { useWikiStore } from "@/stores/wiki-store"
 
 vi.mock("@/commands/fs", () => realFs)
 
-/** What the mocked model saw, in call order: the kind of call and the page or source it was about. */
+/**
+ * What the mocked model saw, in call order: the kind of call and the page or source it was about.
+ * `mergeAnswer` replaces the answer to a page merge when a test sets it.
+ */
 const seen = vi.hoisted(() => ({
   calls: [] as Array<{ kind: "analysis" | "generation" | "merge" | "other"; subject: string; system: string; user: string }>,
+  mergeAnswer: null as string | null,
 }))
 
 vi.mock("@/lib/llm-client", () => ({
@@ -36,7 +40,7 @@ vi.mock("@/lib/llm-client", () => ({
 
     if (system.startsWith("You are merging source-backed material")) {
       record("merge", MERGED_MECHANISM_PAGE_SLUG)
-      cb.onToken(MERGED_MECHANISM_PAGE)
+      cb.onToken(seen.mergeAnswer ?? MERGED_MECHANISM_PAGE)
       cb.onDone()
       return
     }
@@ -335,6 +339,7 @@ describe("mechanism ingest, end to end", () => {
   beforeEach(async () => {
     mockStreamChat.mockClear()
     seen.calls.length = 0
+    seen.mergeAnswer = null
     vi.spyOn(console, "warn").mockImplementation(() => {})
     tmp = await createTempProject("mechanism-e2e")
     project = tmp.path
@@ -519,5 +524,40 @@ describe("mechanism ingest, end to end", () => {
     expect(useReviewStore.getState().items).toEqual([])
     const fingerprint = (await storedFingerprints()).find((f) => f.sourcePath === `raw/sources/${copySlug}.md`)
     expect(fingerprint?.summaryPath).toBe(`wiki/sources/${HANDSHAKE}.md`)
+  })
+
+  it("keeps the instances of the first domain when the page merge falls back", async () => {
+    await ingest(HANDSHAKE)
+    // A merge answer without frontmatter is rejected, so the page is the new one plus the unioned lists.
+    seen.mergeAnswer = "A plain answer without any frontmatter at all."
+
+    await ingest(SPIKING)
+
+    const mechanism = await page(MECHANISM_PATH)
+    expect(seen.calls.filter((call) => call.kind === "merge")).toHaveLength(1)
+    expect(mechanism).toMatch(/^instances: \["request-acknowledge-handshake", "spike-driven-neuron"\]$/m)
+    expect(mechanism).toMatch(/^lenses: \["hardware", "ai"\]$/m)
+    expect(mechanism).toContain(`"${HANDSHAKE}.md"`)
+    expect(mechanism).toContain(`"${SPIKING}.md"`)
+    expect(mechanism).not.toMatch(/^domain:/m)
+  })
+
+  it("keeps also_from of the source page when the first source is ingested again", async () => {
+    await ingest(HANDSHAKE)
+    const copySlug = "async-handshake-circuits-copy"
+    await writeWhitespaceCopy(HANDSHAKE, copySlug)
+    await ingest(copySlug)
+    const alsoFrom = new RegExp(`^also_from:\\n {2}- raw/sources/${copySlug}\\.md$`, "m")
+    expect(await page(`wiki/sources/${HANDSHAKE}.md`)).toMatch(alsoFrom)
+
+    // The first source is corrected and goes through the pipeline again: its summary page is rewritten.
+    const original = await page(`raw/sources/${HANDSHAKE}.md`)
+    await writeFileRaw(`${project}/raw/sources/${HANDSHAKE}.md`, `${original}\nOne more sentence about the handshake.\n`)
+    seen.calls.length = 0
+    await ingest(HANDSHAKE)
+
+    expect(seen.calls.map((call) => call.kind)).toContain("generation")
+    const summary = await page(`wiki/sources/${HANDSHAKE}.md`)
+    expect(summary).toMatch(/^also_from: \["raw\/sources\/async-handshake-circuits-copy\.md"\]$/m)
   })
 })
