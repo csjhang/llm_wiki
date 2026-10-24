@@ -271,15 +271,24 @@ describe("hepta plan-down", () => {
     ])
   })
 
-  it("allows 60 seconds between the sync and the card update", async () => {
+  it("allows 2 seconds between the recorded card time and the card update", async () => {
     const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
     await recordCreated(project, (await plan(project)).output.actions[0], id(21))
     writeProjectFile(project, MECHANISM_PATH, mechanism("Event Driven", "Changed body."))
 
-    const within = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: "2026-10-24T08:01:00.000Z" }])
+    const within = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: "2026-10-24T08:00:02.000Z" }])
     expect((await plan(project, ["--mirror-cards", within])).output.actions.map((a) => a.op)).toEqual(["update"])
-    const beyond = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: "2026-10-24T08:01:01.000Z" }])
+    const beyond = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: "2026-10-24T08:00:02.001Z" }])
     expect((await plan(project, ["--mirror-cards", beyond])).output.actions.map((a) => a.op)).toEqual(["skip-edited"])
+  })
+
+  it("detects a user edit made 29 seconds after the last recorded write", async () => {
+    const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+    await recordCreated(project, (await plan(project)).output.actions[0], id(21))
+    const edited = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: "2026-10-24T08:00:29.000Z" }])
+    expect((await plan(project, ["--mirror-cards", edited])).output.actions).toEqual([
+      { op: "skip-edited", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: "2026-10-24T08:00:29.000Z" },
+    ])
   })
 
   it("reports an edited card even when its page did not change", async () => {
@@ -289,8 +298,8 @@ describe("hepta plan-down", () => {
     expect((await plan(project, ["--mirror-cards", edited])).output.actions).toEqual([
       { op: "skip-edited", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: "2026-10-24T09:00:00.000Z" },
     ])
-    // A card within the 60 seconds is not an edit.
-    const quiet = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: "2026-10-24T08:01:00.000Z" }])
+    // A card within the 2 seconds is not an edit.
+    const quiet = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: "2026-10-24T08:00:02.000Z" }])
     expect((await plan(project, ["--mirror-cards", quiet])).output.actions).toEqual([])
   })
 
@@ -1024,7 +1033,7 @@ describe("hepta plan-down", () => {
   })
 
   describe("the time of the card at plan time", () => {
-    const PLAN_TIME = "2026-10-24T08:00:30.000Z"
+    const PLAN_TIME = "2026-10-24T08:00:02.000Z"
 
     it("is on update, relink, retire, and place", async () => {
       const hypothesis = pageText({ type: "hypothesis", title: "Idea", sources: ["a.md"], status: "draft", heptabase_whiteboard: id(31) })
@@ -1104,14 +1113,22 @@ describe("hepta plan-down", () => {
         (await plan(project, updatedAt(project, updated))).output.actions.map((action) => action.op)
       // The card has the time of the last write: it is not an edit, although it is an hour after the sync.
       expect(await ops("2026-10-24T09:00:00.000Z")).toEqual([])
-      expect(await ops("2026-10-24T09:01:00.000Z")).toEqual([])
-      expect(await ops("2026-10-24T09:01:01.000Z")).toEqual(["skip-edited"])
+      expect(await ops("2026-10-24T09:00:02.000Z")).toEqual([])
+      expect(await ops("2026-10-24T09:00:03.000Z")).toEqual(["skip-edited"])
     })
 
     it("catches an edit that is within the clock skew of this machine", async () => {
       // The machine clock runs an hour ahead: the sync time is later than the card time.
       const project = await skewedProject("2026-10-24T07:00:00.000Z")
       expect((await plan(project, updatedAt(project, "2026-10-24T07:05:00.000Z"))).output.actions.map((a) => a.op)).toEqual(["skip-edited"])
+    })
+
+    it("uses 2 seconds when the map has a card time, and 60 seconds only for the sync time", async () => {
+      // The same card, 29 seconds after the sync: an edit by the card time, not an edit by the sync time.
+      const stamped = await skewedProject(NOW)
+      expect((await plan(stamped, updatedAt(stamped, "2026-10-24T08:00:29.000Z"))).output.actions.map((a) => a.op)).toEqual(["skip-edited"])
+      const unstamped = await skewedProject(undefined)
+      expect((await plan(unstamped, updatedAt(unstamped, "2026-10-24T08:00:29.000Z"))).output.actions).toEqual([])
     })
 
     it("falls back to the sync time when the map has no card time", async () => {

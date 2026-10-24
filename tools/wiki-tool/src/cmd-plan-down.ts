@@ -131,8 +131,17 @@ const OPTION_SPEC = {
 
 const NEEDS_MIRROR_LIST = "pass every page of list_cards for the mirror tag with --mirror-cards"
 
-/** A card counts as edited when it changed this long after the last write that the map recorded. */
-const EDIT_GRACE_MS = 60_000
+/**
+ * A card counts as edited when it changed this long after the last write that the map recorded, when both times are
+ * on the clock of Heptabase (the `card_updated_at` of the map and the `updatedAt` of the list).
+ */
+const EDIT_GRACE_MS = 2_000
+
+/**
+ * The same, when the map has no card time and the sync time stands in for it. That time is on the clock of this
+ * machine, which can run ahead of or behind Heptabase, so the grace is wide.
+ */
+const EDIT_GRACE_FALLBACK_MS = 60_000
 
 /** A plan that retires this many cards, and more than half of the active ones, is refused. */
 const MASS_RETIRE_MINIMUM = 5
@@ -471,16 +480,18 @@ function finish(
 }
 
 /**
- * A `skip-edited` action when the card changed more than 60 seconds after the last write that the map recorded
- * (the card time of that write, which is on the clock of Heptabase), and after the last edit that `hepta record`
- * saved as feedback. The sync time is on the clock of this machine and is used only when the map has no card time.
+ * A `skip-edited` action when the card changed more than 2 seconds after the last write that the map recorded
+ * (the card time of that write, which is on the clock of Heptabase like the time in the list), and after the last
+ * edit that `hepta record` saved as feedback. The sync time is on the clock of this machine and is used only when
+ * the map has no card time; it gets a grace of 60 seconds, for the difference between the two clocks.
  */
 function editedCard(entry: PageEntry, path: string, card: CardRef): DownAction | null {
   if (!card.updatedAt) return null
   const changed = Date.parse(card.updatedAt)
   const written = Date.parse(entry.card_updated_at ?? "")
   const baseline = Number.isNaN(written) ? Date.parse(entry.last_synced_at) : written
-  if (Number.isNaN(changed) || Number.isNaN(baseline) || changed - baseline <= EDIT_GRACE_MS) return null
+  const grace = Number.isNaN(written) ? EDIT_GRACE_FALLBACK_MS : EDIT_GRACE_MS
+  if (Number.isNaN(changed) || Number.isNaN(baseline) || changed - baseline <= grace) return null
   const handled = entry.feedback_card_updated_at === undefined ? Number.NaN : Date.parse(entry.feedback_card_updated_at)
   if (changed <= handled) return null
   return { op: "skip-edited", page: path, cardId: entry.card_id, cardUpdatedAt: card.updatedAt }
