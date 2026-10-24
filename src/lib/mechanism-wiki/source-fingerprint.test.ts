@@ -11,8 +11,10 @@ vi.mock("@/commands/fs", () => realFs)
 import {
   checkDuplicateSource,
   findDuplicateSource,
+  noteOtherEntryPoint,
   normalizeUrl,
   recordFingerprint,
+  shingleContainment,
   shingleSimilarity,
   summaryPathForSource,
 } from "./source-fingerprint"
@@ -71,6 +73,20 @@ const LONG_BASE = Array.from(
 ).join(" ")
 const LONG_EXTENDED = `${LONG_BASE} ${Array.from({ length: 60 }, (_, i) => `Addendum ${i} covers the wiring cost of every extra request line.`).join(" ")}`
 
+/** 1,900 characters: long enough for containment to count, short enough to fit in the sample. */
+const MEDIUM_BASE = Array.from(
+  { length: 30 },
+  (_, i) => `Step ${i} of the four-phase handshake raises or lowers one wire.`,
+).join(" ")
+/** The same text with about 35% more at the end. Its Jaccard similarity to the base is under 0.85. */
+const MEDIUM_EXTENDED = `${MEDIUM_BASE} ${Array.from(
+  { length: 11 },
+  (_, i) => `Extra ${i} explains why the delay element needs a safety margin.`,
+).join(" ")}`
+
+/** About 40% more text than ARTICLE: a Jaccard similarity between 0.5 and 0.85, and too short for containment. */
+const ARTICLE_PLUS = `${ARTICLE}\n\nThe delay element must cover the slowest data path plus the setup time of the latch, and the margin shrinks as the supply voltage drops or the temperature rises.`
+
 describe("normalizeUrl", () => {
   it("strips tracking params and fragments and lowercases the host but keeps path case", () => {
     expect(
@@ -123,6 +139,23 @@ describe("shingleSimilarity", () => {
   })
 })
 
+describe("shingleContainment", () => {
+  it("is the share of the shorter text's shingles found in the longer text", () => {
+    expect(shingleContainment(MEDIUM_BASE, MEDIUM_EXTENDED)).toBe(1)
+    expect(shingleContainment(MEDIUM_EXTENDED, MEDIUM_BASE)).toBeLessThan(1)
+    expect(shingleContainment(OTHER_TEXT, MEDIUM_EXTENDED)).toBeLessThan(0.1)
+  })
+
+  it("scores empty text 0", () => {
+    expect(shingleContainment("", MEDIUM_BASE)).toBe(0)
+    expect(shingleContainment(MEDIUM_BASE, "")).toBe(0)
+  })
+
+  it("is high where Jaccard is low for a text and its longer copy", () => {
+    expect(shingleSimilarity(MEDIUM_BASE, MEDIUM_EXTENDED)).toBeLessThan(0.85)
+  })
+})
+
 describe("source fingerprints on disk", () => {
   let tmp: { path: string; cleanup: () => Promise<void> }
   let project: string
@@ -149,9 +182,9 @@ describe("source fingerprints on disk", () => {
     return parsed.fingerprints
   }
 
-  it("finds a url hit when the text differs", async () => {
+  it("frontmatter URL alone is a duplicate", async () => {
     const summary = await writeSummary("raw/sources/a.md")
-    await recordFingerprint(project, "raw/sources/a.md", `url: https://example.com/post\n\n${OTHER_TEXT}`)
+    await recordFingerprint(project, "raw/sources/a.md", `---\nurl: https://example.com/post\n---\n\n${OTHER_TEXT}`)
 
     const hit = await findDuplicateSource(
       project,
@@ -163,7 +196,74 @@ describe("source fingerprints on disk", () => {
     expect(hit?.score).toBe(1)
     expect(hit?.existing.sourcePath).toBe("raw/sources/a.md")
     expect(hit?.existing.url).toBe("https://example.com/post")
+    expect(hit?.existing.urlSource).toBe("frontmatter")
     expect(summaryPathForSource(project, hit?.existing.sourcePath ?? "")).toBe(summary)
+  })
+
+  it("body URL alone is not a duplicate", async () => {
+    await writeSummary("raw/sources/a.md")
+    await recordFingerprint(project, "raw/sources/a.md", `Clipped from https://example.com/\n\n${OTHER_TEXT}`)
+
+    expect(await findDuplicateSource(project, "raw/sources/b.md", `Clipped from https://example.com\n\n${ARTICLE}`)).toBeNull()
+    // The fingerprint stays: its summary page exists.
+    expect(await stored()).toHaveLength(1)
+  })
+
+  it("body URL plus similar text is a duplicate", async () => {
+    await writeSummary("raw/sources/a.md")
+    await recordFingerprint(project, "raw/sources/a.md", `Clipped from https://example.com/post\n\n${ARTICLE}`)
+
+    const hit = await findDuplicateSource(
+      project,
+      "raw/sources/b.md",
+      `Clipped from https://example.com/post?utm_source=x\n\n${ARTICLE_PLUS}`,
+    )
+
+    expect(shingleSimilarity(ARTICLE, ARTICLE_PLUS)).toBeLessThan(0.85)
+    expect(shingleSimilarity(ARTICLE, ARTICLE_PLUS)).toBeGreaterThanOrEqual(0.5)
+    expect(hit?.reason).toBe("url")
+    expect(hit?.score).toBeGreaterThanOrEqual(0.5)
+    expect(hit?.score).toBeLessThan(0.85)
+    expect(hit?.existing.urlSource).toBe("body")
+  })
+
+  it("body URL with text under 0.5 similarity is not a duplicate", async () => {
+    await writeSummary("raw/sources/a.md")
+    await recordFingerprint(project, "raw/sources/a.md", `Clipped from https://example.com/post\n\n${ARTICLE}`)
+    const unrelated = `Clipped from https://example.com/post\n\n${OTHER_TEXT}`
+    expect(await findDuplicateSource(project, "raw/sources/b.md", unrelated)).toBeNull()
+  })
+
+  it("a URL from the body of either copy needs text evidence", async () => {
+    await writeSummary("raw/sources/a.md")
+    await writeSummary("raw/sources/c.md")
+    await recordFingerprint(project, "raw/sources/a.md", `---\nurl: https://example.com/post\n---\n${OTHER_TEXT}`)
+    await recordFingerprint(project, "raw/sources/c.md", `See https://example.com/other\n${OTHER_TEXT} and more words follow here`)
+
+    // Frontmatter URL on the stored copy, body URL on the new one.
+    expect(await findDuplicateSource(project, "raw/sources/b.md", `Read https://example.com/post\n${ARTICLE}`)).toBeNull()
+    // Body URL on the stored copy, frontmatter URL on the new one.
+    expect(
+      await findDuplicateSource(project, "raw/sources/d.md", `---\nurl: https://example.com/other\n---\n${ARTICLE}`),
+    ).toBeNull()
+  })
+
+  it("an entry recorded without urlSource counts as a body URL", async () => {
+    await writeSummary("raw/sources/a.md")
+    await writeFileRaw(
+      `${project}/${FINGERPRINTS}`,
+      JSON.stringify({
+        fingerprints: [
+          { sourcePath: "raw/sources/a.md", url: "https://example.com/post", textSample: "unrelated words only here today", length: 31, summaryPath: null },
+        ],
+      }),
+    )
+
+    expect(
+      await findDuplicateSource(project, "raw/sources/b.md", `---\nurl: https://example.com/post\n---\n${ARTICLE}`),
+    ).toBeNull()
+    await recordFingerprint(project, "raw/sources/c.md", ARTICLE)
+    expect((await stored())[0].urlSource).toBe("body")
   })
 
   it("reads the url from the first 20 lines when there is no frontmatter", async () => {
@@ -171,10 +271,15 @@ describe("source fingerprints on disk", () => {
     await recordFingerprint(project, "raw/sources/a.md", `# Title\n\nOriginal: https://example.com/post.\n\n${OTHER_TEXT}`)
     const fingerprints = await stored()
     expect(fingerprints[0].url).toBe("https://example.com/post")
+    expect(fingerprints[0].urlSource).toBe("body")
 
-    const late = `${"filler\n".repeat(25)}https://example.com/other\n${OTHER_TEXT}`
-    await recordFingerprint(project, "raw/sources/late.md", late)
-    expect((await stored()).find((f) => f.sourcePath === "raw/sources/late.md")?.url).toBeNull()
+    const lateText = `${"filler\n".repeat(25)}https://example.com/other\n${OTHER_TEXT}`
+    await recordFingerprint(project, "raw/sources/late.md", lateText)
+    const late = (await stored()).find((f) => f.sourcePath === "raw/sources/late.md")
+    expect(late?.url).toBeNull()
+    expect(late?.urlSource).toBeNull()
+    await recordFingerprint(project, "raw/sources/fm.md", `---\nurl: https://example.com/fm\n---\n${OTHER_TEXT}`)
+    expect((await stored()).find((f) => f.sourcePath === "raw/sources/fm.md")?.urlSource).toBe("frontmatter")
   })
 
   it("finds a text hit", async () => {
@@ -185,6 +290,36 @@ describe("source fingerprints on disk", () => {
 
     expect(hit?.reason).toBe("text")
     expect(hit?.score).toBeGreaterThanOrEqual(0.85)
+    expect(hit?.existing.sourcePath).toBe("raw/sources/a.md")
+  })
+
+  it("finds a text hit for a longer copy of the same text by containment", async () => {
+    await writeSummary("raw/sources/a.md")
+    await recordFingerprint(project, "raw/sources/a.md", MEDIUM_BASE)
+
+    const hit = await findDuplicateSource(project, "raw/sources/b.md", MEDIUM_EXTENDED)
+
+    expect(hit?.reason).toBe("text")
+    expect(hit?.score).toBeGreaterThanOrEqual(0.9)
+  })
+
+  it("a short note quoted inside a long article is not a duplicate when the note is under 1,000 characters", async () => {
+    await writeSummary("raw/sources/a.md")
+    await recordFingerprint(project, "raw/sources/a.md", LONG_BASE)
+    const note = LONG_BASE.slice(500, 1000)
+
+    expect(note.length).toBeLessThan(1000)
+    expect(await findDuplicateSource(project, "raw/sources/note.md", note)).toBeNull()
+  })
+
+  it("a quote of 1,000 characters or more taken from a long article is a duplicate", async () => {
+    await writeSummary("raw/sources/a.md")
+    await recordFingerprint(project, "raw/sources/a.md", LONG_BASE)
+    const excerpt = LONG_BASE.slice(500, 2000)
+
+    const hit = await findDuplicateSource(project, "raw/sources/excerpt.md", excerpt)
+
+    expect(hit?.reason).toBe("text")
     expect(hit?.existing.sourcePath).toBe("raw/sources/a.md")
   })
 
@@ -244,6 +379,7 @@ describe("source fingerprints on disk", () => {
     expect(fingerprint).toMatchObject({
       sourcePath: "raw/sources/a.md",
       url: "https://example.com/x",
+      urlSource: "body",
       summaryPath: null,
     })
     expect(fingerprint.length).toBeGreaterThan(100)
@@ -309,6 +445,47 @@ describe("source fingerprints on disk", () => {
     await recordFingerprint(project, "raw/sources/b.md", ARTICLE, summary)
     const [first] = await stored()
     expect(first.summaryPath).toBeNull()
+  })
+
+  it("a read error does not overwrite the fingerprint file", async () => {
+    await writeSummary("raw/sources/a.md")
+    await recordFingerprint(project, "raw/sources/a.md", ARTICLE)
+    const file = `${project}/${FINGERPRINTS}`
+    const before = await readFileRaw(file)
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const read = realFs.readFile.bind(realFs)
+    vi.spyOn(realFs, "readFile").mockImplementation(async (path: string) => {
+      if (path === file) throw new Error("EIO: input/output error")
+      return read(path)
+    })
+
+    await expect(recordFingerprint(project, "raw/sources/b.md", OTHER_TEXT)).rejects.toThrow("EIO")
+    await expect(findDuplicateSource(project, "raw/sources/c.md", ARTICLE)).rejects.toThrow("EIO")
+    expect(await checkDuplicateSource(project, `${project}/raw/sources/d.md`, ARTICLE)).toBeNull()
+    expect(warn).toHaveBeenCalled()
+
+    vi.restoreAllMocks()
+    expect(await readFileRaw(file)).toBe(before)
+  })
+
+  it("normalizes backslashes, a ./ prefix, and a project prefix in another case in the source path", async () => {
+    await recordFingerprint(project, "raw\\sources\\win.md", ARTICLE)
+    await recordFingerprint(project, "./raw/sources/dot.md", OTHER_TEXT)
+    await recordFingerprint(project, `${project.toUpperCase()}/raw/sources/upper.md`, `${OTHER_TEXT} and then some more words`)
+    await recordFingerprint(project, `${project.replace(/\//g, "\\")}\\raw\\sources\\abs.md`, `${OTHER_TEXT} and one more thing`)
+
+    expect((await stored()).map((f) => f.sourcePath)).toEqual([
+      "raw/sources/win.md",
+      "raw/sources/dot.md",
+      "raw/sources/upper.md",
+      "raw/sources/abs.md",
+    ])
+
+    // The same file spelled another way is the same path, so it is not a duplicate of itself.
+    await writeSummary("raw/sources/win.md")
+    expect(await findDuplicateSource(project, "./raw/sources/win.md", ARTICLE)).toBeNull()
+    expect(await findDuplicateSource(project, `${project.toUpperCase()}/raw/sources/win.md`, ARTICLE)).toBeNull()
+    expect(await findDuplicateSource(project, `${project.replace(/\//g, "\\")}\\raw\\sources\\win.md`, ARTICLE)).toBeNull()
   })
 
   it("ignores entries of the wrong shape", async () => {
@@ -404,9 +581,42 @@ describe("checkDuplicateSource", () => {
     expect(lines[2]).toBe("NEWER: raw/sources/web/b.md")
   })
 
-  it("adds a review for a url match whose text is much longer", async () => {
-    await seed("raw/sources/a.md", `url: https://example.com/post\n\n${OTHER_TEXT}`)
-    const longer = `url: https://example.com/post/?utm_source=x\n\n${ARTICLE}\n\n${ARTICLE}`
+  it("a 30% longer copy of the same text is a duplicate and gets a duplicate-source review", async () => {
+    const summary = await seed("raw/sources/a.md", MEDIUM_BASE)
+
+    const result = await checkDuplicateSource(project, `${project}/raw/sources/web/b.md`, MEDIUM_EXTENDED)
+
+    expect(MEDIUM_EXTENDED.length / MEDIUM_BASE.length).toBeGreaterThanOrEqual(1.3)
+    expect(result?.hit.reason).toBe("text")
+    expect(result?.summaryPath).toBe(summary)
+    expect(result?.review?.type).toBe("duplicate-source")
+    expect(result?.review?.description).toContain("EXISTING: raw/sources/a.md")
+    expect(result?.review?.description).toContain("NEWER: raw/sources/web/b.md")
+  })
+
+  it("names the original source as EXISTING when the match is a copy recorded against it", async () => {
+    const summary = await seed("raw/sources/a.md", MEDIUM_BASE)
+    // b.md was skipped as a copy of a.md; it carries a frontmatter URL that a.md does not.
+    await recordFingerprint(project, "raw/sources/b.md", `---\nurl: https://example.com/z\n---\n${MEDIUM_BASE}`, summary)
+
+    const result = await checkDuplicateSource(
+      project,
+      `${project}/raw/sources/c.md`,
+      `---\nurl: https://example.com/z\n---\n${MEDIUM_EXTENDED}`,
+    )
+
+    expect(result?.hit.existing.sourcePath).toBe("raw/sources/b.md")
+    expect(result?.original.sourcePath).toBe("raw/sources/a.md")
+    expect(result?.summaryPath).toBe(summary)
+    const lines = (result?.review?.description ?? "").split("\n")
+    expect(lines).toContain("EXISTING: raw/sources/a.md")
+    expect(lines).toContain("NEWER: raw/sources/c.md")
+    expect(lines.join("\n")).not.toContain("raw/sources/b.md")
+  })
+
+  it("adds a review for a frontmatter url match whose text is much longer", async () => {
+    await seed("raw/sources/a.md", `---\nurl: https://example.com/post\n---\n${OTHER_TEXT}`)
+    const longer = `---\nurl: https://example.com/post/?utm_source=x\n---\n${ARTICLE}\n\n${ARTICLE}`
 
     const result = await checkDuplicateSource(project, `${project}/raw/sources/b.md`, longer)
 
@@ -451,6 +661,123 @@ describe("checkDuplicateSource", () => {
     await writeFileRaw(`${project}/${FINGERPRINTS}/placeholder`, "x")
 
     expect(await checkDuplicateSource(project, `${project}/raw/sources/b.md`, ARTICLE)).toBeNull()
+    expect(warn).toHaveBeenCalled()
+  })
+})
+
+describe("noteOtherEntryPoint", () => {
+  let tmp: { path: string; cleanup: () => Promise<void> }
+  let project: string
+  const PAGE = "wiki/sources/a.md"
+  const NEW_PATH = "raw/sources/web/b.md"
+
+  beforeEach(async () => {
+    tmp = await createTempProject("fingerprints-also-from")
+    project = tmp.path
+  })
+
+  afterEach(async () => {
+    vi.restoreAllMocks()
+    await tmp.cleanup()
+  })
+
+  async function page(content: string): Promise<void> {
+    await writeFileRaw(`${project}/${PAGE}`, content)
+  }
+  async function current(): Promise<string> {
+    return readFileRaw(`${project}/${PAGE}`)
+  }
+
+  it("a duplicate hit lists the new entry point on the existing summary page", async () => {
+    await page('---\ntitle: "Source"\ntype: source\n---\n\n# Source\n')
+
+    expect(await noteOtherEntryPoint(project, PAGE, `${project}/${NEW_PATH}`)).toBe(true)
+
+    expect(await current()).toBe(
+      '---\ntitle: "Source"\ntype: source\nalso_from:\n  - raw/sources/web/b.md\n---\n\n# Source\n',
+    )
+  })
+
+  it("does not add the same entry point twice", async () => {
+    await page("---\ntitle: Source\n---\n\n# Source\n")
+    expect(await noteOtherEntryPoint(project, PAGE, NEW_PATH)).toBe(true)
+    const once = await current()
+
+    expect(await noteOtherEntryPoint(project, PAGE, NEW_PATH)).toBe(false)
+    expect(await noteOtherEntryPoint(project, PAGE, `${project}/${NEW_PATH}`)).toBe(false)
+
+    expect(await current()).toBe(once)
+    expect(once.match(/web\/b\.md/g)).toHaveLength(1)
+  })
+
+  it("adds to an existing block list after its last item and keeps every other byte", async () => {
+    await page("---\ntitle: Source\nalso_from:\n    - raw/sources/x.md\n    - raw/sources/y.md\nrelated: [a]\n---\nBody\n")
+
+    expect(await noteOtherEntryPoint(project, PAGE, NEW_PATH)).toBe(true)
+
+    expect(await current()).toBe(
+      "---\ntitle: Source\nalso_from:\n    - raw/sources/x.md\n    - raw/sources/y.md\n    - raw/sources/web/b.md\nrelated: [a]\n---\nBody\n",
+    )
+  })
+
+  it("recognizes a quoted item that is already there", async () => {
+    await page('---\nalso_from:\n  - "raw/sources/web/b.md"  # first copy\n---\n')
+    expect(await noteOtherEntryPoint(project, PAGE, NEW_PATH)).toBe(false)
+  })
+
+  it("fills an empty key", async () => {
+    await page("---\nalso_from:\ntitle: Source\n---\n")
+    expect(await noteOtherEntryPoint(project, PAGE, NEW_PATH)).toBe(true)
+    expect(await current()).toBe("---\nalso_from:\n  - raw/sources/web/b.md\ntitle: Source\n---\n")
+  })
+
+  it("adds to an inline list", async () => {
+    await page('---\nalso_from: ["raw/sources/x.md"]  # copies\ntitle: Source\n---\n')
+    expect(await noteOtherEntryPoint(project, PAGE, NEW_PATH)).toBe(true)
+    expect(await current()).toBe('---\nalso_from: ["raw/sources/x.md", raw/sources/web/b.md]  # copies\ntitle: Source\n---\n')
+
+    await page("---\nalso_from: []\n---\n")
+    expect(await noteOtherEntryPoint(project, PAGE, NEW_PATH)).toBe(true)
+    expect(await current()).toBe("---\nalso_from: [raw/sources/web/b.md]\n---\n")
+    expect(await noteOtherEntryPoint(project, PAGE, NEW_PATH)).toBe(false)
+  })
+
+  it("quotes a path that is not a plain YAML word", async () => {
+    await page("---\ntitle: Source\n---\n")
+    expect(await noteOtherEntryPoint(project, PAGE, "raw/sources/my note: draft #2.md")).toBe(true)
+    expect(await current()).toBe('---\ntitle: Source\nalso_from:\n  - "raw/sources/my note: draft #2.md"\n---\n')
+  })
+
+  it("keeps CRLF line endings", async () => {
+    await page("---\r\ntitle: Source\r\n---\r\n\r\n# Source\r\n")
+    expect(await noteOtherEntryPoint(project, PAGE, NEW_PATH)).toBe(true)
+    expect(await current()).toBe(
+      "---\r\ntitle: Source\r\nalso_from:\r\n  - raw/sources/web/b.md\r\n---\r\n\r\n# Source\r\n",
+    )
+  })
+
+  it("does nothing for a page without frontmatter and says so once", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    await page("# Source\n\nNo frontmatter here.\n")
+
+    expect(await noteOtherEntryPoint(project, PAGE, NEW_PATH)).toBe(false)
+    expect(await noteOtherEntryPoint(project, PAGE, "raw/sources/web/c.md")).toBe(false)
+
+    expect(await current()).toBe("# Source\n\nNo frontmatter here.\n")
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it("leaves a page alone when also_from is not a list", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    await page("---\nalso_from: raw/sources/x.md\n---\n")
+    expect(await noteOtherEntryPoint(project, PAGE, NEW_PATH)).toBe(false)
+    expect(await current()).toBe("---\nalso_from: raw/sources/x.md\n---\n")
+    expect(warn).toHaveBeenCalledTimes(1)
+  })
+
+  it("does not throw when the page is missing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    expect(await noteOtherEntryPoint(project, "wiki/sources/missing.md", NEW_PATH)).toBe(false)
     expect(warn).toHaveBeenCalled()
   })
 })

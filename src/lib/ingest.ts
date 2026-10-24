@@ -45,7 +45,7 @@ import {
 import type { MultimodalConfig } from "@/stores/wiki-store"
 import { BASE_GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { loadMechanismContext } from "@/lib/mechanism-wiki/context"
-import { checkDuplicateSource, recordFingerprint } from "@/lib/mechanism-wiki/source-fingerprint"
+import { checkDuplicateSource, noteOtherEntryPoint, recordFingerprint } from "@/lib/mechanism-wiki/source-fingerprint"
 import { listMechanismSlugsStub, parseAnalysisDecisions } from "@/lib/mechanism-wiki/decisions"
 import { enforceMechanismRules, proposedDomainReview } from "@/lib/mechanism-wiki/enforce"
 import { appendPromptSection, prepareMechanismPrompts } from "@/lib/mechanism-wiki/prompts"
@@ -921,21 +921,33 @@ async function autoIngestImpl(
 
   // A mechanism wiki does not ingest a source that repeats one it already has, even when the copy came
   // through another entry point. The queue treats "no files" as a failure, so return the first copy's
-  // source summary page: it exists and is unchanged, so it adds nothing to a commit.
+  // source summary page. It gains an `also_from` line for this entry point, so it is a written file and
+  // the edit goes through the commit runner like every other write.
   if (mechanismCtx) {
     throwIfIngestAborted(signal, activityId)
     const duplicate = await checkDuplicateSource(pp, sp, sourceContent)
     if (duplicate) {
-      if (duplicate.review) useReviewStore.getState().addItems([duplicate.review])
-      console.log(
-        `[ingest:mechanism] "${sourceIdentity}" repeats ${duplicate.hit.existing.sourcePath} (${duplicate.hit.reason}, ${duplicate.hit.score.toFixed(2)}); skipped`,
-      )
-      activity.updateItem(activityId, {
-        status: "done",
-        detail: `Skipped (duplicate of ${duplicate.hit.existing.sourcePath}) — ${duplicate.summaryPath}`,
-        filesWritten: [duplicate.summaryPath],
+      return runCommit(async () => {
+        throwIfIngestAborted(signal, activityId)
+        onFileWritten?.(duplicate.summaryPath)
+        if (await noteOtherEntryPoint(pp, duplicate.summaryPath, sp)) {
+          try {
+            await refreshProjectFileTree(pp, { bumpDataVersion: true })
+          } catch {
+            // ignore
+          }
+        }
+        if (duplicate.review) useReviewStore.getState().addItems([duplicate.review])
+        console.log(
+          `[ingest:mechanism] "${sourceIdentity}" repeats ${duplicate.original.sourcePath} (${duplicate.hit.reason}, ${duplicate.hit.score.toFixed(2)}); skipped`,
+        )
+        activity.updateItem(activityId, {
+          status: "done",
+          detail: `Skipped (duplicate of ${duplicate.original.sourcePath}) — ${duplicate.summaryPath}`,
+          filesWritten: [duplicate.summaryPath],
+        })
+        return [duplicate.summaryPath]
       })
-      return [duplicate.summaryPath]
     }
   }
 

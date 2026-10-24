@@ -76,6 +76,15 @@ const ARTICLE_COPY = [
   "* Two-phase protocols toggle each line once per transfer and save the return step.",
 ].join("\n")
 
+const MEDIUM_BASE = Array.from(
+  { length: 30 },
+  (_, i) => `Step ${i} of the four-phase handshake raises or lowers one wire.`,
+).join(" ")
+const MEDIUM_EXTENDED = `${MEDIUM_BASE} ${Array.from(
+  { length: 11 },
+  (_, i) => `Extra ${i} explains why the delay element needs a safety margin.`,
+).join(" ")}`
+
 const OTHER_TEXT =
   "Sourdough starters need regular feeding with flour and water. Discard half before each feeding, keep the jar somewhere warm, and expect bubbles within eight hours."
 
@@ -174,6 +183,10 @@ describe("ingest and duplicate sources", () => {
     // The copy is remembered against the first summary page, so a third copy matches too.
     const copy = (await storedFingerprints()).find((f) => f.sourcePath === "raw/sources/web/b.md")
     expect(copy?.summaryPath).toBe(summaryOf("a.md"))
+    // The first copy's summary page lists the new entry point.
+    expect(await fs.readFile(`${project}/${summaryOf("a.md")}`, "utf8")).toContain(
+      'also_from:\n  - raw/sources/web/b.md\n---\n',
+    )
     // About the same length: no review.
     expect(useReviewStore.getState().items).toEqual([])
     const activity = useActivityStore.getState().items.find((item) => item.title === "b.md")
@@ -183,9 +196,9 @@ describe("ingest and duplicate sources", () => {
 
   it("sends a duplicate-source review when the copy is at least 20% longer", async () => {
     await mechanismWiki()
-    await ingest("raw/sources/a.md", `url: https://example.com/handshakes\n\n${ARTICLE}`)
+    await ingest("raw/sources/a.md", `---\nurl: https://example.com/handshakes\n---\n${ARTICLE}`)
     mockStreamChat.mockClear()
-    const longer = `url: https://Example.com/handshakes/?utm_source=feed\n\n${ARTICLE}\n\n${ARTICLE.toUpperCase()}\n\nMore on delay elements.`
+    const longer = `---\nurl: https://Example.com/handshakes/?utm_source=feed\n---\n${ARTICLE}\n\n${ARTICLE.toUpperCase()}\n\nMore on delay elements.`
 
     const written = await ingest("raw/sources/web/b.md", longer)
 
@@ -200,6 +213,33 @@ describe("ingest and duplicate sources", () => {
     const lines = review.description.split("\n")
     expect(lines).toContain("EXISTING: raw/sources/a.md")
     expect(lines).toContain("NEWER: raw/sources/web/b.md")
+  })
+
+  it("a 30% longer copy of the same text is a duplicate and gets a duplicate-source review", async () => {
+    await mechanismWiki()
+    await ingest("raw/sources/a.md", MEDIUM_BASE)
+    mockStreamChat.mockClear()
+
+    const written = await ingest("raw/sources/web/b.md", MEDIUM_EXTENDED)
+
+    expect(mockStreamChat).not.toHaveBeenCalled()
+    expect(written).toEqual([summaryOf("a.md")])
+    const reviews = useReviewStore.getState().items.filter((item) => item.type === "duplicate-source")
+    expect(reviews).toHaveLength(1)
+    expect(reviews[0].description.split("\n")).toContain("EXISTING: raw/sources/a.md")
+  })
+
+  it("a second hit from the same entry point does not list it twice", async () => {
+    await mechanismWiki()
+    await ingest("raw/sources/a.md", ARTICLE)
+    await ingest("raw/sources/web/b.md", ARTICLE_COPY)
+    await ingest("raw/sources/web/b.md", ARTICLE_COPY)
+    await ingest("raw/sources/c.md", ARTICLE_COPY)
+
+    const page = await fs.readFile(`${project}/${summaryOf("a.md")}`, "utf8")
+    expect(page).toMatch(
+      /^---\ntitle: "Source"\ncreated: [\d-]+\nupdated: [\d-]+\nsources: \["a\.md"\]\nalso_from:\n {2}- raw\/sources\/web\/b\.md\n {2}- raw\/sources\/c\.md\n---\n\n# Source$/,
+    )
   })
 
   it("stale fingerprint is dropped and the source is ingested", async () => {
