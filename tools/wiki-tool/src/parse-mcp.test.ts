@@ -17,6 +17,7 @@ import {
   parseListCards,
   parseListWhiteboards,
   parseMindMap,
+  parseMindMapHeader,
   parsePagingTrailer,
   parseWhiteboardStructure,
 } from "./parse-mcp"
@@ -287,6 +288,24 @@ describe("parseWhiteboardStructure", () => {
     expect(structure.sections[3]).toEqual({ id: id(26), title: "Section Four", cards: [] })
   })
 
+  it("says which section holds each mind map", () => {
+    const structure = parseWhiteboardStructure(fixture("read_whiteboard_structure.txt"))
+    expect(structure.mindMaps).toEqual([{ id: id(20), title: "Topic one", sectionId: id(26) }])
+    const text = [
+      `whiteboard "Board" [${id(1)}]`,
+      `section "S" [${id(2)}]`,
+      `  mindMap "In section" [${id(3)}] 2 nodes`,
+      `mindMap "Not indented" [${id(4)}] 2 nodes`,
+      "(unsectioned)",
+      `  mindMap "Loose" [${id(5)}] 2 nodes`,
+    ].join("\n")
+    expect(parseWhiteboardStructure(text).mindMaps).toEqual([
+      { id: id(3), title: "In section", sectionId: id(2) },
+      { id: id(4), title: "Not indented", sectionId: null },
+      { id: id(5), title: "Loose", sectionId: null },
+    ])
+  })
+
   it("accepts the JSON envelope and the raw text alike", () => {
     const raw = fixtureContent("read_whiteboard_structure.txt")
     expect(parseWhiteboardStructure(envelope(raw))).toEqual(parseWhiteboardStructure(raw))
@@ -399,6 +418,19 @@ describe("parseMindMap", () => {
 
   it("returns an empty list for a mind map without card nodes", () => {
     expect(parseMindMap(`mindMap "Empty" [${id(1)}] 0 nodes`)).toEqual([])
+  })
+})
+
+describe("parseMindMapHeader", () => {
+  it("reads the header of a mind map result", () => {
+    expect(parseMindMapHeader(fixture("read_object_mindmap.txt"))).toEqual({ id: id(20), title: "Topic one" })
+    expect(parseMindMapHeader(fixtureContent("read_object_mindmap.txt"))).toEqual({ id: id(20), title: "Topic one" })
+  })
+
+  it("is null for the result of a card or for other text", () => {
+    expect(parseMindMapHeader(fixture("read_object_page1.txt"))).toBeNull()
+    expect(parseMindMapHeader("No mind map here.")).toBeNull()
+    expect(parseMindMapHeader("")).toBeNull()
   })
 })
 

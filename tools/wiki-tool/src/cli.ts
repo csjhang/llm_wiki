@@ -10,10 +10,11 @@
  */
 import manifest from "../../../plugins/llm-wiki/.claude-plugin/plugin.json"
 import { HEPTA_GROUP } from "./cmd-hepta"
+import { FUSE_GROUP } from "./fuse"
 import type { CommandGroup, CommandHandler, CommandResult } from "./io"
 
-/** Command groups. The recut, lint, and fuse groups register here. */
-const GROUPS: readonly CommandGroup[] = [HEPTA_GROUP]
+/** Command groups. The recut and lint groups register here. */
+const GROUPS: readonly CommandGroup[] = [HEPTA_GROUP, FUSE_GROUP]
 
 /** Commands that take no group. */
 const TOP_LEVEL_COMMANDS: Record<string, CommandHandler> = {

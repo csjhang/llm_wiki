@@ -63,6 +63,8 @@ export interface WhiteboardStructure {
   sections: { id: string; title: string; cards: { id: string; title: string; type: string }[] }[]
   unsectioned: { id: string; title: string; type: string }[]
   mindMapIds: string[]
+  /** The mind maps in the order of the text; `sectionId` is the section that holds the mind map, null when it is loose. */
+  mindMaps: { id: string; title: string; sectionId: string | null }[]
 }
 
 export interface PagingTrailer {
@@ -273,6 +275,7 @@ export function parseWhiteboardStructure(text: string): WhiteboardStructure {
   const sections: WhiteboardStructure["sections"] = []
   const unsectioned: WhiteboardStructure["unsectioned"] = []
   const mindMapIds: string[] = []
+  const mindMaps: WhiteboardStructure["mindMaps"] = []
   let current: WhiteboardStructure["sections"][number] | null = null
   let seenObject = false
 
@@ -293,6 +296,7 @@ export function parseWhiteboardStructure(text: string): WhiteboardStructure {
       sections.push(current)
     } else if (item.keyword === "mindMap") {
       mindMapIds.push(item.id)
+      mindMaps.push({ id: item.id, title: item.title, sectionId: current && item.indent > 0 ? current.id : null })
     } else {
       const card = { id: item.id, title: item.title, type: item.keyword }
       if (current && item.indent > 0) current.cards.push(card)
@@ -301,7 +305,7 @@ export function parseWhiteboardStructure(text: string): WhiteboardStructure {
   }
 
   if (!header) throw new Error("not a whiteboard structure: no whiteboard line found")
-  return { id: header.id, title: header.title, sections, unsectioned, mindMapIds }
+  return { id: header.id, title: header.title, sections, unsectioned, mindMapIds, mindMaps }
 }
 
 /** The card nodes of a mind map object, in order. `id` is the card id, not the node id. */
@@ -312,6 +316,16 @@ export function parseMindMap(text: string): { id: string; title: string }[] {
     if (match) cards.push({ id: match[2], title: unescapeTitle(match[1]) })
   }
   return cards
+}
+
+/**
+ * The header of a read_object result of a mind map (the JSON envelope or its text): the first line, such as
+ * `mindMap "<title>" [<uuid>] 7 nodes`. Null for any other text.
+ */
+export function parseMindMapHeader(text: string): { id: string; title: string } | null {
+  const first = linesOf(text).find((line) => line.trim() !== "")
+  const item = first === undefined ? null : parseObjectLine(first)
+  return item !== null && item.keyword === "mindMap" ? { id: item.id, title: item.title } : null
 }
 
 /**
