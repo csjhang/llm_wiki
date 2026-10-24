@@ -13,7 +13,11 @@
  * A card belongs to the wiki through a root whiteboard. For each whiteboard of the card, the walk goes
  * up the stored tree (the whiteboard itself first) and stops at the first root. A card that reaches two
  * different roots, or none, needs a decision (`ask`). A card that has a snapshot already was accepted
- * then, so its update is planned without asking again. Giving `--whiteboards` replaces the stored tree.
+ * then, so its update is planned without asking again. The answer to an `ask` is kept in the map
+ * (`hepta record` event `up-decision`): `skip` leaves the card out, a root id is the root of the card.
+ *
+ * Giving `--whiteboards` replaces the stored tree, unless the list is partial (its last page says that
+ * more whiteboards follow): a partial list would drop the boards it lacks, so it only adds a warning.
  */
 import { readFileSync } from "node:fs"
 import { parseArgs, parseNowOption } from "./args"
@@ -64,16 +68,21 @@ export function planUp(args: string[]): CommandResult {
   if (problems.length > 0 || !config || !map || !now) return { ok: false, problems }
 
   const warnings: string[] = []
-  if (tree) {
-    if (tree.partial) warnings.push(`the whiteboard list is partial (${tree.partial}), so the stored tree holds only these whiteboards`)
+  if (tree?.partial) {
+    const stored = map.whiteboards_cache.items.length
+    warnings.push(`the whiteboard list is partial (${tree.partial}), so the stored tree (${stored} whiteboards) was not changed`)
+  } else if (tree) {
     map.whiteboards_cache = { updated_at: now.toISOString(), items: tree.nodes }
     saveCardMap(project, map)
+  } else if (map.whiteboards_cache.items.length === 0) {
+    warnings.push("the whiteboard tree is empty; pass --whiteboards")
   }
 
   const parents = parentIndex(map.whiteboards_cache.items)
   const roots = new Set(config.roots)
   const mirrorIds = new Set(Object.values(map.pages).map((entry) => entry.card_id))
-  const skipped = { archived: 0, mirror: 0, unchanged: 0 }
+  const decisions = map.up_decisions ?? {}
+  const skipped = { archived: 0, mirror: 0, unchanged: 0, declined: 0 }
   const actions: UpAction[] = []
 
   for (const card of cards) {
@@ -92,8 +101,17 @@ export function planUp(args: string[]): CommandResult {
       continue
     }
     if (!recorded) {
-      // The first root each whiteboard reaches; two whiteboards under one root are one root.
-      const reached = new Set(chains.flatMap((chain) => chain.find((boardId) => roots.has(boardId)) ?? []))
+      const decision = Object.prototype.hasOwnProperty.call(decisions, card.id) ? decisions[card.id] : undefined
+      if (decision === "skip") {
+        skipped.declined += 1
+        continue
+      }
+      // The first root each whiteboard reaches; two whiteboards under one root are one root. The root the user
+      // chose counts as the only root, unless heptabase.yaml does not list it any more.
+      const reached =
+        decision !== undefined && roots.has(decision)
+          ? new Set([decision])
+          : new Set(chains.flatMap((chain) => chain.find((boardId) => roots.has(boardId)) ?? []))
       if (reached.size !== 1) {
         actions.push({ op: "ask", cardId: card.id, title: card.title, reason: reached.size === 0 ? "no-root" : "two-roots" })
         continue

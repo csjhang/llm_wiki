@@ -10,6 +10,7 @@
  *   {"type":"placed","page","whiteboardId"}
  *   {"type":"retired","page"[,"cardUpdatedAt"]}
  *   {"type":"feedback","page","cardId","cardUpdatedAt","content"}
+ *   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or a root whiteboard id)
  *
  * `contentHash` is the `contentHash` of the action. It is the hash of the card that was sent
  * (body and property values), which can differ from the page now (links to cards that did not
@@ -18,6 +19,9 @@
  * A `feedback` event saves the text a user wrote in a mirror card as a note under
  * `raw/sources/heptabase/`, so the next ingest reads it. It also records the time of that edit
  * (`cardUpdatedAt`, the `updatedAt` of the card) in the map, so plan-down reports one edit once.
+ *
+ * An `up-decision` event keeps the user's answer to a question of `plan-up` (an `ask` action): `skip` leaves the
+ * card out, a root id says which root the card belongs to. `plan-up` then does not ask about the card again.
  */
 import { existsSync } from "node:fs"
 import { posix } from "node:path"
@@ -30,6 +34,7 @@ import {
   cardHash,
   createRenderer,
   pageProperties,
+  readHeptabaseConfig,
   readProjectConfig,
   readWikiPage,
   readWikiPages,
@@ -58,6 +63,7 @@ const HANDLERS: Record<string, EventHandler> = {
   placed: recordPlaced,
   retired: recordRetired,
   feedback: recordFeedback,
+  "up-decision": recordUpDecision,
 }
 
 export function record(args: string[]): CommandResult {
@@ -317,6 +323,27 @@ function recordFeedback(context: RecordContext): CommandResult {
   context.map.pages[page] = { ...existing, feedback_card_updated_at }
   saveCardMap(context.project, context.map)
   return { ok: true, event: "feedback", page, written: relative }
+}
+
+/** The answer to a question of `plan-up`. A root has to be one of the roots of heptabase.yaml. */
+function recordUpDecision(context: RecordContext): CommandResult {
+  const fields = new Fields(context.event)
+  const cardId = fields.id("cardId")
+  const decision = context.event.decision
+  const problems = fields.problems
+  if (decision === "skip") {
+    // Nothing to check.
+  } else if (typeof decision === "string" && UUID_PATTERN.test(decision)) {
+    const config = readHeptabaseConfig(context.project, problems)
+    if (config && !config.roots.includes(decision)) problems.push(`decision ${decision} is not a root in heptabase.yaml`)
+  } else {
+    problems.push('event "decision" must be "skip" or the id of a root whiteboard (a lowercase UUID)')
+  }
+  if (problems.length > 0 || typeof decision !== "string") return fail(problems)
+
+  context.map.up_decisions = { ...context.map.up_decisions, [cardId]: decision }
+  saveCardMap(context.project, context.map)
+  return { ok: true, event: "up-decision", cardId, decision }
 }
 
 /** `<stem>.md`, or `<stem>-2.md`, `<stem>-3.md`, ... for the first name that is not a file yet. */

@@ -113,6 +113,20 @@ describe("loadCardMap", () => {
     writeFileSync(join(project, "heptabase-map.json"), "[]")
     expect(() => loadCardMap(project)).toThrow(/heptabase-map\.json/)
   })
+
+  it("keeps the answers to plan-up questions, which are optional", () => {
+    const project = makeProject()
+    expect(loadCardMap(project).up_decisions).toBeUndefined()
+    const decisions = { [id(9)]: "skip", [id(10)]: id(12) }
+    saveCardMap(project, { ...sampleMap(), up_decisions: decisions })
+    expect(loadCardMap(project).up_decisions).toEqual(decisions)
+  })
+
+  it.each([[[]], ["skip"], [{ [id(9)]: 3 }], [{ [id(9)]: null }]])("rejects up_decisions that is %j", (value) => {
+    const project = makeProject()
+    writeFileSync(join(project, "heptabase-map.json"), JSON.stringify({ ...sampleMap(), up_decisions: value }))
+    expect(() => loadCardMap(project)).toThrow(/heptabase-map\.json.*up_decisions.*repair or remove/)
+  })
 })
 
 describe("saveCardMap", () => {

@@ -12,6 +12,7 @@ import {
   joinListWhiteboards,
   isReadObjectResult,
   joinReadObjectPages,
+  parseReadObjectHeader,
   parseListCards,
   parseListWhiteboards,
   parseMindMap,
@@ -494,6 +495,20 @@ describe("isReadObjectResult", () => {
     expect(isReadObjectResult(fixture("list_cards_empty.txt"))).toBe(false)
     // A list is not a card: its first line has no line count.
     expect(isReadObjectResult(fixture("list_cards_two_boards.txt"))).toBe(false)
+  })
+})
+
+describe("parseReadObjectHeader", () => {
+  it("reads the card id and title of the header, whatever the page", () => {
+    for (const name of ["read_object_page1.txt", "read_object_page2.txt"]) {
+      expect(parseReadObjectHeader(fixture(name))).toEqual({ id: id(8), title: "Card N-02｜Terms, one | two" })
+      expect(parseReadObjectHeader(fixtureContent(name))).toEqual({ id: id(8), title: "Card N-02｜Terms, one | two" })
+    }
+  })
+
+  it("is null for text that has no header", () => {
+    expect(parseReadObjectHeader("# Title\n\n1\tone")).toBeNull()
+    expect(parseReadObjectHeader(fixture("list_cards.txt"))).toBeNull()
   })
 })
 

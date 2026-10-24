@@ -43,6 +43,11 @@ export interface CardMap {
   sources: Record<string, SourceEntry>
   /** `updated_at` is "" until a whiteboard list has been stored. */
   whiteboards_cache: { updated_at: string; items: WhiteboardNode[] }
+  /**
+   * What the user answered when `plan-up` asked about a card: `skip`, or the id of the root whiteboard
+   * the card belongs to. Card id to answer. `hepta record` writes it. Absent until there is an answer.
+   */
+  up_decisions?: Record<string, string>
 }
 
 function emptyCardMap(): CardMap {
@@ -74,6 +79,10 @@ function readCardMap(path: string): CardMap {
   const cache = raw.whiteboards_cache
   if (!isRecord(cache) || typeof cache.updated_at !== "string" || !Array.isArray(cache.items)) {
     throw new Error(`${CARD_MAP_FILE}: whiteboards_cache must be an object with updated_at and items`)
+  }
+  const decisions = raw.up_decisions
+  if (decisions !== undefined && !(isRecord(decisions) && Object.values(decisions).every((value) => typeof value === "string"))) {
+    throw new Error(`${CARD_MAP_FILE}: up_decisions must be an object of card id to text`)
   }
   return raw as unknown as CardMap
 }

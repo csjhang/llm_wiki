@@ -88,7 +88,7 @@ function frontmatterOf(project: string, cardId = CARD): Record<string, string | 
 function domainsYaml(domains: Record<string, string[]>): string {
   const lines = ["version: 1", "domains:"]
   for (const [name, hints] of Object.entries(domains)) {
-    lines.push(`  ${name}:`, "    lens: business", `    description: Domain ${name}`, "    whiteboards:", ...hints.map((hint) => `      - ${hint}`))
+    lines.push(`  "${name}":`, "    lens: business", `    description: Domain ${name}`, "    whiteboards:", ...hints.map((hint) => `      - ${hint}`))
   }
   return `${lines.join("\n")}\n`
 }
@@ -156,9 +156,10 @@ describe("hepta snapshot", () => {
 
   it("joins paged read_object output", async () => {
     const project = makeProject()
-    const { exitCode } = await snapshot(project, { files: [PAGE_1, PAGE_2] })
+    // The fixture pages are the pages of the card id(8).
+    const { exitCode } = await snapshot(project, { cardId: id(8), files: [PAGE_1, PAGE_2] })
     expect(exitCode).toBe(0)
-    const body = parseFrontmatter(read(project, rawPath())).body
+    const body = parseFrontmatter(read(project, rawPath(id(8)))).body
     const joined = joinReadObjectPages([readFileSync(PAGE_1, "utf8"), readFileSync(PAGE_2, "utf8")])
     expect(body).toBe(`${cardToSnapshotBody(joined)}\n`)
     // No line numbers, no header, no databases block, and the Hepta tags are gone.
@@ -274,6 +275,139 @@ describe("hepta snapshot", () => {
     })
   })
 
+  describe("nearest domain hint", () => {
+    /** Board A2 (1) < Board A1 (3) < Root A (12); Board B2 (2) < Board B1 (15) < Root B (13). */
+    function treeProject(domains: Record<string, string[]>): string {
+      const project = makeProject()
+      const map = loadCardMap(project)
+      map.whiteboards_cache = { updated_at: NOW, items: parseListWhiteboards(readFileSync(WHITEBOARDS, "utf8")) }
+      saveCardMap(project, map)
+      writeProjectFile(project, "domains.yaml", domainsYaml(domains))
+      return project
+    }
+
+    it("prefers the hint on the board itself over a hint on its parent", async () => {
+      const project = treeProject({ "business/pricing": [id(12)], hardware: [BOARD_A2.id] })
+      await snapshot(project)
+      expect(frontmatterOf(project).domain).toBe("hardware")
+    })
+
+    it("prefers the nearer ancestor", async () => {
+      const project = treeProject({ "business/pricing": [id(12)], hardware: [id(3)] })
+      await snapshot(project)
+      expect(frontmatterOf(project).domain).toBe("hardware")
+    })
+
+    it("omits domain when two domains tie at the nearest distance", async () => {
+      // Each whiteboard of the card has a hint two levels up, for another domain.
+      const project = treeProject({ "business/pricing": [id(12)], hardware: [id(13)] })
+      await snapshot(project, { whiteboards: [BOARD_A2, BOARD_B2] })
+      expect(frontmatterOf(project)).not.toHaveProperty("domain")
+
+      // The same distance on one chain: two domains hint at the same ancestor.
+      writeProjectFile(project, "domains.yaml", domainsYaml({ "business/pricing": [id(3)], hardware: [id(3)] }))
+      await snapshot(project)
+      expect(frontmatterOf(project)).not.toHaveProperty("domain")
+    })
+
+    it("lets the nearest hint win over a farther hint of another whiteboard", async () => {
+      const project = treeProject({ "business/pricing": [id(12)], hardware: [BOARD_B2.id] })
+      await snapshot(project, { whiteboards: [BOARD_A2, BOARD_B2] })
+      expect(frontmatterOf(project).domain).toBe("hardware")
+    })
+  })
+
+  it("quotes a domain that YAML would read as another type", async () => {
+    for (const name of ["null", "true", "2026", "no"]) {
+      const project = makeProject()
+      writeProjectFile(project, "domains.yaml", domainsYaml({ [name]: [BOARD_A2.id] }))
+      await snapshot(project)
+      expect(read(project, rawPath())).toContain(`\ndomain: "${name}"\n`)
+      expect(frontmatterOf(project).domain).toBe(name)
+    }
+  })
+
+  describe("overwrite guard", () => {
+    it("refuses to replace a file that is not a snapshot of the card", async () => {
+      const project = makeProject()
+      const other = [
+        "not a snapshot\n",
+        `---\ntitle: "Mine"\nheptabase_card_id: ${id(7)}\n---\n\nText.\n`,
+        `---\ntitle: "Mine"\n---\n\nText.\n`,
+      ]
+      for (const text of other) {
+        writeProjectFile(project, rawPath(), text)
+        const result = await snapshot(project)
+        expect(result.exitCode).toBe(2)
+        expect(result.output.problems).toEqual([expect.stringContaining(rawPath())])
+        expect(read(project, rawPath())).toBe(text)
+        expect(existsSync(join(project, "heptabase-map.json"))).toBe(false)
+      }
+    })
+
+    it("replaces the file of a recorded source or a file of the same card", async () => {
+      const project = makeProject()
+      writeProjectFile(project, rawPath(), "not a snapshot\n")
+      const map = loadCardMap(project)
+      map.sources[CARD] = { raw_path: rawPath(), card_updated_at: UPDATED, ingest_commit: null }
+      saveCardMap(project, map)
+      expect((await snapshot(project, { text: "Recorded.\n" })).exitCode).toBe(0)
+      expect(read(project, rawPath())).toContain("Recorded.")
+
+      const lost = makeProject()
+      writeProjectFile(lost, rawPath(), `---\ntitle: "Old"\nheptabase_card_id: ${CARD}\n---\n\nOld text.\n`)
+      expect((await snapshot(lost, { text: "New.\n" })).exitCode).toBe(0)
+      expect(read(lost, rawPath())).toContain("New.")
+      expect(loadCardMap(lost).sources[CARD].raw_path).toBe(rawPath())
+    })
+
+    it("refuses a folder in the place of the file", async () => {
+      const project = makeProject()
+      writeProjectFile(project, `${rawPath()}/inner.txt`, "x")
+      const result = await snapshot(project)
+      expect(result.exitCode).toBe(2)
+      expect(result.output.problems).toEqual([expect.stringContaining(rawPath())])
+    })
+  })
+
+  describe("the content files", () => {
+    it("rejects a result whose status is not succeeded", async () => {
+      const project = makeProject()
+      const failed = join(project, "failed.json")
+      writeProjectFile(project, "failed.json", JSON.stringify({ content: "Card not found.", status: "failed" }))
+      const result = await snapshot(project, { files: [failed] })
+      expect(result.exitCode).toBe(2)
+      expect(result.output.problems).toEqual([expect.stringContaining(failed)])
+      expect(result.output.problems?.[0]).toContain("failed")
+      expect(existsSync(join(project, "raw"))).toBe(false)
+
+      // One failed page among good pages stops the command as well.
+      const mixed = await snapshot(project, { cardId: id(8), files: [PAGE_1, failed] })
+      expect(mixed.exitCode).toBe(2)
+      expect(mixed.output.problems).toEqual([expect.stringContaining(failed)])
+    })
+
+    it("accepts the status succeeded, a missing status, and plain text", async () => {
+      const project = makeProject()
+      expect((await snapshot(project, { cardId: id(8), files: [PAGE_1, PAGE_2] })).exitCode).toBe(0)
+      const noStatus = join(project, "no-status.json")
+      writeProjectFile(project, "no-status.json", JSON.stringify({ content: `card "T" [${id(8)}] 1 line\n1\tText` }))
+      expect((await snapshot(project, { cardId: id(8), files: [noStatus] })).exitCode).toBe(0)
+      expect((await snapshot(project, { text: "# Plain\n" })).exitCode).toBe(0)
+    })
+
+    it("rejects a read_object result of another card", async () => {
+      const project = makeProject()
+      // The fixture pages are the pages of the card id(8), not of CARD.
+      const result = await snapshot(project, { files: [PAGE_1, PAGE_2] })
+      expect(result.exitCode).toBe(2)
+      expect(result.output.problems).toEqual([expect.stringContaining(PAGE_1), expect.stringContaining(PAGE_2)])
+      expect(result.output.problems?.[0]).toContain(id(8))
+      expect(existsSync(join(project, "raw"))).toBe(false)
+      expect(existsSync(join(project, "heptabase-map.json"))).toBe(false)
+    })
+  })
+
   it("overwrites the snapshot of a card and keeps the other sources", async () => {
     const project = makeProject()
     const map = loadCardMap(project)
@@ -345,7 +479,7 @@ describe("hepta snapshot", () => {
     await bad({ title: "  " }, "--title")
     await bad({ cardType: "web card" }, "--card-type")
     await bad({ files: [join(project, "none.txt")] }, "--content")
-    await bad({ files: [PAGE_1, join(FIXTURES, "list_cards_empty.txt")] }, "--content")
+    await bad({ cardId: id(8), files: [PAGE_1, join(FIXTURES, "list_cards_empty.txt")] }, "--content")
     expect((await snapshot(makeProject({}, { noHeptabaseYaml: true }))).output.problems).toEqual([expect.stringContaining("heptabase.yaml")])
     expect((await snapshot(join(project, "nowhere"), { files: [PAGE_1] })).output.problems).toEqual([expect.stringContaining("project folder not found")])
     expect(existsSync(join(project, "raw"))).toBe(false)

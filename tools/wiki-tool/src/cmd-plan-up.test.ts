@@ -25,6 +25,8 @@ const CARDS = join(FIXTURES, "list_cards.txt")
 const TWO_BOARDS = join(FIXTURES, "list_cards_two_boards.txt")
 const WHITEBOARDS = join(FIXTURES, "list_whiteboards.txt")
 const WHITEBOARDS_TEXT = readFileSync(WHITEBOARDS, "utf8")
+/** The fixture list is the first page of 8 top-level whiteboards. This is the same text without the paging trailer. */
+const COMPLETE_TREE = (JSON.parse(WHITEBOARDS_TEXT) as { content: string }).content.split("\n\nMore ")[0]
 
 const NOW = "2026-10-24T08:00:00.000Z"
 const BOARD_A2 = { id: id(1), title: "Board A2" }
@@ -36,7 +38,7 @@ afterEach(removeProjects)
 interface PlanOutput {
   ok: boolean
   actions: UpAction[]
-  skipped: { archived: number; mirror: number; unchanged: number }
+  skipped: { archived: number; mirror: number; unchanged: number; declined: number }
   warnings: string[]
   problems: string[]
 }
@@ -75,6 +77,11 @@ function save(project: string, name: string, text: string): string {
   return join(project, ".llm-wiki/hepta", name)
 }
 
+/** The complete fixture tree, written into the project; returns the path for `--whiteboards`. */
+function tree(project: string): string {
+  return save(project, "whiteboards.txt", COMPLETE_TREE)
+}
+
 function source(updated: string): CardMap["sources"][string] {
   return { raw_path: "raw/sources/heptabase/x.md", card_updated_at: updated, ingest_commit: null }
 }
@@ -88,7 +95,7 @@ function mapOf(project: string, change: (map: CardMap) => void): void {
 describe("hepta plan-up", () => {
   it("plans new cards", async () => {
     const project = makeProject({}, { roots: ROOTS })
-    const { exitCode, output } = await planUp(project, ["--cards", CARDS, "--whiteboards", WHITEBOARDS])
+    const { exitCode, output } = await planUp(project, ["--cards", CARDS, "--whiteboards", tree(project)])
     expect(exitCode).toBe(0)
     expect(output.ok).toBe(true)
     expect(output.actions).toEqual([
@@ -96,7 +103,7 @@ describe("hepta plan-up", () => {
       { op: "snapshot", cardId: id(7), title: 'Card N-01｜Topic：from "a" to [b] end', cardType: "card", whiteboards: [BOARD_A2] },
       { op: "snapshot", cardId: id(8), title: "Card N-02｜Terms, one | two", cardType: "card", whiteboards: [BOARD_A2] },
     ])
-    expect(output.skipped).toEqual({ archived: 0, mirror: 0, unchanged: 0 })
+    expect(output.skipped).toEqual({ archived: 0, mirror: 0, unchanged: 0, declined: 0 })
   })
 
   it("skips unchanged cards", async () => {
@@ -106,7 +113,7 @@ describe("hepta plan-up", () => {
       map.sources[id(6)] = source("2026-10-04T07:28:31.245Z")
       map.sources[id(7)] = source("2026-10-05T00:00:00.000Z")
     })
-    const { output } = await planUp(project, ["--cards", CARDS, "--whiteboards", WHITEBOARDS])
+    const { output } = await planUp(project, ["--cards", CARDS, "--whiteboards", tree(project)])
     expect(output.actions.map((action) => action.cardId)).toEqual([id(8)])
     expect(output.skipped.unchanged).toBe(2)
   })
@@ -118,7 +125,7 @@ describe("hepta plan-up", () => {
       map.sources[id(7)] = source("2026-10-04T07:28:38.779Z")
       map.sources[id(8)] = source("2026-10-04T07:28:41.259Z")
     })
-    const { output } = await planUp(project, ["--cards", CARDS, "--whiteboards", WHITEBOARDS])
+    const { output } = await planUp(project, ["--cards", CARDS, "--whiteboards", tree(project)])
     expect(output.actions.map((action) => [action.op, action.cardId])).toEqual([["snapshot", id(6)]])
   })
 
@@ -128,13 +135,13 @@ describe("hepta plan-up", () => {
       map.sources[id(6)] = source("2026-10-04T07:28:31.245Z")
     })
     const list = save(project, "cards.txt", `card "No dates" [${id(6)}] whiteboards: ${BOARD_A2.title} [${BOARD_A2.id}], tags: none`)
-    const { output } = await planUp(project, ["--cards", list, "--whiteboards", WHITEBOARDS])
+    const { output } = await planUp(project, ["--cards", list, "--whiteboards", tree(project)])
     expect(output.actions).toEqual([])
   })
 
   it("card under two roots needs a decision", async () => {
     const project = makeProject({}, { roots: ROOTS })
-    const { exitCode, output } = await planUp(project, ["--cards", TWO_BOARDS, "--whiteboards", WHITEBOARDS])
+    const { exitCode, output } = await planUp(project, ["--cards", TWO_BOARDS, "--whiteboards", tree(project)])
     expect(exitCode).toBe(0)
     expect(output.actions).toEqual([
       { op: "ask", cardId: id(9), title: "Topic one", reason: "two-roots" },
@@ -145,7 +152,7 @@ describe("hepta plan-up", () => {
   it("one root reached by two whiteboards is not a decision", async () => {
     const project = makeProject({}, { roots: ROOTS })
     const list = save(project, "cards.txt", cardList([{ id: id(30), title: "Two boards, one root", boards: [BOARD_A2, { id: id(14), title: "Board A3" }] }]))
-    const { output } = await planUp(project, ["--cards", list, "--whiteboards", WHITEBOARDS])
+    const { output } = await planUp(project, ["--cards", list, "--whiteboards", tree(project)])
     expect(output.actions).toEqual([
       { op: "snapshot", cardId: id(30), title: "Two boards, one root", cardType: "card", whiteboards: [BOARD_A2, { id: id(14), title: "Board A3" }] },
     ])
@@ -162,7 +169,7 @@ describe("hepta plan-up", () => {
         { id: id(32), title: "Unknown whiteboard", boards: [{ id: id(99), title: "Board Z" }] },
       ]),
     )
-    const { exitCode, output } = await planUp(project, ["--cards", list, "--whiteboards", WHITEBOARDS])
+    const { exitCode, output } = await planUp(project, ["--cards", list, "--whiteboards", tree(project)])
     expect(exitCode).toBe(0)
     expect(output.actions).toEqual([
       { op: "ask", cardId: id(30), title: "Outside the roots", reason: "no-root" },
@@ -210,7 +217,7 @@ describe("hepta plan-up", () => {
 
   it("skips an archived card before it asks about its roots", async () => {
     const project = makeProject({}, { roots: ROOTS, boards: { [id(2)]: "{ kind: archive }" } })
-    const { output } = await planUp(project, ["--cards", TWO_BOARDS, "--whiteboards", WHITEBOARDS])
+    const { output } = await planUp(project, ["--cards", TWO_BOARDS, "--whiteboards", tree(project)])
     expect(output.actions).toEqual([])
     expect(output.skipped.archived).toBe(2)
   })
@@ -222,7 +229,7 @@ describe("hepta plan-up", () => {
       map.pages["wiki/mechanisms/one.md"] = { ...entry, card_id: id(7), status: "active" }
       map.pages["wiki/mechanisms/two.md"] = { ...entry, card_id: id(8), status: "retired" }
     })
-    const { output } = await planUp(project, ["--cards", CARDS, "--whiteboards", WHITEBOARDS])
+    const { output } = await planUp(project, ["--cards", CARDS, "--whiteboards", tree(project)])
     expect(output.actions.map((action) => action.cardId)).toEqual([id(6)])
     expect(output.skipped.mirror).toBe(2)
   })
@@ -238,7 +245,7 @@ describe("hepta plan-up", () => {
         { id: id(32), title: "An unplaced paper", type: "pdfCard" },
       ]),
     )
-    const { output } = await planUp(project, ["--cards", list, "--whiteboards", WHITEBOARDS])
+    const { output } = await planUp(project, ["--cards", list, "--whiteboards", tree(project)])
     expect(output.actions).toEqual([
       { op: "download-pdf", cardId: id(30), title: "A paper" },
       { op: "snapshot", cardId: id(31), title: "A page", cardType: "webCard", whiteboards: [BOARD_A2] },
@@ -272,24 +279,126 @@ describe("hepta plan-up", () => {
   it("stores the whiteboard tree when it is given and reads it back later", async () => {
     const project = makeProject({}, { roots: ROOTS })
     expect(existsSync(join(project, "heptabase-map.json"))).toBe(false)
-    await planUp(project, ["--cards", CARDS])
-    // Without a tree and without a stored one, nothing is saved.
+    const first = await planUp(project, ["--cards", CARDS])
+    // Without a tree and without a stored one, nothing is saved, and the output says why every card asks.
     expect(existsSync(join(project, "heptabase-map.json"))).toBe(false)
+    expect(first.output.warnings).toEqual(["the whiteboard tree is empty; pass --whiteboards"])
 
-    await planUp(project, ["--cards", CARDS, "--whiteboards", WHITEBOARDS])
+    await planUp(project, ["--cards", CARDS, "--whiteboards", tree(project)])
     const cache = loadCardMap(project).whiteboards_cache
     expect(cache.updated_at).toBe(NOW)
-    expect(cache.items).toEqual(parseListWhiteboards(WHITEBOARDS_TEXT))
+    expect(cache.items).toEqual(parseListWhiteboards(COMPLETE_TREE))
 
     const later = await planUp(project, ["--cards", CARDS])
     expect(later.output.actions.map((action) => action.op)).toEqual(["snapshot", "snapshot", "snapshot"])
+    expect(later.output.warnings).toEqual([])
     expect(readdirSync(project).filter((name) => name.endsWith(".tmp"))).toEqual([])
   })
 
-  it("warns when the whiteboard list is partial", async () => {
+  it("warns when the stored tree is empty and no list is given", async () => {
+    const project = makeProject({}, { roots: ROOTS })
+    mapOf(project, () => {})
+    const { output } = await planUp(project, ["--cards", CARDS])
+    expect(output.warnings).toEqual(["the whiteboard tree is empty; pass --whiteboards"])
+    expect(output.actions.map((action) => action.op)).toEqual(["ask", "ask", "ask"])
+  })
+
+  it("warns about a partial whiteboard list and keeps the stored tree", async () => {
+    const project = makeProject({}, { roots: ROOTS })
+    await planUp(project, ["--cards", CARDS, "--whiteboards", tree(project)])
+    const stored = loadCardMap(project).whiteboards_cache
+
+    // The fixture list is the first page of 8 top-level whiteboards: it has a paging trailer.
+    const { output } = await planUp(project, ["--cards", CARDS, "--whiteboards", WHITEBOARDS])
+    expect(output.warnings).toEqual([expect.stringContaining("showing 1-3 of 8")])
+    expect(output.warnings[0]).toContain("not changed")
+    expect(loadCardMap(project).whiteboards_cache).toEqual(stored)
+    // The cards are planned with the stored tree.
+    expect(output.actions.map((action) => action.op)).toEqual(["snapshot", "snapshot", "snapshot"])
+  })
+
+  it("does not store a partial list when nothing is stored yet", async () => {
     const project = makeProject({}, { roots: ROOTS })
     const { output } = await planUp(project, ["--cards", CARDS, "--whiteboards", WHITEBOARDS])
     expect(output.warnings).toEqual([expect.stringContaining("showing 1-3 of 8")])
+    expect(existsSync(join(project, "heptabase-map.json"))).toBe(false)
+    expect(output.actions.map((action) => action.op)).toEqual(["ask", "ask", "ask"])
+  })
+
+  describe("decisions", () => {
+    it("remembers a skip", async () => {
+      const project = makeProject({}, { roots: ROOTS })
+      const asked = await planUp(project, ["--cards", TWO_BOARDS, "--whiteboards", tree(project)])
+      expect(asked.output.actions.map((action) => action.op)).toEqual(["ask", "ask"])
+
+      const decided = await runCli(["hepta", "record", "--project", project, "--event", JSON.stringify({ type: "up-decision", cardId: id(9), decision: "skip" })])
+      expect(decided.exitCode).toBe(0)
+      const again = await planUp(project, ["--cards", TWO_BOARDS])
+      expect(again.output.actions).toEqual([{ op: "ask", cardId: id(10), title: "Node 1.1", reason: "two-roots" }])
+      expect(again.output.skipped.declined).toBe(1)
+    })
+
+    it("treats the root of a decision as the root of the card", async () => {
+      const project = makeProject({}, { roots: ROOTS })
+      const list = save(
+        project,
+        "cards.txt",
+        cardList([
+          { id: id(30), title: "Two roots", boards: [BOARD_A2, BOARD_B2] },
+          { id: id(31), title: "No root", boards: [{ id: id(99), title: "Board Z" }] },
+          { id: id(32), title: "pdf, no root", type: "pdfCard" },
+        ]),
+      )
+      mapOf(project, (map) => {
+        map.up_decisions = { [id(30)]: id(13), [id(31)]: id(12), [id(32)]: id(12) }
+      })
+      const { output } = await planUp(project, ["--cards", list, "--whiteboards", tree(project)])
+      expect(output.actions).toEqual([
+        { op: "snapshot", cardId: id(30), title: "Two roots", cardType: "card", whiteboards: [BOARD_A2, BOARD_B2] },
+        { op: "snapshot", cardId: id(31), title: "No root", cardType: "card", whiteboards: [{ id: id(99), title: "Board Z" }] },
+        { op: "download-pdf", cardId: id(32), title: "pdf, no root" },
+      ])
+    })
+
+    it("asks again when the root of a decision is not a root any more", async () => {
+      const project = makeProject({}, { roots: [id(12)] })
+      mapOf(project, (map) => {
+        map.up_decisions = { [id(9)]: id(13) }
+      })
+      const { output } = await planUp(project, ["--cards", TWO_BOARDS, "--whiteboards", tree(project)])
+      // Under the one root that is left, both cards are fine: the stale decision changes nothing.
+      expect(output.actions.map((action) => [action.op, action.cardId])).toEqual([["snapshot", id(9)], ["snapshot", id(10)]])
+
+      const none = makeProject({}, { roots: [id(14)] })
+      mapOf(none, (map) => {
+        map.up_decisions = { [id(9)]: id(13) }
+      })
+      const asked = await planUp(none, ["--cards", TWO_BOARDS, "--whiteboards", tree(none)])
+      expect(asked.output.actions).toEqual([
+        { op: "ask", cardId: id(9), title: "Topic one", reason: "no-root" },
+        { op: "ask", cardId: id(10), title: "Node 1.1", reason: "no-root" },
+      ])
+    })
+
+    it("does not override the archive, mirror, or unchanged skips", async () => {
+      const project = makeProject({}, { roots: ROOTS, boards: { [id(2)]: "{ kind: archive }" } })
+      mapOf(project, (map) => {
+        map.up_decisions = { [id(9)]: id(12), [id(10)]: "skip" }
+      })
+      const { output } = await planUp(project, ["--cards", TWO_BOARDS, "--whiteboards", tree(project)])
+      expect(output.actions).toEqual([])
+      expect(output.skipped).toEqual({ archived: 2, mirror: 0, unchanged: 0, declined: 0 })
+    })
+
+    it("lets a snapshotted card be updated whatever was decided", async () => {
+      const project = makeProject({}, { roots: ROOTS })
+      mapOf(project, (map) => {
+        map.sources[id(9)] = source("2023-01-01T00:00:00.000Z")
+        map.up_decisions = { [id(9)]: "skip" }
+      })
+      const { output } = await planUp(project, ["--cards", TWO_BOARDS, "--whiteboards", tree(project)])
+      expect(output.actions.map((action) => [action.op, action.cardId])).toEqual([["snapshot", id(9)], ["ask", id(10)]])
+    })
   })
 
   it("plans the update of a card it already snapshotted without asking again", async () => {
@@ -297,7 +406,7 @@ describe("hepta plan-up", () => {
     mapOf(project, (map) => {
       map.sources[id(9)] = source("2023-01-01T00:00:00.000Z")
     })
-    const { output } = await planUp(project, ["--cards", TWO_BOARDS, "--whiteboards", WHITEBOARDS])
+    const { output } = await planUp(project, ["--cards", TWO_BOARDS, "--whiteboards", tree(project)])
     expect(output.actions).toEqual([
       { op: "snapshot", cardId: id(9), title: "Topic one", cardType: "card", whiteboards: [BOARD_B2, BOARD_A2] },
       { op: "ask", cardId: id(10), title: "Node 1.1", reason: "two-roots" },
@@ -326,7 +435,7 @@ describe("hepta plan-up", () => {
 
   it("refuses an empty whiteboard list instead of clearing the stored tree", async () => {
     const project = makeProject({}, { roots: ROOTS })
-    await planUp(project, ["--cards", CARDS, "--whiteboards", WHITEBOARDS])
+    await planUp(project, ["--cards", CARDS, "--whiteboards", tree(project)])
     const empty = save(project, "empty.txt", "Whiteboards:\n")
     const result = await planUp(project, ["--cards", CARDS, "--whiteboards", empty])
     expect(result.exitCode).toBe(2)

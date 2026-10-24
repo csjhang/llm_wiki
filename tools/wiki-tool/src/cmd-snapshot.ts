@@ -4,17 +4,20 @@
  * The skill reads the card with `read_object`, saves the result to a file, and runs this command. The
  * command writes `raw/sources/heptabase/<card-id>.md`: frontmatter, then the card as plain Markdown. It
  * records the snapshot in the card map, so `plan-up` plans the card again only after the card changes.
- * Snapshotting a card again replaces the file; the app ingests the new text again.
+ * Snapshotting a card again replaces the file; the app ingests the new text again. A file that is there
+ * and is not a snapshot of this card is never replaced.
  *
  * `--content` is the read_object result. A card that is longer than one page comes in several results:
  * give one `--content` for each, and the command joins them in line order. A file that is not a
- * read_object result is the card's text as it is.
+ * read_object result is the card's text as it is. A result of a failed call, or of another card, is refused.
  *
  * `source_kind` is `article` for a web card, a PDF card, or a card on a `source` whiteboard; else `note`.
- * `domain` is set when exactly one domain of domains.yaml hints at a whiteboard of the card, or at an
- * ancestor of one. The file and then the map are written atomically.
+ * `domain` is the domain of domains.yaml whose hinted whiteboard is nearest to the card: a whiteboard of the
+ * card (distance 0), else its parent (1), and so on up. Two domains at the nearest distance give no domain.
+ * The file and then the map are written atomically.
  */
 import { existsSync, readdirSync, readFileSync } from "node:fs"
+import { parseFrontmatter } from "@/lib/frontmatter"
 import { KNOWN_LENSES, parseDomainsYaml } from "@/lib/wiki-config/domains"
 import { UUID_PATTERN } from "@/lib/wiki-config/types"
 import { isRecord } from "@/lib/wiki-config/yaml-util"
@@ -24,7 +27,7 @@ import { parentIndex, whiteboardChain } from "./cmd-plan-up"
 import { cardToSnapshotBody } from "./convert"
 import { type CommandResult, isDirectory, resolveInProject, writeFileAtomic } from "./io"
 import { readHeptabaseConfig } from "./mirror-pages"
-import { isReadObjectResult, joinReadObjectPages } from "./parse-mcp"
+import { isReadObjectResult, joinReadObjectPages, parseReadObjectHeader } from "./parse-mcp"
 
 const OPTION_SPEC = {
   values: ["project", "card-id", "title", "card-type", "whiteboards", "url", "updated-at", "now"],
@@ -65,7 +68,7 @@ export function snapshot(args: string[]): CommandResult {
   const url = parsed.values.url?.trim() === "" ? undefined : parsed.values.url
   const updatedAt = readUpdatedAt(parsed.values["updated-at"], problems)
   const now = parseNowOption(parsed.values.now, problems)
-  const text = readContent(parsed.lists.content, problems)
+  const text = readContent(parsed.lists.content, UUID_PATTERN.test(cardId) ? cardId : null, problems)
   const config = readHeptabaseConfig(project, problems)
   let map: CardMap | null = null
   try {
@@ -95,9 +98,11 @@ export function snapshot(args: string[]): CommandResult {
     `card_updated_at: ${yamlString(cardUpdatedAt)}`,
     ...(url === undefined ? [] : [`url: ${yamlString(url)}`]),
     `source_kind: ${sourceKind}`,
-    ...(domain === null ? [] : [`domain: ${domain}`]),
+    ...(domain === null ? [] : [`domain: ${yamlString(domain)}`]),
     "---",
   ]
+  const refusal = overwriteProblem(project, rawPath, cardId, map)
+  if (refusal) return { ok: false, problems: [refusal] }
   const body = cardToSnapshotBody(text).replace(/\s+$/, "")
   // The file goes first: if the map fails to save, a rerun writes the same file again.
   writeFileAtomic(resolveInProject(project, rawPath), `${(body === "" ? frontmatter : [...frontmatter, "", body]).join("\n")}\n`)
@@ -141,19 +146,32 @@ function readUpdatedAt(value: string | undefined, problems: string[]): string | 
 
 /**
  * The text of the card. The files are the pages of one read_object result (joined in line order), or one
- * file of the card's own text. Null when a file cannot be read or the files are not one of these.
+ * file of the card's own text. Null when a file cannot be read, is the result of a failed call or of another
+ * card (`cardId` is null when the card id is not valid, and then the card is not compared), or the files are
+ * not one of these.
  */
-function readContent(paths: readonly string[], problems: string[]): string | null {
+function readContent(paths: readonly string[], cardId: string | null, problems: string[]): string | null {
   if (paths.length === 0) return null
+  const before = problems.length
   const texts: string[] = []
   for (const path of paths) {
+    let text: string
     try {
-      texts.push(readFileSync(path, "utf8").replace(/^﻿/, ""))
+      text = readFileSync(path, "utf8").replace(/^\uFEFF/, "")
     } catch {
       problems.push(`cannot read --content file: ${path}`)
+      continue
     }
+    const status = failedStatus(text)
+    const header = parseReadObjectHeader(text)
+    if (status !== null) {
+      problems.push(`--content file ${path} is the result of a call that did not succeed (status: ${status})`)
+    } else if (header && cardId !== null && header.id.toLowerCase() !== cardId) {
+      problems.push(`--content file ${path} is the result for card ${header.id}, not card ${cardId}`)
+    }
+    texts.push(text)
   }
-  if (texts.length < paths.length) return null
+  if (problems.length > before) return null
   const pages = texts.filter(isReadObjectResult).length
   if (pages === texts.length) return joinReadObjectPages(texts)
   if (pages === 0 && texts.length === 1) return texts[0]
@@ -161,10 +179,37 @@ function readContent(paths: readonly string[], problems: string[]): string | nul
   return null
 }
 
+/** The `status` of a JSON envelope when it is not `succeeded`; null for anything else. */
+function failedStatus(text: string): string | null {
+  if (!text.trimStart().startsWith("{")) return null
+  try {
+    const parsed: unknown = JSON.parse(text)
+    if (isRecord(parsed) && typeof parsed.status === "string" && parsed.status !== "succeeded") return parsed.status
+  } catch {
+    // Not JSON: the text is the card's own text.
+  }
+  return null
+}
+
 /**
- * The domain whose hints name a whiteboard of the card, or an ancestor of one; null unless exactly one
- * domain does. A domains.yaml that cannot be read adds a warning and no domain: the snapshot is still
- * worth saving.
+ * A problem when the snapshot file is there and is not this card's: a file of the user, or of another card, must
+ * not be replaced. It is this card's when the map has the source, or when its frontmatter names the card.
+ */
+function overwriteProblem(project: string, rawPath: string, cardId: string, map: CardMap): string | null {
+  const path = resolveInProject(project, rawPath)
+  if (!existsSync(path) || Object.prototype.hasOwnProperty.call(map.sources, cardId)) return null
+  try {
+    if (parseFrontmatter(readFileSync(path, "utf8")).frontmatter?.heptabase_card_id === cardId) return null
+  } catch {
+    // Unreadable: it is not known to be a snapshot of this card.
+  }
+  return `${rawPath} exists and is not a snapshot of card ${cardId}; move or remove it, then run the command again`
+}
+
+/**
+ * The domain whose hinted whiteboard is nearest to the card: a whiteboard of the card is at distance 0, its
+ * parent at 1, and so on. Null when no domain hints at one of them, or when two domains tie at the nearest
+ * distance. A domains.yaml that cannot be read adds a warning and no domain: the snapshot is still worth saving.
  */
 function domainOf(
   project: string,
@@ -176,7 +221,7 @@ function domainOf(
   if (!existsSync(path)) return null
   let text: string
   try {
-    text = readFileSync(path, "utf8").replace(/^﻿/, "")
+    text = readFileSync(path, "utf8").replace(/^\uFEFF/, "")
   } catch {
     warnings.push(`cannot read ${DOMAINS_FILE}, so no domain was added`)
     return null
@@ -187,9 +232,22 @@ function domainOf(
     warnings.push(`${DOMAINS_FILE} is not valid, so no domain was added: ${issue.path === "" ? "" : `${issue.path}: `}${issue.message}`)
     return null
   }
-  const reached = new Set(boards.flatMap((board) => whiteboardChain(parents, board.id)))
-  const matches = Object.entries(result.value.domains).filter(([, entry]) => entry.whiteboards.some((hint) => reached.has(hint)))
-  return matches.length === 1 ? matches[0][0] : null
+
+  // The distance of each whiteboard on the way up from the boards of the card; the nearest one counts.
+  const distances = new Map<string, number>()
+  for (const board of boards) {
+    whiteboardChain(parents, board.id).forEach((boardId, distance) => {
+      distances.set(boardId, Math.min(distance, distances.get(boardId) ?? distance))
+    })
+  }
+  const hinted: { name: string; distance: number }[] = []
+  for (const [name, entry] of Object.entries(result.value.domains)) {
+    const reached = entry.whiteboards.flatMap((hint) => distances.get(hint) ?? [])
+    if (reached.length > 0) hinted.push({ name, distance: Math.min(...reached) })
+  }
+  const nearest = Math.min(...hinted.map((domain) => domain.distance))
+  const winners = hinted.filter((domain) => domain.distance === nearest)
+  return winners.length === 1 ? winners[0].name : null
 }
 
 /** The lenses a domain may use: the built-in ones and the stems of `lenses/*.md`, as the app allows. */

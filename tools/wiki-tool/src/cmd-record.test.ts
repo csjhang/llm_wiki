@@ -312,6 +312,61 @@ describe("hepta record", () => {
     })
   })
 
+  describe("up-decision", () => {
+    const decide = (project: string, event: Record<string, unknown>) => record(project, { type: "up-decision", cardId: id(9), decision: "skip", ...event })
+
+    it("saves a skip and a root", async () => {
+      const project = makeProject()
+      const skip = await decide(project, {})
+      expect(skip.exitCode).toBe(0)
+      expect(skip.output).toEqual({ ok: true, event: "up-decision", cardId: id(9), decision: "skip" })
+      // The default root of the test project is id(12).
+      await decide(project, { cardId: id(10), decision: id(12) })
+      expect(loadCardMap(project).up_decisions).toEqual({ [id(9)]: "skip", [id(10)]: id(12) })
+    })
+
+    it("replaces an earlier answer and leaves the rest of the map alone", async () => {
+      const project = await createdProject()
+      const before = loadCardMap(project)
+      await decide(project, {})
+      await decide(project, { decision: id(12) })
+      expect(loadCardMap(project)).toEqual({ ...before, up_decisions: { [id(9)]: id(12) } })
+    })
+
+    it("refuses a root that heptabase.yaml does not list", async () => {
+      const project = makeProject()
+      const result = await decide(project, { decision: id(13) })
+      expect(result.exitCode).toBe(2)
+      expect(result.output.problems).toEqual([expect.stringContaining(id(13))])
+      expect(existsSync(join(project, "heptabase-map.json"))).toBe(false)
+    })
+
+    it("refuses a decision that is not skip or a root id, and a card id that is not an id", async () => {
+      const project = makeProject()
+      for (const event of [{ decision: "Skip" }, { decision: "other" }, { decision: undefined }, { decision: 5 }, { decision: `${id(12)}/x` }]) {
+        const result = await decide(project, event)
+        expect(result.exitCode).toBe(2)
+        expect(result.output.problems).toEqual([expect.stringContaining("decision")])
+      }
+      for (const cardId of ["../x", undefined, id(9).toUpperCase().replace("0", "A")]) {
+        const result = await decide(project, { cardId })
+        expect(result.exitCode).toBe(2)
+        expect(result.output.problems).toEqual([expect.stringContaining("cardId")])
+      }
+      expect(existsSync(join(project, "heptabase-map.json"))).toBe(false)
+    })
+
+    it("needs a valid heptabase.yaml to check a root, but not to skip", async () => {
+      const project = makeProject({ "heptabase.yaml": "version: 2\n" })
+      const root = await decide(project, { decision: id(12) })
+      expect(root.exitCode).toBe(2)
+      const problems = root.output.problems as string[]
+      expect(problems.length).toBeGreaterThan(0)
+      expect(problems.every((problem) => problem.includes("heptabase.yaml"))).toBe(true)
+      expect((await decide(project, {})).exitCode).toBe(0)
+    })
+  })
+
   describe("the command line", () => {
     it("saves the map after every event, without leftover files", async () => {
       const project = await createdProject()

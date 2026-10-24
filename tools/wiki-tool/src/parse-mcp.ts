@@ -277,14 +277,19 @@ export function joinReadObjectPages(pages: string[]): string {
 }
 
 /**
- * True when the text is a read_object result of a card (the JSON envelope or its text): the first
- * line is the object header, such as `card "<title>" [<uuid>] 40 lines`. A text that is a card's own
- * Markdown is not one, even when a line of it starts with a number and a tab.
+ * The header of a read_object result of a card (the JSON envelope or its text): the first line,
+ * such as `card "<title>" [<uuid>] 40 lines`. Null for any other text, such as the Markdown of a
+ * card, even when a line of it starts with a number and a tab.
  */
-export function isReadObjectResult(text: string): boolean {
+export function parseReadObjectHeader(text: string): { id: string; title: string } | null {
   const first = linesOf(text).find((line) => line.trim() !== "")
   const item = first === undefined ? null : parseObjectLine(first)
-  return item !== null && /^ \d+ lines?\b/.test(item.rest)
+  return item !== null && /^ \d+ lines?\b/.test(item.rest) ? { id: item.id, title: item.title } : null
+}
+
+/** True when the text is a read_object result of a card; see parseReadObjectHeader. */
+export function isReadObjectResult(text: string): boolean {
+  return parseReadObjectHeader(text) !== null
 }
 
 /**

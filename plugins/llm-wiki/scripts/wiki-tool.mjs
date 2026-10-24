@@ -2477,6 +2477,8 @@ function readCardMap(path) {
 	if (!isRecord(raw.sources)) throw new Error(`${CARD_MAP_FILE}: sources must be an object`);
 	const cache = raw.whiteboards_cache;
 	if (!isRecord(cache) || typeof cache.updated_at !== "string" || !Array.isArray(cache.items)) throw new Error(`${CARD_MAP_FILE}: whiteboards_cache must be an object with updated_at and items`);
+	const decisions = raw.up_decisions;
+	if (decisions !== void 0 && !(isRecord(decisions) && Object.values(decisions).every((value) => typeof value === "string"))) throw new Error(`${CARD_MAP_FILE}: up_decisions must be an object of card id to text`);
 	return raw;
 }
 /** Write the map to `<project>/heptabase-map.json`; a reader sees the old or the new file. */
@@ -2653,14 +2655,21 @@ function joinReadObjectPages(pages) {
 	return Array.from(byNumber.keys()).sort((a, b) => a - b).map((number) => byNumber.get(number)).join("\n");
 }
 /**
-* True when the text is a read_object result of a card (the JSON envelope or its text): the first
-* line is the object header, such as `card "<title>" [<uuid>] 40 lines`. A text that is a card's own
-* Markdown is not one, even when a line of it starts with a number and a tab.
+* The header of a read_object result of a card (the JSON envelope or its text): the first line,
+* such as `card "<title>" [<uuid>] 40 lines`. Null for any other text, such as the Markdown of a
+* card, even when a line of it starts with a number and a tab.
 */
-function isReadObjectResult(text) {
+function parseReadObjectHeader(text) {
 	const first = linesOf(text).find((line) => line.trim() !== "");
 	const item = first === void 0 ? null : parseObjectLine(first);
-	return item !== null && /^ \d+ lines?\b/.test(item.rest);
+	return item !== null && /^ \d+ lines?\b/.test(item.rest) ? {
+		id: item.id,
+		title: item.title
+	} : null;
+}
+/** True when the text is a read_object result of a card; see parseReadObjectHeader. */
+function isReadObjectResult(text) {
+	return parseReadObjectHeader(text) !== null;
 }
 /**
 * The paging trailer of a list result, such as
@@ -4029,7 +4038,11 @@ function placement(page, entry) {
 * A card belongs to the wiki through a root whiteboard. For each whiteboard of the card, the walk goes
 * up the stored tree (the whiteboard itself first) and stops at the first root. A card that reaches two
 * different roots, or none, needs a decision (`ask`). A card that has a snapshot already was accepted
-* then, so its update is planned without asking again. Giving `--whiteboards` replaces the stored tree.
+* then, so its update is planned without asking again. The answer to an `ask` is kept in the map
+* (`hepta record` event `up-decision`): `skip` leaves the card out, a root id is the root of the card.
+*
+* Giving `--whiteboards` replaces the stored tree, unless the list is partial (its last page says that
+* more whiteboards follow): a partial list would drop the boards it lacks, so it only adds a warning.
 */
 const OPTION_SPEC$2 = {
 	values: ["project", "now"],
@@ -4065,21 +4078,25 @@ function planUp(args) {
 		problems
 	};
 	const warnings = [];
-	if (tree) {
-		if (tree.partial) warnings.push(`the whiteboard list is partial (${tree.partial}), so the stored tree holds only these whiteboards`);
+	if (tree?.partial) {
+		const stored = map.whiteboards_cache.items.length;
+		warnings.push(`the whiteboard list is partial (${tree.partial}), so the stored tree (${stored} whiteboards) was not changed`);
+	} else if (tree) {
 		map.whiteboards_cache = {
 			updated_at: now.toISOString(),
 			items: tree.nodes
 		};
 		saveCardMap(project, map);
-	}
+	} else if (map.whiteboards_cache.items.length === 0) warnings.push("the whiteboard tree is empty; pass --whiteboards");
 	const parents = parentIndex(map.whiteboards_cache.items);
 	const roots = new Set(config.roots);
 	const mirrorIds = new Set(Object.values(map.pages).map((entry) => entry.card_id));
+	const decisions = map.up_decisions ?? {};
 	const skipped = {
 		archived: 0,
 		mirror: 0,
-		unchanged: 0
+		unchanged: 0,
+		declined: 0
 	};
 	const actions = [];
 	for (const card of cards) {
@@ -4098,7 +4115,12 @@ function planUp(args) {
 			continue;
 		}
 		if (!recorded) {
-			const reached = new Set(chains.flatMap((chain) => chain.find((boardId) => roots.has(boardId)) ?? []));
+			const decision = Object.prototype.hasOwnProperty.call(decisions, card.id) ? decisions[card.id] : void 0;
+			if (decision === "skip") {
+				skipped.declined += 1;
+				continue;
+			}
+			const reached = decision !== void 0 && roots.has(decision) ? new Set([decision]) : new Set(chains.flatMap((chain) => chain.find((boardId) => roots.has(boardId)) ?? []));
 			if (reached.size !== 1) {
 				actions.push({
 					op: "ask",
@@ -4203,6 +4225,7 @@ function isNewer(updatedAt, recorded) {
 *   {"type":"placed","page","whiteboardId"}
 *   {"type":"retired","page"[,"cardUpdatedAt"]}
 *   {"type":"feedback","page","cardId","cardUpdatedAt","content"}
+*   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or a root whiteboard id)
 *
 * `contentHash` is the `contentHash` of the action. It is the hash of the card that was sent
 * (body and property values), which can differ from the page now (links to cards that did not
@@ -4211,6 +4234,9 @@ function isNewer(updatedAt, recorded) {
 * A `feedback` event saves the text a user wrote in a mirror card as a note under
 * `raw/sources/heptabase/`, so the next ingest reads it. It also records the time of that edit
 * (`cardUpdatedAt`, the `updatedAt` of the card) in the map, so plan-down reports one edit once.
+*
+* An `up-decision` event keeps the user's answer to a question of `plan-up` (an `ask` action): `skip` leaves the
+* card out, a root id says which root the card belongs to. `plan-up` then does not ask about the card again.
 */
 const OPTION_SPEC$1 = { values: [
 	"project",
@@ -4224,7 +4250,8 @@ const HANDLERS = {
 	updated: recordUpdated,
 	placed: recordPlaced,
 	retired: recordRetired,
-	feedback: recordFeedback
+	feedback: recordFeedback,
+	"up-decision": recordUpDecision
 };
 function record(args) {
 	const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC$1);
@@ -4484,6 +4511,29 @@ function recordFeedback(context) {
 		written: relative
 	};
 }
+/** The answer to a question of `plan-up`. A root has to be one of the roots of heptabase.yaml. */
+function recordUpDecision(context) {
+	const fields = new Fields(context.event);
+	const cardId = fields.id("cardId");
+	const decision = context.event.decision;
+	const problems = fields.problems;
+	if (decision === "skip") {} else if (typeof decision === "string" && UUID_PATTERN.test(decision)) {
+		const config = readHeptabaseConfig(context.project, problems);
+		if (config && !config.roots.includes(decision)) problems.push(`decision ${decision} is not a root in heptabase.yaml`);
+	} else problems.push("event \"decision\" must be \"skip\" or the id of a root whiteboard (a lowercase UUID)");
+	if (problems.length > 0 || typeof decision !== "string") return fail(problems);
+	context.map.up_decisions = {
+		...context.map.up_decisions,
+		[cardId]: decision
+	};
+	saveCardMap(context.project, context.map);
+	return {
+		ok: true,
+		event: "up-decision",
+		cardId,
+		decision
+	};
+}
 /** `<stem>.md`, or `<stem>-2.md`, `<stem>-3.md`, ... for the first name that is not a file yet. */
 function freeNotePath(project, stem) {
 	for (let number = 1;; number += 1) {
@@ -4609,15 +4659,17 @@ function parseWhiteboardIds(raw, path, issues) {
 * The skill reads the card with `read_object`, saves the result to a file, and runs this command. The
 * command writes `raw/sources/heptabase/<card-id>.md`: frontmatter, then the card as plain Markdown. It
 * records the snapshot in the card map, so `plan-up` plans the card again only after the card changes.
-* Snapshotting a card again replaces the file; the app ingests the new text again.
+* Snapshotting a card again replaces the file; the app ingests the new text again. A file that is there
+* and is not a snapshot of this card is never replaced.
 *
 * `--content` is the read_object result. A card that is longer than one page comes in several results:
 * give one `--content` for each, and the command joins them in line order. A file that is not a
-* read_object result is the card's text as it is.
+* read_object result is the card's text as it is. A result of a failed call, or of another card, is refused.
 *
 * `source_kind` is `article` for a web card, a PDF card, or a card on a `source` whiteboard; else `note`.
-* `domain` is set when exactly one domain of domains.yaml hints at a whiteboard of the card, or at an
-* ancestor of one. The file and then the map are written atomically.
+* `domain` is the domain of domains.yaml whose hinted whiteboard is nearest to the card: a whiteboard of the
+* card (distance 0), else its parent (1), and so on up. Two domains at the nearest distance give no domain.
+* The file and then the map are written atomically.
 */
 const OPTION_SPEC = {
 	values: [
@@ -4668,7 +4720,7 @@ function snapshot(args) {
 	const url = parsed.values.url?.trim() === "" ? void 0 : parsed.values.url;
 	const updatedAt = readUpdatedAt(parsed.values["updated-at"], problems);
 	const now = parseNowOption(parsed.values.now, problems);
-	const text = readContent(parsed.lists.content, problems);
+	const text = readContent(parsed.lists.content, UUID_PATTERN.test(cardId) ? cardId : null, problems);
 	const config = readHeptabaseConfig(project, problems);
 	let map = null;
 	try {
@@ -4699,9 +4751,14 @@ function snapshot(args) {
 		`card_updated_at: ${yamlString(cardUpdatedAt)}`,
 		...url === void 0 ? [] : [`url: ${yamlString(url)}`],
 		`source_kind: ${sourceKind}`,
-		...domain === null ? [] : [`domain: ${domain}`],
+		...domain === null ? [] : [`domain: ${yamlString(domain)}`],
 		"---"
 	];
+	const refusal = overwriteProblem(project, rawPath, cardId, map);
+	if (refusal) return {
+		ok: false,
+		problems: [refusal]
+	};
 	const body = cardToSnapshotBody(text).replace(/\s+$/, "");
 	writeFileAtomic(resolveInProject(project, rawPath), `${(body === "" ? frontmatter : [
 		...frontmatter,
@@ -4754,34 +4811,67 @@ function readUpdatedAt(value, problems) {
 }
 /**
 * The text of the card. The files are the pages of one read_object result (joined in line order), or one
-* file of the card's own text. Null when a file cannot be read or the files are not one of these.
+* file of the card's own text. Null when a file cannot be read, is the result of a failed call or of another
+* card (`cardId` is null when the card id is not valid, and then the card is not compared), or the files are
+* not one of these.
 */
-function readContent(paths, problems) {
+function readContent(paths, cardId, problems) {
 	if (paths.length === 0) return null;
+	const before = problems.length;
 	const texts = [];
-	for (const path of paths) try {
-		texts.push(readFileSync(path, "utf8").replace(/^﻿/, ""));
-	} catch {
-		problems.push(`cannot read --content file: ${path}`);
+	for (const path of paths) {
+		let text;
+		try {
+			text = readFileSync(path, "utf8").replace(/^\uFEFF/, "");
+		} catch {
+			problems.push(`cannot read --content file: ${path}`);
+			continue;
+		}
+		const status = failedStatus(text);
+		const header = parseReadObjectHeader(text);
+		if (status !== null) problems.push(`--content file ${path} is the result of a call that did not succeed (status: ${status})`);
+		else if (header && cardId !== null && header.id.toLowerCase() !== cardId) problems.push(`--content file ${path} is the result for card ${header.id}, not card ${cardId}`);
+		texts.push(text);
 	}
-	if (texts.length < paths.length) return null;
+	if (problems.length > before) return null;
 	const pages = texts.filter(isReadObjectResult).length;
 	if (pages === texts.length) return joinReadObjectPages(texts);
 	if (pages === 0 && texts.length === 1) return texts[0];
 	problems.push("--content must be the pages of one read_object result, or one file with the text of the card");
 	return null;
 }
+/** The `status` of a JSON envelope when it is not `succeeded`; null for anything else. */
+function failedStatus(text) {
+	if (!text.trimStart().startsWith("{")) return null;
+	try {
+		const parsed = JSON.parse(text);
+		if (isRecord(parsed) && typeof parsed.status === "string" && parsed.status !== "succeeded") return parsed.status;
+	} catch {}
+	return null;
+}
 /**
-* The domain whose hints name a whiteboard of the card, or an ancestor of one; null unless exactly one
-* domain does. A domains.yaml that cannot be read adds a warning and no domain: the snapshot is still
-* worth saving.
+* A problem when the snapshot file is there and is not this card's: a file of the user, or of another card, must
+* not be replaced. It is this card's when the map has the source, or when its frontmatter names the card.
+*/
+function overwriteProblem(project, rawPath, cardId, map) {
+	const path = resolveInProject(project, rawPath);
+	if (!existsSync(path) || Object.prototype.hasOwnProperty.call(map.sources, cardId)) return null;
+	try {
+		if (parseFrontmatter(readFileSync(path, "utf8")).frontmatter?.heptabase_card_id === cardId) return null;
+	} catch {}
+	return `${rawPath} exists and is not a snapshot of card ${cardId}; move or remove it, then run the command again`;
+}
+/**
+* The domain whose hinted whiteboard is nearest to the card: a whiteboard of the card is at distance 0, its
+* parent at 1, and so on. Null when no domain hints at one of them, or when two domains tie at the nearest
+* distance. A domains.yaml that cannot be read adds a warning and no domain: the snapshot is still worth saving.
 */
 function domainOf(project, boards, parents, warnings) {
 	const path = resolveInProject(project, DOMAINS_FILE);
 	if (!existsSync(path)) return null;
 	let text;
 	try {
-		text = readFileSync(path, "utf8").replace(/^﻿/, "");
+		text = readFileSync(path, "utf8").replace(/^\uFEFF/, "");
 	} catch {
 		warnings.push(`cannot read ${DOMAINS_FILE}, so no domain was added`);
 		return null;
@@ -4792,9 +4882,21 @@ function domainOf(project, boards, parents, warnings) {
 		warnings.push(`${DOMAINS_FILE} is not valid, so no domain was added: ${issue.path === "" ? "" : `${issue.path}: `}${issue.message}`);
 		return null;
 	}
-	const reached = new Set(boards.flatMap((board) => whiteboardChain(parents, board.id)));
-	const matches = Object.entries(result.value.domains).filter(([, entry]) => entry.whiteboards.some((hint) => reached.has(hint)));
-	return matches.length === 1 ? matches[0][0] : null;
+	const distances = /* @__PURE__ */ new Map();
+	for (const board of boards) whiteboardChain(parents, board.id).forEach((boardId, distance) => {
+		distances.set(boardId, Math.min(distance, distances.get(boardId) ?? distance));
+	});
+	const hinted = [];
+	for (const [name, entry] of Object.entries(result.value.domains)) {
+		const reached = entry.whiteboards.flatMap((hint) => distances.get(hint) ?? []);
+		if (reached.length > 0) hinted.push({
+			name,
+			distance: Math.min(...reached)
+		});
+	}
+	const nearest = Math.min(...hinted.map((domain) => domain.distance));
+	const winners = hinted.filter((domain) => domain.distance === nearest);
+	return winners.length === 1 ? winners[0].name : null;
 }
 /** The lenses a domain may use: the built-in ones and the stems of `lenses/*.md`, as the app allows. */
 function knownLenses(project) {
