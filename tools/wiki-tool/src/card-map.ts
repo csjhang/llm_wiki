@@ -27,6 +27,12 @@ export interface PageEntry {
    * An edit at or before this time is handled: plan-down does not report it again.
    */
   feedback_card_updated_at?: string
+  /**
+   * True from `record created` (right after `create_object` returned the id) until `record setup-done`:
+   * the card exists, but its tag membership and properties are not set yet. plan-down plans a `setup`
+   * action for it and nothing else, so a failure after the create never makes a second card.
+   */
+  setup_pending?: boolean
 }
 
 export interface SourceEntry {

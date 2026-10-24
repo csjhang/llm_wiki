@@ -6,11 +6,20 @@
  * done, and the next `plan-down` plans only the rest.
  *
  *   {"type":"created","page","cardId","cardUpdatedAt"[,"contentHash"]}
- *   {"type":"updated","page","cardUpdatedAt"[,"contentHash"]}      (also for a relink)
+ *   {"type":"created","page","cardId","setup":false[,"cardUpdatedAt"][,"contentHash"]}   (right after create_object)
+ *   {"type":"setup-done","page","cardUpdatedAt"}
+ *   {"type":"updated","page","cardUpdatedAt"[,"contentHash"]}
+ *   {"type":"relinked","page","cardUpdatedAt"[,"contentHash"]}
  *   {"type":"placed","page","whiteboardId"}
  *   {"type":"retired","page"[,"cardUpdatedAt"]}
  *   {"type":"feedback","page","cardId","cardUpdatedAt","content"}
  *   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or a root whiteboard id)
+ *
+ * A `created` event with `"setup": false` is run right after `create_object` returned the card id, before the
+ * card is in the mirror tag. The map keeps the page as `setup_pending`, so a failure in the next calls never
+ * makes a second card: plan-down plans a `setup` action (tag membership and properties) for the page and
+ * nothing else, and `setup-done` clears the state. Until then no `updated`, `relinked`, or `retired` event
+ * is taken for the page. Its `cardUpdatedAt` is optional (the time of the command stands in).
  *
  * `contentHash` is the `contentHash` of the action. It is the hash of the card that was sent
  * (body and property values), which can differ from the page now (links to cards that did not
@@ -59,7 +68,9 @@ type EventHandler = (context: RecordContext) => CommandResult
 
 const HANDLERS: Record<string, EventHandler> = {
   created: recordCreated,
-  updated: recordUpdated,
+  updated: (context) => recordRewritten(context, "updated"),
+  relinked: (context) => recordRewritten(context, "relinked"),
+  "setup-done": recordSetupDone,
   placed: recordPlaced,
   retired: recordRetired,
   feedback: recordFeedback,
@@ -147,6 +158,14 @@ class Fields {
     return undefined
   }
 
+  /** True when the event says `"setup": false`: the card exists, but its setup is not done. */
+  setupPending(): boolean {
+    const value = this.event.setup
+    if (value === undefined || typeof value === "boolean") return value === false
+    this.problems.push('event "setup" must be true or false')
+    return false
+  }
+
   /** The hash of the action, or undefined when the event has none. */
   hash(): string | undefined {
     const value = this.event.contentHash
@@ -174,6 +193,11 @@ function mappedPage(map: CardMap, page: string, problems: string[]): PageEntry |
   if (entry) return entry
   problems.push(`${page} is not in the card map`)
   return null
+}
+
+/** A card that waits for its setup takes no other write event: its tag and properties are not set yet. */
+function refuseWhileWaiting(entry: PageEntry | null, page: string, problems: string[]): void {
+  if (entry?.setup_pending) problems.push(`${page} is waiting for setup; record setup-done first`)
 }
 
 /**
@@ -221,7 +245,9 @@ function recordCreated(context: RecordContext): CommandResult {
   const fields = new Fields(context.event)
   const page = fields.page()
   const cardId = fields.id("cardId")
-  const cardUpdatedAt = fields.time("cardUpdatedAt", true)
+  const pending = fields.setupPending()
+  // A card that waits for setup has no time from a list yet: the time of the create stands in.
+  const cardUpdatedAt = fields.time("cardUpdatedAt", !pending) ?? context.now.toISOString()
   const given = fields.hash()
   const problems = fields.problems
   const existing = page === "" ? undefined : context.map.pages[page]
@@ -230,35 +256,57 @@ function recordCreated(context: RecordContext): CommandResult {
   }
   if (cardId !== "") problems.push(...cardIdProblems(context.map, page, cardId))
   const hash = problems.length === 0 ? (given ?? currentHash(context, page, true, problems)) : null
-  if (problems.length > 0 || hash === null || cardUpdatedAt === undefined) return fail(problems)
+  if (problems.length > 0 || hash === null) return fail(problems)
 
-  return saved(context, "created", page, {
+  // The same card recorded again keeps what the map learned about it: the placements and the handled edit.
+  const entry: PageEntry = {
+    ...(existing?.card_id === cardId ? existing : {}),
     card_id: cardId,
     content_hash: hash,
     last_synced_at: context.now.toISOString(),
     card_updated_at: cardUpdatedAt,
     placements: existing?.card_id === cardId ? existing.placements : [],
     status: "active",
-  })
+  }
+  if (pending) entry.setup_pending = true
+  else delete entry.setup_pending
+  return saved(context, "created", page, entry)
 }
 
-function recordUpdated(context: RecordContext): CommandResult {
+/** `updated` and `relinked`: the body of the card changed. */
+function recordRewritten(context: RecordContext, event: "updated" | "relinked"): CommandResult {
   const fields = new Fields(context.event)
   const page = fields.page()
   const cardUpdatedAt = fields.time("cardUpdatedAt", true)
   const given = fields.hash()
   const problems = fields.problems
   const existing = page === "" ? null : mappedPage(context.map, page, problems)
+  refuseWhileWaiting(existing, page, problems)
   const hash = problems.length === 0 ? (given ?? currentHash(context, page, false, problems)) : null
   if (problems.length > 0 || !existing || hash === null || cardUpdatedAt === undefined) return fail(problems)
 
-  return saved(context, "updated", page, {
+  return saved(context, event, page, {
     ...existing,
     content_hash: hash,
     last_synced_at: context.now.toISOString(),
     card_updated_at: cardUpdatedAt,
     status: "active",
   })
+}
+
+/** The membership and the properties of a new card are set. */
+function recordSetupDone(context: RecordContext): CommandResult {
+  const fields = new Fields(context.event)
+  const page = fields.page()
+  const cardUpdatedAt = fields.time("cardUpdatedAt", true)
+  const problems = fields.problems
+  const existing = page === "" ? null : mappedPage(context.map, page, problems)
+  if (existing && !existing.setup_pending) problems.push(`${page} is not waiting for setup`)
+  if (problems.length > 0 || !existing || cardUpdatedAt === undefined) return fail(problems)
+
+  const entry: PageEntry = { ...existing, last_synced_at: context.now.toISOString(), card_updated_at: cardUpdatedAt }
+  delete entry.setup_pending
+  return saved(context, "setup-done", page, entry)
 }
 
 function recordPlaced(context: RecordContext): CommandResult {
@@ -279,6 +327,7 @@ function recordRetired(context: RecordContext): CommandResult {
   const cardUpdatedAt = fields.time("cardUpdatedAt", false)
   const problems = fields.problems
   const existing = page === "" ? null : mappedPage(context.map, page, problems)
+  refuseWhileWaiting(existing, page, problems)
   if (problems.length > 0 || !existing) return fail(problems)
 
   return saved(context, "retired", page, {

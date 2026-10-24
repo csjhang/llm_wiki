@@ -6,6 +6,11 @@
  * The skill runs each action, then tells `hepta record` what happened, so a run that
  * stops halfway is planned again from the map.
  *
+ * A page whose card was created but not set up (the map says `setup_pending`: `record created` ran right after
+ * `create_object`) gets a `setup` action and nothing else: tag membership and properties. The card is not in the
+ * mirror tag yet, so it is not looked for in the tag list and a user edit is not checked. This is why a failure
+ * after `create_object` never makes a second card.
+ *
  * Pass 1 plans `create`, `update`, `retire`, and `skip-edited`. A new page links to the
  * pages that have a card already; a link to a page that gets its card in the same pass is
  * written as plain text. When no create, update, or retire is left, pass 2 plans a `relink`
@@ -54,6 +59,17 @@ export type { PropertyEdit }
  * in the `created` or `updated` event, so the map keeps the hash of what was sent.
  */
 export type DownAction =
+  | {
+      op: "setup"
+      page: string
+      cardId: string
+      /** The title the card has now, for the skill to check. The file name of a page that is gone. */
+      title: string
+      /** The hash of the card as it was sent (from the map). */
+      contentHash: string
+      /** Empty for a page that is gone or not synced any more. */
+      properties: PropertyEdit[]
+    }
   | { op: "create"; page: string; title: string; body: string; contentHash: string; properties: PropertyEdit[] }
   | {
       op: "update"
@@ -101,7 +117,7 @@ const MAX_ENUMERATED_LINKS = 10
 const SELECT_KEYS: readonly PropertyKey[] = ["domain", "page_type", "wiki", "status", "hypothesis_status", "strength"]
 
 /** The order of actions that are for the same page. */
-const OP_ORDER: readonly DownAction["op"][] = ["create", "update", "relink", "retire", "skip-edited", "place"]
+const OP_ORDER: readonly DownAction["op"][] = ["setup", "create", "update", "relink", "retire", "skip-edited", "place"]
 
 export function planDown(args: string[]): CommandResult {
   const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC)
@@ -266,12 +282,14 @@ function refuseMassRetire(input: PlanInput, actions: DownAction[]): string | nul
 /** A mapped page whose file is not there (or is not a wiki page any more). */
 function planGone(input: PlanInput, path: string, entry: PageEntry | undefined): PagePlan {
   if (!entry || entry.status !== "active") return { blockers: [], notes: [] }
+  if (entry.setup_pending) return planSetup(input, undefined, path, entry)
   const card = input.cards.get(entry.card_id)
   return finish(input, path, retire(input, path, entry, card?.title ?? slugOfPath(path)), undefined, [])
 }
 
 function planPage(input: PlanInput, renderer: MirrorRenderer, page: WikiPage, entry: PageEntry | undefined): PagePlan {
   const none: PagePlan = { blockers: [], notes: [] }
+  if (entry?.status === "active" && entry.setup_pending) return planSetup(input, page, page.path, entry)
   if (!entry) return isSyncable(page) ? finish(input, page.path, create(input, renderer, page), undefined, []) : none
   if (entry.status === "active" && !page.hasFrontmatter) {
     // The card stays as it is: a broken page is not a reason to retire it.
@@ -303,6 +321,24 @@ function planPage(input: PlanInput, renderer: MirrorRenderer, page: WikiPage, en
   }
   const { place, notes } = entry.status === "active" ? placement(page, entry) : { place: undefined, notes: [] }
   return finish(input, page.path, main, place, notes)
+}
+
+/**
+ * The only action of a page whose card waits for setup. The properties are those of a new card; a page that is gone,
+ * not synced any more, or without readable frontmatter gets none, and its card is then retired in a later round.
+ */
+function planSetup(input: PlanInput, page: WikiPage | undefined, path: string, entry: PageEntry): PagePlan {
+  const syncable = page !== undefined && page.hasFrontmatter && isSyncable(page)
+  const properties = syncable ? pageProperties(page, input, input.syncedOn) : []
+  const setup: DownAction = {
+    op: "setup",
+    page: path,
+    cardId: entry.card_id,
+    title: page?.title ?? slugOfPath(path),
+    contentHash: entry.content_hash,
+    properties,
+  }
+  return { main: setup, blockers: missingOptions(properties, input.options), notes: [] }
 }
 
 function create(input: PlanInput, renderer: MirrorRenderer, page: WikiPage): DownAction {

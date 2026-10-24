@@ -136,6 +136,164 @@ describe("hepta record", () => {
     })
   })
 
+  describe("created with setup false", () => {
+    it("keeps the card as waiting for setup", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      const result = await record(project, {
+        type: "created",
+        page: PAGE,
+        cardId: id(21),
+        setup: false,
+        cardUpdatedAt: "2026-10-24T08:15:35.000Z",
+        contentHash: HASH_A,
+      })
+      expect(result.exitCode).toBe(0)
+      const entry = {
+        card_id: id(21),
+        content_hash: HASH_A,
+        last_synced_at: NOW,
+        card_updated_at: "2026-10-24T08:15:35.000Z",
+        placements: [],
+        status: "active",
+        setup_pending: true,
+      }
+      expect(result.output).toEqual({ ok: true, event: "created", page: PAGE, entry })
+      expect(loadCardMap(project).pages).toEqual({ [PAGE]: entry })
+    })
+
+    it("takes the time of the command as the card time when the event has none", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      const result = await record(project, { type: "created", page: PAGE, cardId: id(21), setup: false, contentHash: HASH_A })
+      expect(result.exitCode).toBe(0)
+      expect(loadCardMap(project).pages[PAGE]).toMatchObject({ card_updated_at: NOW, setup_pending: true })
+    })
+
+    it("still refuses a card time that is not a time", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      const result = await record(project, { type: "created", page: PAGE, cardId: id(21), setup: false, cardUpdatedAt: "yesterday", contentHash: HASH_A })
+      expect(result.exitCode).toBe(2)
+      expect(result.output.problems).toEqual([expect.stringContaining("cardUpdatedAt")])
+    })
+
+    it("needs the card time when the setup is not pending", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      for (const setup of [undefined, true]) {
+        const result = await record(project, { type: "created", page: PAGE, cardId: id(21), setup, contentHash: HASH_A })
+        expect(result.exitCode).toBe(2)
+        expect(result.output.problems).toEqual([expect.stringContaining("cardUpdatedAt")])
+      }
+    })
+
+    it("refuses a setup flag that is not true or false", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      const result = await record(project, { type: "created", page: PAGE, cardId: id(21), setup: "no", cardUpdatedAt: NOW, contentHash: HASH_A })
+      expect(result.exitCode).toBe(2)
+      expect(result.output.problems).toEqual([expect.stringContaining("setup")])
+    })
+
+    it("keeps the feedback marker and the placements when the same card is recorded again", async () => {
+      const project = await createdProject()
+      await record(project, { type: "placed", page: PAGE, whiteboardId: id(31) })
+      const map = loadCardMap(project)
+      map.pages[PAGE].feedback_card_updated_at = EDITED
+      saveCardMap(project, map)
+      const again = await record(project, { type: "created", page: PAGE, cardId: id(21), setup: false, contentHash: HASH_B })
+      expect(again.exitCode).toBe(0)
+      expect(loadCardMap(project).pages[PAGE]).toMatchObject({
+        content_hash: HASH_B,
+        placements: [id(31)],
+        feedback_card_updated_at: EDITED,
+        setup_pending: true,
+      })
+    })
+
+    it("clears the waiting state when the same card is recorded again as complete", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      await record(project, { type: "created", page: PAGE, cardId: id(21), setup: false, contentHash: HASH_A })
+      await record(project, { type: "created", page: PAGE, cardId: id(21), cardUpdatedAt: NOW, contentHash: HASH_A })
+      expect(loadCardMap(project).pages[PAGE].setup_pending).toBeUndefined()
+    })
+
+    it("refuses another card for a page that waits for setup", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      await record(project, { type: "created", page: PAGE, cardId: id(21), setup: false, contentHash: HASH_A })
+      const result = await record(project, { type: "created", page: PAGE, cardId: id(22), setup: false, contentHash: HASH_A })
+      expect(result.exitCode).toBe(2)
+      expect(result.output.problems).toEqual([expect.stringContaining(id(21))])
+    })
+  })
+
+  describe("setup-done", () => {
+    async function waitingProject(): Promise<string> {
+      const project = makeProject({ [PAGE]: mechanism() })
+      await record(project, { type: "created", page: PAGE, cardId: id(21), setup: false, contentHash: HASH_A })
+      return project
+    }
+
+    it("clears the waiting state and sets the times", async () => {
+      const project = await waitingProject()
+      const later = "2026-10-24T08:20:00.000Z"
+      const result = await runCli([
+        ...["hepta", "record", "--project", project, "--now", "2026-10-24T08:16:00.000Z"],
+        ...["--event", JSON.stringify({ type: "setup-done", page: PAGE, cardUpdatedAt: later })],
+      ])
+      expect(result.exitCode).toBe(0)
+      const entry = {
+        card_id: id(21),
+        content_hash: HASH_A,
+        last_synced_at: "2026-10-24T08:16:00.000Z",
+        card_updated_at: later,
+        placements: [],
+        status: "active",
+      }
+      expect(result.output).toEqual({ ok: true, event: "setup-done", page: PAGE, entry })
+      expect(loadCardMap(project).pages[PAGE]).toEqual(entry)
+    })
+
+    it("needs the card time", async () => {
+      const project = await waitingProject()
+      for (const cardUpdatedAt of [undefined, "yesterday"]) {
+        const result = await record(project, { type: "setup-done", page: PAGE, cardUpdatedAt })
+        expect(result.exitCode).toBe(2)
+        expect(result.output.problems).toEqual([expect.stringContaining("cardUpdatedAt")])
+      }
+      expect(loadCardMap(project).pages[PAGE].setup_pending).toBe(true)
+    })
+
+    it("needs a page that waits for setup", async () => {
+      const project = await createdProject()
+      const complete = await record(project, { type: "setup-done", page: PAGE, cardUpdatedAt: NOW })
+      expect(complete.exitCode).toBe(2)
+      expect(complete.output.problems).toEqual([expect.stringContaining("not waiting for setup")])
+      const unmapped = await record(project, { type: "setup-done", page: "wiki/other.md", cardUpdatedAt: NOW })
+      expect(unmapped.exitCode).toBe(2)
+      expect(unmapped.output.problems).toEqual([expect.stringContaining("not in the card map")])
+    })
+  })
+
+  describe("a page that waits for setup", () => {
+    it("takes no updated, relinked, or retired event until setup is done", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      await record(project, { type: "created", page: PAGE, cardId: id(21), setup: false, contentHash: HASH_A })
+      for (const type of ["updated", "relinked", "retired"]) {
+        const result = await record(project, { type, page: PAGE, cardUpdatedAt: NOW, contentHash: HASH_B })
+        expect(result.exitCode, type).toBe(2)
+        expect(result.output.problems, type).toEqual([expect.stringContaining("waiting for setup")])
+      }
+      expect(loadCardMap(project).pages[PAGE]).toMatchObject({ content_hash: HASH_A, status: "active", setup_pending: true })
+    })
+  })
+
+  describe("relinked", () => {
+    it("is recorded like updated, under its own name", async () => {
+      const project = await createdProject()
+      const result = await record(project, { type: "relinked", page: PAGE, cardUpdatedAt: "2026-10-24T08:15:40.000Z", contentHash: HASH_B })
+      expect(result.exitCode).toBe(0)
+      expect(result.output).toMatchObject({ ok: true, event: "relinked", page: PAGE })
+      expect(loadCardMap(project).pages[PAGE]).toMatchObject({ content_hash: HASH_B, card_updated_at: "2026-10-24T08:15:40.000Z" })
+    })
+  })
+
   describe("updated", () => {
     it("sets the hash and the times", async () => {
       const project = await createdProject()

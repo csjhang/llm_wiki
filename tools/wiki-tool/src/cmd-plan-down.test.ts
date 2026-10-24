@@ -848,6 +848,100 @@ describe("hepta plan-down", () => {
     expect(action.op === "create" && action.body).toContain(`來源：[outside](heptabase://card/${id(61)})`)
   })
 
+  describe("a card that waits for setup", () => {
+    /** A project whose page was created: the card exists, but `record created` said the setup is not done. */
+    async function waitingProject(files: Record<string, string> = {}): Promise<{ project: string; created: DownAction }> {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven"), ...files })
+      const created = (await plan(project)).output.actions.find((action) => action.page === MECHANISM_PATH) as DownAction
+      if (created.op !== "create") throw new Error("not a create action")
+      await record(project, { type: "created", page: created.page, cardId: id(21), setup: false, contentHash: created.contentHash })
+      return { project, created }
+    }
+
+    it("plans setup with the properties of the page", async () => {
+      const { project, created } = await waitingProject()
+      const result = await plan(project)
+      expect(result.exitCode).toBe(0)
+      expect(result.output.actions).toEqual([
+        {
+          op: "setup",
+          page: MECHANISM_PATH,
+          cardId: id(21),
+          title: "Event Driven",
+          contentHash: created.op === "create" ? created.contentHash : "",
+          properties: created.op === "create" ? created.properties : [],
+        },
+      ])
+    })
+
+    it("plans setup alone, even when the page changed after the card was created", async () => {
+      const { project } = await waitingProject()
+      writeProjectFile(project, MECHANISM_PATH, mechanism("Event Driven", "Changed body."))
+      const result = await plan(project)
+      expect(result.output.actions.map((action) => action.op)).toEqual(["setup"])
+      // After setup is done, the change is an ordinary update.
+      await record(project, { type: "setup-done", page: MECHANISM_PATH, cardUpdatedAt: NOW })
+      expect((await plan(project)).output.actions.map((action) => action.op)).toEqual(["update"])
+    })
+
+    it("plans setup until setup-done is recorded, then nothing", async () => {
+      const { project } = await waitingProject()
+      expect((await plan(project)).output.actions.map((action) => action.op)).toEqual(["setup"])
+      expect((await plan(project)).output.actions.map((action) => action.op)).toEqual(["setup"])
+      await record(project, { type: "setup-done", page: MECHANISM_PATH, cardUpdatedAt: NOW })
+      expect((await plan(project)).output.actions).toEqual([])
+    })
+
+    it("does not report a user edit of the card", async () => {
+      const { project } = await waitingProject()
+      const edited = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: "2026-10-24T12:00:00.000Z" }])
+      const result = await plan(project, ["--mirror-cards", edited])
+      expect(result.output.actions.map((action) => action.op)).toEqual(["setup"])
+      expect(result.output.problems).toEqual([])
+    })
+
+    it("lets another page link to the card", async () => {
+      const { project } = await waitingProject()
+      writeProjectFile(project, "wiki/mechanisms/other.md", mechanism("Other", "See [[event-driven]]."))
+      const other = (await plan(project)).output.actions.find((action) => action.page === "wiki/mechanisms/other.md")
+      expect(other?.op === "create" && other.body).toContain(`[Event Driven](heptabase://card/${id(21)})`)
+    })
+
+    it("plans setup before the other actions of the same page", async () => {
+      const { project } = await waitingProject({ "wiki/mechanisms/a-first.md": mechanism("A First") })
+      const actions = (await plan(project)).output.actions
+      expect(actions.map((action) => `${action.op}:${action.page}`)).toEqual([
+        "create:wiki/mechanisms/a-first.md",
+        `setup:${MECHANISM_PATH}`,
+      ])
+    })
+
+    it("plans setup for a page that is gone, without properties", async () => {
+      const { project, created } = await waitingProject()
+      rmSync(join(project, MECHANISM_PATH))
+      expect((await plan(project)).output.actions).toEqual([
+        {
+          op: "setup",
+          page: MECHANISM_PATH,
+          cardId: id(21),
+          title: "event-driven",
+          contentHash: created.op === "create" ? created.contentHash : "",
+          properties: [],
+        },
+      ])
+    })
+
+    it("plans nothing for it while a select option is missing", async () => {
+      const { project } = await waitingProject()
+      writeProjectFile(project, "wiki.yaml", "version: 1\nid: other-wiki\nrole: reading\n")
+      const result = await plan(project, ["--database", DATABASE])
+      expect(result.output.actions).toEqual([])
+      expect(result.output.problems).toEqual([
+        { page: MECHANISM_PATH, problem: 'add the option "other-wiki" to the "wiki" property in Heptabase' },
+      ])
+    })
+  })
+
   it("does not change files", async () => {
     const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
     await plan(project)

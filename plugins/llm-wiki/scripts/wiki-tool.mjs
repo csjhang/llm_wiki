@@ -3684,6 +3684,11 @@ function cardHash(body, properties) {
 * The skill runs each action, then tells `hepta record` what happened, so a run that
 * stops halfway is planned again from the map.
 *
+* A page whose card was created but not set up (the map says `setup_pending`: `record created` ran right after
+* `create_object`) gets a `setup` action and nothing else: tag membership and properties. The card is not in the
+* mirror tag yet, so it is not looked for in the tag list and a user edit is not checked. This is why a failure
+* after `create_object` never makes a second card.
+*
 * Pass 1 plans `create`, `update`, `retire`, and `skip-edited`. A new page links to the
 * pages that have a card already; a link to a page that gets its card in the same pass is
 * written as plain text. When no create, update, or retire is left, pass 2 plans a `relink`
@@ -3722,6 +3727,7 @@ const SELECT_KEYS = [
 ];
 /** The order of actions that are for the same page. */
 const OP_ORDER = [
+	"setup",
 	"create",
 	"update",
 	"relink",
@@ -3865,6 +3871,7 @@ function planGone(input, path, entry) {
 		blockers: [],
 		notes: []
 	};
+	if (entry.setup_pending) return planSetup(input, void 0, path, entry);
 	return finish(input, path, retire(input, path, entry, input.cards.get(entry.card_id)?.title ?? slugOfPath(path)), void 0, []);
 }
 function planPage(input, renderer, page, entry) {
@@ -3872,6 +3879,7 @@ function planPage(input, renderer, page, entry) {
 		blockers: [],
 		notes: []
 	};
+	if (entry?.status === "active" && entry.setup_pending) return planSetup(input, page, page.path, entry);
 	if (!entry) return isSyncable(page) ? finish(input, page.path, create(input, renderer, page), void 0, []) : none;
 	if (entry.status === "active" && !page.hasFrontmatter) return {
 		blockers: ["the frontmatter of this page cannot be read, so its card is left as it is"],
@@ -3904,6 +3912,25 @@ function planPage(input, renderer, page, entry) {
 		notes: []
 	};
 	return finish(input, page.path, main, place, notes);
+}
+/**
+* The only action of a page whose card waits for setup. The properties are those of a new card; a page that is gone,
+* not synced any more, or without readable frontmatter gets none, and its card is then retired in a later round.
+*/
+function planSetup(input, page, path, entry) {
+	const properties = page !== void 0 && page.hasFrontmatter && isSyncable(page) ? pageProperties(page, input, input.syncedOn) : [];
+	return {
+		main: {
+			op: "setup",
+			page: path,
+			cardId: entry.card_id,
+			title: page?.title ?? slugOfPath(path),
+			contentHash: entry.content_hash,
+			properties
+		},
+		blockers: missingOptions(properties, input.options),
+		notes: []
+	};
 }
 function create(input, renderer, page) {
 	const body = renderer.render(page);
@@ -4221,11 +4248,20 @@ function isNewer(updatedAt, recorded) {
 * done, and the next `plan-down` plans only the rest.
 *
 *   {"type":"created","page","cardId","cardUpdatedAt"[,"contentHash"]}
-*   {"type":"updated","page","cardUpdatedAt"[,"contentHash"]}      (also for a relink)
+*   {"type":"created","page","cardId","setup":false[,"cardUpdatedAt"][,"contentHash"]}   (right after create_object)
+*   {"type":"setup-done","page","cardUpdatedAt"}
+*   {"type":"updated","page","cardUpdatedAt"[,"contentHash"]}
+*   {"type":"relinked","page","cardUpdatedAt"[,"contentHash"]}
 *   {"type":"placed","page","whiteboardId"}
 *   {"type":"retired","page"[,"cardUpdatedAt"]}
 *   {"type":"feedback","page","cardId","cardUpdatedAt","content"}
 *   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or a root whiteboard id)
+*
+* A `created` event with `"setup": false` is run right after `create_object` returned the card id, before the
+* card is in the mirror tag. The map keeps the page as `setup_pending`, so a failure in the next calls never
+* makes a second card: plan-down plans a `setup` action (tag membership and properties) for the page and
+* nothing else, and `setup-done` clears the state. Until then no `updated`, `relinked`, or `retired` event
+* is taken for the page. Its `cardUpdatedAt` is optional (the time of the command stands in).
 *
 * `contentHash` is the `contentHash` of the action. It is the hash of the card that was sent
 * (body and property values), which can differ from the page now (links to cards that did not
@@ -4247,7 +4283,9 @@ const FEEDBACK_DIRECTORY = "raw/sources/heptabase";
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const HANDLERS = {
 	created: recordCreated,
-	updated: recordUpdated,
+	updated: (context) => recordRewritten(context, "updated"),
+	relinked: (context) => recordRewritten(context, "relinked"),
+	"setup-done": recordSetupDone,
 	placed: recordPlaced,
 	retired: recordRetired,
 	feedback: recordFeedback,
@@ -4341,6 +4379,13 @@ var Fields = class {
 		if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value) && !Number.isNaN(Date.parse(value))) return value;
 		this.problems.push(`event "${key}" must be an ISO date and time`);
 	}
+	/** True when the event says `"setup": false`: the card exists, but its setup is not done. */
+	setupPending() {
+		const value = this.event.setup;
+		if (value === void 0 || typeof value === "boolean") return value === false;
+		this.problems.push("event \"setup\" must be true or false");
+		return false;
+	}
 	/** The hash of the action, or undefined when the event has none. */
 	hash() {
 		const value = this.event.contentHash;
@@ -4367,6 +4412,10 @@ function mappedPage(map, page, problems) {
 	if (entry) return entry;
 	problems.push(`${page} is not in the card map`);
 	return null;
+}
+/** A card that waits for its setup takes no other write event: its tag and properties are not set yet. */
+function refuseWhileWaiting(entry, page, problems) {
+	if (entry?.setup_pending) problems.push(`${page} is waiting for setup; record setup-done first`);
 }
 /**
 * The hash of the card of a page as it renders now. A page that is being created is not
@@ -4412,39 +4461,63 @@ function recordCreated(context) {
 	const fields = new Fields(context.event);
 	const page = fields.page();
 	const cardId = fields.id("cardId");
-	const cardUpdatedAt = fields.time("cardUpdatedAt", true);
+	const pending = fields.setupPending();
+	const cardUpdatedAt = fields.time("cardUpdatedAt", !pending) ?? context.now.toISOString();
 	const given = fields.hash();
 	const problems = fields.problems;
 	const existing = page === "" ? void 0 : context.map.pages[page];
 	if (existing && existing.status === "active" && cardId !== "" && existing.card_id !== cardId) problems.push(`${page} is already mapped to card ${existing.card_id}`);
 	if (cardId !== "") problems.push(...cardIdProblems(context.map, page, cardId));
 	const hash = problems.length === 0 ? given ?? currentHash(context, page, true, problems) : null;
-	if (problems.length > 0 || hash === null || cardUpdatedAt === void 0) return fail(problems);
-	return saved(context, "created", page, {
+	if (problems.length > 0 || hash === null) return fail(problems);
+	const entry = {
+		...existing?.card_id === cardId ? existing : {},
 		card_id: cardId,
 		content_hash: hash,
 		last_synced_at: context.now.toISOString(),
 		card_updated_at: cardUpdatedAt,
 		placements: existing?.card_id === cardId ? existing.placements : [],
 		status: "active"
-	});
+	};
+	if (pending) entry.setup_pending = true;
+	else delete entry.setup_pending;
+	return saved(context, "created", page, entry);
 }
-function recordUpdated(context) {
+/** `updated` and `relinked`: the body of the card changed. */
+function recordRewritten(context, event) {
 	const fields = new Fields(context.event);
 	const page = fields.page();
 	const cardUpdatedAt = fields.time("cardUpdatedAt", true);
 	const given = fields.hash();
 	const problems = fields.problems;
 	const existing = page === "" ? null : mappedPage(context.map, page, problems);
+	refuseWhileWaiting(existing, page, problems);
 	const hash = problems.length === 0 ? given ?? currentHash(context, page, false, problems) : null;
 	if (problems.length > 0 || !existing || hash === null || cardUpdatedAt === void 0) return fail(problems);
-	return saved(context, "updated", page, {
+	return saved(context, event, page, {
 		...existing,
 		content_hash: hash,
 		last_synced_at: context.now.toISOString(),
 		card_updated_at: cardUpdatedAt,
 		status: "active"
 	});
+}
+/** The membership and the properties of a new card are set. */
+function recordSetupDone(context) {
+	const fields = new Fields(context.event);
+	const page = fields.page();
+	const cardUpdatedAt = fields.time("cardUpdatedAt", true);
+	const problems = fields.problems;
+	const existing = page === "" ? null : mappedPage(context.map, page, problems);
+	if (existing && !existing.setup_pending) problems.push(`${page} is not waiting for setup`);
+	if (problems.length > 0 || !existing || cardUpdatedAt === void 0) return fail(problems);
+	const entry = {
+		...existing,
+		last_synced_at: context.now.toISOString(),
+		card_updated_at: cardUpdatedAt
+	};
+	delete entry.setup_pending;
+	return saved(context, "setup-done", page, entry);
 }
 function recordPlaced(context) {
 	const fields = new Fields(context.event);
@@ -4465,6 +4538,7 @@ function recordRetired(context) {
 	const cardUpdatedAt = fields.time("cardUpdatedAt", false);
 	const problems = fields.problems;
 	const existing = page === "" ? null : mappedPage(context.map, page, problems);
+	refuseWhileWaiting(existing, page, problems);
 	if (problems.length > 0 || !existing) return fail(problems);
 	return saved(context, "retired", page, {
 		...existing,
