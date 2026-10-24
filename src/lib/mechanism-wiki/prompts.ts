@@ -306,33 +306,30 @@ function mechanismRulesText(ctx: MechanismContext): string {
   return ["", "Rules for mechanism pages in this wiki (from schema/page-types/mechanism.md):", "", rules.trim()].join("\n")
 }
 
+/** Said when the parser dropped decision lines. The lines that remain are the valid ones. */
+const DROPPED_LINES_RULE =
+  "Some analysis decision lines were invalid and were dropped. Write or update mechanism pages only for the lines listed here."
+
 function decisionRules(
   decisions: AnalysisDecisions,
   canWrite: boolean,
   instancesHeading: string,
 ): string {
-  if (decisions.problems.length > 0) {
-    // The mechanism lines cannot be trusted, so none is listed.
-    return [
-      "### Mechanisms for this source",
-      "",
-      "The analysis decisions had problems; do not write or update a mechanism page in this run.",
-    ].join("\n")
-  }
+  const lines = ["### Mechanisms for this source", ""]
   if (decisions.mechanisms.length === 0) {
-    return [
-      "### Mechanisms for this source",
-      "",
+    lines.push(
       "Write a mechanism page only for a MECHANISM line in the analysis decisions. This analysis has none, so do not write a mechanism page.",
-    ].join("\n")
+    )
+  } else {
+    lines.push(
+      "The analysis decided these mechanisms. Handle each one as written:",
+      "",
+      ...decisions.mechanisms.map((mechanism) => mechanismInstruction(mechanism, canWrite, instancesHeading)),
+    )
   }
-  return [
-    "### Mechanisms for this source",
-    "",
-    "The analysis decided these mechanisms. Handle each one as written:",
-    "",
-    ...decisions.mechanisms.map((mechanism) => mechanismInstruction(mechanism, canWrite, instancesHeading)),
-  ].join("\n")
+  // `mechanisms` holds the valid lines only, so a bad line never blocks the good ones.
+  if (decisions.problems.length > 0) lines.push("", DROPPED_LINES_RULE)
+  return lines.join("\n")
 }
 
 function mechanismInstruction(

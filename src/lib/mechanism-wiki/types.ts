@@ -19,8 +19,9 @@ export interface AnalysisDecisions {
   domain: string | null
   /** A domain that is not listed yet, waiting for the user to approve it. */
   proposedDomain: { path: string; lens: string; description: string } | null
+  /** The valid MECHANISM lines only. A line that could not be used is in `problems`, not here. */
   mechanisms: MechanismDecision[]
-  /** Human-readable problems found while reading the analysis. */
+  /** Human-readable problems found while reading the analysis: dropped or invalid lines, and gaps. */
   problems: string[]
 }
 

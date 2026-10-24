@@ -45,8 +45,8 @@ import {
 import type { MultimodalConfig } from "@/stores/wiki-store"
 import { BASE_GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { loadMechanismContext } from "@/lib/mechanism-wiki/context"
+import { listMechanismSlugsStub, parseAnalysisDecisions } from "@/lib/mechanism-wiki/decisions"
 import { appendPromptSection, prepareMechanismPrompts } from "@/lib/mechanism-wiki/prompts"
-import { emptyDecisions } from "@/lib/mechanism-wiki/types"
 import { computeContextBudget } from "@/lib/context-budget"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
 import { persistParsedMarkdown } from "@/lib/parsed-source-output"
@@ -1144,8 +1144,17 @@ async function autoIngestImpl(
     pp,
   )
   const previouslyCompletedPaths = generationCheckpoint?.completedPaths ?? []
-  // Nothing parses the analysis yet, so only the domain hint is known here.
-  const mechanismGeneration = mechanism?.generation(emptyDecisions(mechanism.hint))
+  // In a mechanism wiki, the Decisions section of the analysis (single pass, or
+  // the head of the final digest of a long source) sets the generation rules.
+  let mechanismGeneration: string | undefined
+  if (mechanism && mechanismCtx) {
+    const existingMechanisms = await listMechanismSlugsStub(mechanismCtx.mechanismLibraryPath)
+    const decisions = parseAnalysisDecisions(analysis, mechanismCtx, mechanism.hint, existingMechanisms)
+    if (decisions.problems.length > 0) {
+      console.warn(`[ingest:mechanism] decision problems for "${fileName}":`, decisions.problems)
+    }
+    mechanismGeneration = mechanism.generation(decisions)
+  }
   let generation = ""
   let generationError: string | null = null
   let generationTruncated = false

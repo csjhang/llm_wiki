@@ -355,25 +355,58 @@ describe("buildGenerationAddendum", () => {
     expect(text).not.toContain("had problems")
   })
 
-  it("blocks mechanism pages when the analysis decisions had problems", () => {
-    const line = "The analysis decisions had problems; do not write or update a mechanism page in this run."
+  it("lists the valid mechanisms and says that lines were dropped when there are problems", () => {
+    const dropped =
+      "Some analysis decision lines were invalid and were dropped. Write or update mechanism pages only for the lines listed here."
     const withProblems = buildGenerationAddendum(
-      makeCtx(),
-      decisions({ problems: ["The analysis has no Decisions section."] }),
-    )
-    expect(withProblems).toContain(line)
-    expect(buildGenerationAddendum(makeCtx(), decisions())).not.toContain(line)
-
-    // A mechanism line that was read does not override the problem line.
-    const both = buildGenerationAddendum(
       makeCtx(),
       decisions({
         problems: ["A MECHANISM line was not understood."],
-        mechanisms: [{ kind: "existing", slug: "event-driven-computing", summary: "x" }],
+        mechanisms: [
+          { kind: "existing", slug: "event-driven-computing", summary: "Work happens only when an event arrives" },
+          { kind: "new", slug: "backpressure", summary: "A slow consumer slows the producer" },
+        ],
       }),
     )
-    expect(both).toContain(line)
-    expect(both).not.toContain("update wiki/mechanisms/event-driven-computing.md")
+
+    expect(withProblems).toContain(dropped)
+    expect(withProblems).toContain("update wiki/mechanisms/event-driven-computing.md")
+    expect(withProblems).toContain("wiki/mechanisms/backpressure.md")
+    // The old rule that blocked every mechanism page is gone.
+    expect(withProblems).not.toContain("do not write or update a mechanism page in this run")
+    expect(withProblems).not.toContain("had problems")
+
+    const clean = buildGenerationAddendum(
+      makeCtx(),
+      decisions({ mechanisms: [{ kind: "new", slug: "backpressure", summary: "x" }] }),
+    )
+    expect(clean).not.toContain("were invalid and were dropped")
+  })
+
+  it("keeps the empty-list rule and adds the dropped-lines sentence when every line was dropped", () => {
+    const text = buildGenerationAddendum(makeCtx(), decisions({ problems: ["The analysis has no Decisions section."] }))
+
+    expect(text).toContain(
+      "Write a mechanism page only for a MECHANISM line in the analysis decisions. This analysis has none, so do not write a mechanism page.",
+    )
+    expect(text).toContain(
+      "Some analysis decision lines were invalid and were dropped. Write or update mechanism pages only for the lines listed here.",
+    )
+    expect(text).not.toContain("do not write or update a mechanism page in this run")
+  })
+
+  it("keeps the valid mechanisms of a work wiki as review rules when there are problems", () => {
+    const text = buildGenerationAddendum(
+      makeCtx({ identity: WORK }),
+      decisions({
+        problems: ["A MECHANISM line was not understood."],
+        mechanisms: [{ kind: "new", slug: "backpressure", summary: "A slow consumer slows the producer" }],
+      }),
+    )
+
+    expect(text).toContain("MECHANISM new:backpressure")
+    expect(text).toContain("REVIEW block of type new-mechanism")
+    expect(text).toContain("were invalid and were dropped")
   })
 
   it("keeps the output format reminder at the end", () => {

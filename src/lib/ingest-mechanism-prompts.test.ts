@@ -16,12 +16,17 @@ import { useWikiStore } from "@/stores/wiki-store"
 
 vi.mock("@/commands/fs", () => realFs)
 
+/** What the mocked model answers for the analysis and for the digest of a chunk. Tests change it. */
+const DEFAULT_ANALYSIS = "## Analysis\nA short analysis."
+const DEFAULT_DIGEST = "A digest."
+const llm = vi.hoisted(() => ({ analysis: "", digest: "" }))
+
 vi.mock("./llm-client", () => ({
   streamChat: vi.fn(async (_cfg, messages, cb) => {
     const systemPrompt = String(messages?.[0]?.content ?? "")
 
     if (systemPrompt.startsWith("You are analyzing a long source document")) {
-      cb.onToken("## Chunk Analysis\nA chunk.\n\n## Updated Global Digest\nA digest.")
+      cb.onToken(`## Chunk Analysis\nA chunk.\n\n## Updated Global Digest\n${llm.digest}`)
       cb.onDone()
       return
     }
@@ -29,7 +34,7 @@ vi.mock("./llm-client", () => ({
     const target = systemPrompt.match(/source summary page at \*\*(wiki\/sources\/[^*]+)\*\*/)?.[1]
     if (!target) {
       // Analysis, and anything else that is not generation.
-      cb.onToken("## Analysis\nA short analysis.")
+      cb.onToken(llm.analysis)
       cb.onDone()
       return
     }
@@ -61,6 +66,7 @@ import {
 import { streamChat } from "./llm-client"
 import { buildAnalysisAddendum, buildGenerationAddendum, prepareMechanismPrompts } from "./mechanism-wiki/prompts"
 import { loadMechanismContext } from "./mechanism-wiki/context"
+import { parseAnalysisDecisions } from "./mechanism-wiki/decisions"
 import { emptyDecisions } from "./mechanism-wiki/types"
 import { sourceSummarySlugFromIdentity } from "./source-identity"
 
@@ -103,6 +109,8 @@ describe("ingest prompts and the mechanism context", () => {
 
   beforeEach(async () => {
     mockStreamChat.mockClear()
+    llm.analysis = DEFAULT_ANALYSIS
+    llm.digest = DEFAULT_DIGEST
     tmp = await createTempProject("mechanism-prompts")
     useReviewStore.setState({ items: [] })
     useActivityStore.setState({ items: [] })
@@ -255,8 +263,11 @@ describe("ingest prompts and the mechanism context", () => {
     await ingest(project)
 
     const generation = capturedCalls().find(isGeneration)
+    // The default analysis has no Decisions section, so the decisions are the empty ones plus that problem.
+    const decisions = parseAnalysisDecisions(DEFAULT_ANALYSIS, ctx, null, new Set())
+    expect(decisions).toEqual({ ...emptyDecisions(null), problems: [expect.stringMatching(/no Decisions section/i)] })
     expect(generation?.system).toBe(
-      `${expected.generation}\n\n${buildGenerationAddendum(ctx, emptyDecisions(null), "English")}`,
+      `${expected.generation}\n\n${buildGenerationAddendum(ctx, decisions, "English")}`,
     )
     expect(generation?.system).toMatch(/`mechanism` and `hypothesis` are also known types/)
     expect(generation?.system).not.toContain("known types (source | entity | concept | comparison | query | synthesis | thesis | methodology | finding | mechanism")
@@ -275,6 +286,103 @@ describe("ingest prompts and the mechanism context", () => {
     expect(analysis?.system).not.toContain(ctx.lenses.hardware.promptText)
     const generation = calls.find(isGeneration)
     expect(generation?.system).toContain("domain: ai/architecture")
+  })
+
+  it("puts the decisions of the analysis in the generation prompt", async () => {
+    llm.analysis = [
+      "## Analysis",
+      "Work happens only when an event arrives.",
+      "",
+      "## Decisions",
+      "DOMAIN: ai/architecture",
+      "MECHANISM: existing:event-driven-computing | Work happens only when an event arrives",
+      "MECHANISM: new:backpressure | A slow consumer slows the producer",
+    ].join("\n")
+    const project = await mechanismProject()
+    await writeFileRaw(`${project}/wiki/mechanisms/event-driven-computing.md`, "---\ntype: mechanism\n---\n\n# Event-driven computing\n")
+    const ctx = await loadMechanismContext(project)
+    if (!ctx) throw new Error("expected a mechanism context")
+    const expected = await expectedPrompts(project, SOURCE_TEXT)
+    await ingest(project)
+
+    const generation = capturedCalls().find(isGeneration)
+    expect(generation?.system).toBe(
+      `${expected.generation}\n\n${buildGenerationAddendum(
+        ctx,
+        {
+          domain: "ai/architecture",
+          proposedDomain: null,
+          mechanisms: [
+            { kind: "existing", slug: "event-driven-computing", summary: "Work happens only when an event arrives" },
+            { kind: "new", slug: "backpressure", summary: "A slow consumer slows the producer" },
+          ],
+          problems: [],
+        },
+        "English",
+      )}`,
+    )
+    expect(generation?.system).toContain("domain: ai/architecture")
+    expect(generation?.system).toContain("update wiki/mechanisms/event-driven-computing.md")
+    expect(generation?.system).toContain("write wiki/mechanisms/backpressure.md as a new mechanism page")
+    expect(generation?.system).not.toContain("were invalid and were dropped")
+  })
+
+  it("writes an existing mechanism that is not in the library as a new one", async () => {
+    llm.analysis = "## Decisions\nDOMAIN: ai/architecture\nMECHANISM: existing:ghost-mechanism | Not in the library\n"
+    const project = await mechanismProject()
+    await ingest(project)
+
+    const generation = capturedCalls().find(isGeneration)
+    expect(generation?.system).toContain("write wiki/mechanisms/ghost-mechanism.md as a new mechanism page")
+    expect(generation?.system).not.toContain("update wiki/mechanisms/ghost-mechanism.md")
+  })
+
+  it("keeps the valid lines and says that the others were dropped", async () => {
+    llm.analysis = [
+      "## Decisions",
+      "DOMAIN: ai/architecture",
+      "MECHANISM: new:Not Kebab Case | Bad slug",
+      "MECHANISM: new:backpressure | A slow consumer slows the producer",
+    ].join("\n")
+    const project = await mechanismProject()
+    await ingest(project)
+
+    const generation = capturedCalls().find(isGeneration)
+    expect(generation?.system).toContain("wiki/mechanisms/backpressure.md")
+    expect(generation?.system).not.toContain("Not Kebab Case")
+    expect(generation?.system).toContain(
+      "Some analysis decision lines were invalid and were dropped. Write or update mechanism pages only for the lines listed here.",
+    )
+  })
+
+  it("tells the generation prompt about a proposed domain", async () => {
+    llm.analysis = "## Decisions\nNEW-DOMAIN: cognition/attention | ai | How attention works\n"
+    const project = await mechanismProject()
+    await ingest(project)
+
+    const generation = capturedCalls().find(isGeneration)
+    expect(generation?.system).toContain("domain: cognition/attention")
+    expect(generation?.system).toContain("proposes the new domain `cognition/attention`")
+  })
+
+  it("reads the decisions from the head of the digest of a long source", async () => {
+    llm.digest = [
+      "### Decisions",
+      "DOMAIN: ai/architecture",
+      "MECHANISM: new:backpressure | A slow consumer slows the producer",
+      "",
+      "### Summary",
+      "A long document.",
+    ].join("\n")
+    const longSource = ["# One", "A".repeat(9000), "## Two", "B".repeat(9000), "## Three", "C".repeat(9000)].join("\n\n")
+    const project = await mechanismProject(longSource)
+    await ingest(project, { maxContextSize: 20_000 })
+
+    const calls = capturedCalls()
+    expect(calls.filter(isChunk).length).toBeGreaterThan(1)
+    const generation = calls.find(isGeneration)
+    expect(generation?.system).toContain("domain: ai/architecture")
+    expect(generation?.system).toContain("write wiki/mechanisms/backpressure.md as a new mechanism page")
   })
 
   it("tells a work wiki not to write mechanism files", async () => {
