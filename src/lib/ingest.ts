@@ -45,6 +45,7 @@ import {
 import type { MultimodalConfig } from "@/stores/wiki-store"
 import { BASE_GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { loadMechanismContext } from "@/lib/mechanism-wiki/context"
+import { checkDuplicateSource, recordFingerprint } from "@/lib/mechanism-wiki/source-fingerprint"
 import { listMechanismSlugsStub, parseAnalysisDecisions } from "@/lib/mechanism-wiki/decisions"
 import { enforceMechanismRules, proposedDomainReview } from "@/lib/mechanism-wiki/enforce"
 import { appendPromptSection, prepareMechanismPrompts } from "@/lib/mechanism-wiki/prompts"
@@ -913,6 +914,31 @@ async function autoIngestImpl(
     })
   }
 
+  // A project with domains.yaml is a mechanism wiki: its prompts get domain and
+  // mechanism sections (src/lib/mechanism-wiki/prompts.ts). Any other project
+  // gets `null` here and every step below stays as upstream builds it.
+  const mechanismCtx = await loadMechanismContext(pp)
+
+  // A mechanism wiki does not ingest a source that repeats one it already has, even when the copy came
+  // through another entry point. The queue treats "no files" as a failure, so return the first copy's
+  // source summary page: it exists and is unchanged, so it adds nothing to a commit.
+  if (mechanismCtx) {
+    throwIfIngestAborted(signal, activityId)
+    const duplicate = await checkDuplicateSource(pp, sp, sourceContent)
+    if (duplicate) {
+      if (duplicate.review) useReviewStore.getState().addItems([duplicate.review])
+      console.log(
+        `[ingest:mechanism] "${sourceIdentity}" repeats ${duplicate.hit.existing.sourcePath} (${duplicate.hit.reason}, ${duplicate.hit.score.toFixed(2)}); skipped`,
+      )
+      activity.updateItem(activityId, {
+        status: "done",
+        detail: `Skipped (duplicate of ${duplicate.hit.existing.sourcePath}) — ${duplicate.summaryPath}`,
+        filesWritten: [duplicate.summaryPath],
+      })
+      return [duplicate.summaryPath]
+    }
+  }
+
   // ── Step 0.5: Extract embedded images ─────────────────────────
   // Pulls every embedded image out of PDF / PPTX / DOCX into
   // `wiki/media/<source-slug>/`. We DON'T inject the markdown
@@ -1039,10 +1065,6 @@ async function autoIngestImpl(
     }
   }
 
-  // A project with domains.yaml is a mechanism wiki: its prompts get domain and
-  // mechanism sections (src/lib/mechanism-wiki/prompts.ts). Any other project
-  // gets `null` here and every prompt below stays as upstream builds it.
-  const mechanismCtx = await loadMechanismContext(pp)
   const mechanism = mechanismCtx
     ? prepareMechanismPrompts(mechanismCtx, index, sourceContent, getOutputLanguage(sourceContent))
     : null
@@ -1602,6 +1624,17 @@ async function autoIngestImpl(
     unrecoveredTruncatedPaths.length === 0
   ) {
     await saveIngestCache(pp, sourceIdentity, sourceContent, writtenPaths)
+    if (mechanismCtx) {
+      // A fingerprint is a convenience: failing to write one never fails the ingest.
+      try {
+        await recordFingerprint(pp, sp, sourceContent, writtenPaths.includes(sourceSummaryPath) ? sourceSummaryPath : null)
+      } catch (err) {
+        console.warn(
+          `[ingest:mechanism] Failed to record the fingerprint of "${sourceIdentity}":`,
+          err instanceof Error ? err.message : err,
+        )
+      }
+    }
     await clearGenerationCheckpoint(generationProgressPath)
     if (longSourceCheckpointPath) {
       await clearLongSourceCheckpoint(longSourceCheckpointPath)
