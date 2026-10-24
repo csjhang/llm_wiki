@@ -188,7 +188,7 @@ describe("readJsonFile", () => {
   it("ignores a byte order mark", () => {
     const dir = makeTempDir()
     const target = join(dir, "a.json")
-    writeFileSync(target, '﻿{"a":1}')
+    writeFileSync(target, '\uFEFF{"a":1}')
     expect(readJsonFile<{ a: number }>(target)).toEqual({ a: 1 })
   })
 

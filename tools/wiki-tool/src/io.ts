@@ -26,7 +26,7 @@ export interface CommandGroup {
 
 /** Read and parse a JSON file. A parse error names the file. */
 export function readJsonFile<T>(path: string): T {
-  const text = readFileSync(path, "utf8").replace(/^﻿/, "")
+  const text = readFileSync(path, "utf8").replace(/^\uFEFF/, "")
   try {
     return JSON.parse(text) as T
   } catch (error) {

@@ -1,0 +1,1 @@
+{"content": "card \"Card N-02｜Terms, one | two\" [00000000-0000-4000-8000-000000000008] 40 lines\n37\t\n38\t[Source A, 1998](https://doi.org/10.1000/example-a)\n39\t[Source B, 1994](https://doi.org/10.1000/example-b)\n40\t<hepta-placeholder id=\"00000000-0000-4000-8000-000000000040\" kind=\"complexTable\" />", "totalLines": 40, "status": "succeeded"}
