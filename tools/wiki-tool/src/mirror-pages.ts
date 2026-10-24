@@ -262,6 +262,11 @@ export function readProjectConfig(project: string, problems: string[]): ProjectC
   return heptabase && wiki ? { heptabase, wiki } : null
 }
 
+/** The parsed heptabase.yaml of a project, or null with the problems when it cannot be read or is not valid. */
+export function readHeptabaseConfig(project: string, problems: string[]): HeptabaseConfig | null {
+  return readConfigFile(project, "heptabase.yaml", parseHeptabaseYaml, problems)
+}
+
 function readConfigFile<T>(
   project: string,
   name: string,

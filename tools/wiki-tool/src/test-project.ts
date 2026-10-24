@@ -44,6 +44,10 @@ export interface ProjectOptions {
   wikiId?: string
   /** Leave heptabase.yaml out. */
   noHeptabaseYaml?: boolean
+  /** The `roots` of heptabase.yaml. The default is the one root `id(12)`. */
+  roots?: string[]
+  /** The `whiteboards` of heptabase.yaml: whiteboard id to its inline settings, such as `{ kind: archive }`. */
+  boards?: Record<string, string>
 }
 
 /** A project folder with the config files and `files` (project-relative path to text). */
@@ -53,7 +57,17 @@ export function makeProject(files: Record<string, string> = {}, options: Project
   writeProjectFile(project, "wiki.yaml", `version: 1\nid: ${options.wikiId ?? "test"}\nrole: reading\n`)
   if (!options.noHeptabaseYaml) {
     const properties = Object.entries(PROPERTY_IDS).map(([key, value]) => `  ${key}: ${value}`)
-    const lines = ["version: 1", "roots:", `  - ${id(12)}`, "tags:", `  ingest: ${id(5)}`, `  mirror: ${id(4)}`]
+    const roots = (options.roots ?? [id(12)]).map((root) => `  - ${root}`)
+    const boards = Object.entries(options.boards ?? {}).map(([board, settings]) => `  ${board}: ${settings}`)
+    const lines = [
+      "version: 1",
+      "roots:",
+      ...roots,
+      ...(boards.length > 0 ? ["whiteboards:", ...boards] : []),
+      "tags:",
+      `  ingest: ${id(5)}`,
+      `  mirror: ${id(4)}`,
+    ]
     writeProjectFile(project, "heptabase.yaml", [...lines, "properties:", ...properties, ""].join("\n"))
   }
   for (const [path, text] of Object.entries(files)) writeProjectFile(project, path, text)

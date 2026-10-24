@@ -277,6 +277,17 @@ export function joinReadObjectPages(pages: string[]): string {
 }
 
 /**
+ * True when the text is a read_object result of a card (the JSON envelope or its text): the first
+ * line is the object header, such as `card "<title>" [<uuid>] 40 lines`. A text that is a card's own
+ * Markdown is not one, even when a line of it starts with a number and a tab.
+ */
+export function isReadObjectResult(text: string): boolean {
+  const first = linesOf(text).find((line) => line.trim() !== "")
+  const item = first === undefined ? null : parseObjectLine(first)
+  return item !== null && /^ \d+ lines?\b/.test(item.rest)
+}
+
+/**
  * The paging trailer of a list result, such as
  * `More cards are available. Showing 1-3 of 40. Call list_cards with offset 3 to list the next page.`
  * Returns null when the result is not paged or the page is the last one.

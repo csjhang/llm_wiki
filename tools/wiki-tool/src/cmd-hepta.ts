@@ -6,10 +6,12 @@
  */
 import { init } from "./cmd-init"
 import { planDown } from "./cmd-plan-down"
+import { planUp } from "./cmd-plan-up"
 import { record } from "./cmd-record"
+import { snapshot } from "./cmd-snapshot"
 import type { CommandGroup } from "./io"
 
 export const HEPTA_GROUP: CommandGroup = {
   name: "hepta",
-  commands: { init, "plan-down": planDown, record },
+  commands: { init, "plan-down": planDown, "plan-up": planUp, snapshot, record },
 }

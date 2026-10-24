@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import {
   joinListWhiteboards,
+  isReadObjectResult,
   joinReadObjectPages,
   parseListCards,
   parseListWhiteboards,
@@ -473,6 +474,26 @@ describe("joinReadObjectPages", () => {
   it("returns an empty string when there are no numbered lines", () => {
     expect(joinReadObjectPages([])).toBe("")
     expect(joinReadObjectPages([`card "T" [${id(1)}] 0 lines`])).toBe("")
+  })
+})
+
+describe("isReadObjectResult", () => {
+  it("is true for the pages of a read_object result, as envelope or raw text", () => {
+    for (const name of ["read_object_page1.txt", "read_object_page2.txt"]) {
+      expect(isReadObjectResult(fixture(name))).toBe(true)
+      expect(isReadObjectResult(fixtureContent(name))).toBe(true)
+    }
+    expect(isReadObjectResult(`\n\ncard "T" [${id(1)}] 0 lines`)).toBe(true)
+    expect(isReadObjectResult(`card "T" [${id(1)}] 1 line\r\n1\ta`)).toBe(true)
+  })
+
+  it("is false for the Markdown of a card, even with numbered lines in it", () => {
+    expect(isReadObjectResult("")).toBe(false)
+    expect(isReadObjectResult("# Title\n\ntext")).toBe(false)
+    expect(isReadObjectResult("1\tone\n2\ttwo")).toBe(false)
+    expect(isReadObjectResult(fixture("list_cards_empty.txt"))).toBe(false)
+    // A list is not a card: its first line has no line count.
+    expect(isReadObjectResult(fixture("list_cards_two_boards.txt"))).toBe(false)
   })
 })
 

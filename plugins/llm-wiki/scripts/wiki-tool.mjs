@@ -2159,7 +2159,7 @@ const OPTIONAL_PROPERTY_KEYS = [
 	"hypothesis_status",
 	"strength"
 ];
-const TOP_LEVEL_KEYS$1 = [
+const TOP_LEVEL_KEYS$2 = [
 	"version",
 	"roots",
 	"whiteboards",
@@ -2182,7 +2182,7 @@ function parseHeptabaseYaml(text) {
 	const root = loaded.value;
 	const issues = [];
 	checkVersion(root, issues);
-	reportUnknownKeys(root, TOP_LEVEL_KEYS$1, "", issues);
+	reportUnknownKeys(root, TOP_LEVEL_KEYS$2, "", issues);
 	const roots = parseRoots(root.roots, issues);
 	const whiteboards = parseWhiteboards(root.whiteboards, issues);
 	const tags = parseTags(root.tags, issues);
@@ -2514,6 +2514,8 @@ const OBJECT_LINE = new RegExp(`^(\\s*)([A-Za-z][A-Za-z0-9_]*) "([^\\n]*?)" \\[(
 const LISTED_ITEM = new RegExp(`(?:^|, )([^\\n]+?) \\[(${UUID$1})\\](?=, |$)`, "g");
 /** A mind map node: `<n>\t<indent>card "<title>" cardId: [<uuid>], nodeId: [<uuid>]`. */
 const MIND_MAP_CARD = new RegExp(`^(?:\\d+\\t)?\\s*card "([^\\n]*?)" cardId: \\[(${UUID$1})\\]`);
+/** A numbered line of read_object content: `<n>\t<text>`. */
+const NUMBERED_LINE = /^(\d+)\t([^\n]*)$/;
 /** The line a paged list ends with. */
 const PAGING_TRAILER = /^More [^\n]*? are available\. Showing (\d+)-(\d+) of (\d+)\.[^\n]*?\boffset (\d+)\b/;
 /** The `content` text of a JSON envelope, or the text itself when it is not one. */
@@ -2635,6 +2637,32 @@ function joinListWhiteboards(pages) {
 	return nodes;
 }
 /**
+* Join the pages of a paged read_object result into the object's own text.
+* Each page has a header line, on page 1 a `--- Databases ---` block, and content
+* lines `<n>\t<text>` with absolute line numbers. Only the numbered lines are kept,
+* ordered by number; when pages overlap, the later page wins. Only the first
+* `<n>\t` is removed, so tabs inside the text stay. A missing number is not
+* reported: compare the line count with the `totalLines` of the result.
+*/
+function joinReadObjectPages(pages) {
+	const byNumber = /* @__PURE__ */ new Map();
+	for (const page of pages) for (const line of linesOf(page)) {
+		const match = NUMBERED_LINE.exec(line);
+		if (match) byNumber.set(Number(match[1]), match[2]);
+	}
+	return Array.from(byNumber.keys()).sort((a, b) => a - b).map((number) => byNumber.get(number)).join("\n");
+}
+/**
+* True when the text is a read_object result of a card (the JSON envelope or its text): the first
+* line is the object header, such as `card "<title>" [<uuid>] 40 lines`. A text that is a card's own
+* Markdown is not one, even when a line of it starts with a number and a tab.
+*/
+function isReadObjectResult(text) {
+	const first = linesOf(text).find((line) => line.trim() !== "");
+	const item = first === void 0 ? null : parseObjectLine(first);
+	return item !== null && /^ \d+ lines?\b/.test(item.rest);
+}
+/**
 * The paging trailer of a list result, such as
 * `More cards are available. Showing 1-3 of 40. Call list_cards with offset 3 to list the next page.`
 * Returns null when the result is not paged or the page is the last one.
@@ -2707,7 +2735,7 @@ const PROPERTY_SPECS = [
 		type: "select"
 	}
 ];
-const OPTION_SPEC$2 = {
+const OPTION_SPEC$4 = {
 	values: [
 		"project",
 		"database",
@@ -2731,7 +2759,7 @@ const REQUIRED_OPTIONS = [
 	"root"
 ];
 function init(args) {
-	const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC$2);
+	const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC$4);
 	const problems = [...optionProblems];
 	for (const name of REQUIRED_OPTIONS) if (!(name in parsed.lists ? parsed.lists[name].length > 0 : parsed.values[name] !== void 0)) problems.push(`missing option: --${name}`);
 	if (problems.length > 0) return {
@@ -3043,7 +3071,7 @@ function stringifyScalar(v) {
 */
 const WIKI_ROLES = ["reading", "work"];
 const WIKI_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
-const TOP_LEVEL_KEYS = [
+const TOP_LEVEL_KEYS$1 = [
 	"version",
 	"id",
 	"role",
@@ -3062,7 +3090,7 @@ function parseWikiYaml(text) {
 	const root = loaded.value;
 	const issues = [];
 	checkVersion(root, issues);
-	reportUnknownKeys(root, TOP_LEVEL_KEYS, "", issues);
+	reportUnknownKeys(root, TOP_LEVEL_KEYS$1, "", issues);
 	const id = parseId(root.id, issues);
 	const role = parseRole(root.role, issues);
 	const mechanismLibrary = parseMechanismLibrary(root.mechanism_library, role, issues);
@@ -3136,6 +3164,8 @@ function parseMechanismLibrary(raw, role, issues) {
 const UNSYNCED_MARKER = "（僅在 wiki）";
 const FOOTER_NO_SOURCES = "無";
 const FOOTER_NOTICE = "由 wiki 產生，請勿直接編輯。";
+/** Stands in for a Hepta element the tool cannot represent. */
+const UNSUPPORTED_BLOCK = "<!-- heptabase: unsupported block -->";
 const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}";
 /** The attributes of an HTML tag: anything but `>`, except inside quotes. */
 const TAG_ATTRIBUTES = `(?:[^>"']|"[^"]*"|'[^']*')*`;
@@ -3177,6 +3207,13 @@ function wikiPageToCard(markdown, opts) {
 		[converted.replace(/\s+$/, ""), code.unclosedFence].filter((part) => part !== void 0).join("\n"),
 		`---\n來源：${opts.sourceCards.length > 0 ? opts.sourceCards.map(cardLink).join(", ") : FOOTER_NO_SOURCES}\n${FOOTER_NOTICE}`
 	].filter((part) => part !== "").join("\n\n");
+}
+function cardToSnapshotBody(heptaMarkdown) {
+	const code = maskCode(heptaMarkdown);
+	let text = replaceUnsupportedBlocks(code.masked);
+	text = text.replace(HEPTA_INLINE_TAG, "");
+	text = text.replace(CARD_LINK, "$1");
+	return code.restore(text);
 }
 /** Removes a leading `---` frontmatter block. */
 function stripFrontmatter(text) {
@@ -3289,6 +3326,41 @@ function findCodeSpanEnd(text, from, length, limit) {
 		at = runEnd;
 	}
 	return -1;
+}
+/**
+* Replaces each `<hepta-placeholder>` and `<hepta-table>` element with a comment.
+* A table may span lines and hold other tags. A tag whose closing tag is missing
+* is replaced alone; a closing tag without an opening tag is dropped.
+*/
+function replaceUnsupportedBlocks(text) {
+	const tags = [...text.matchAll(new RegExp(`<(/?)hepta-(table|placeholder)(?=[\\s/>])(${TAG_ATTRIBUTES})>`, "gi"))];
+	const endOf = (tag) => (tag.index ?? 0) + tag[0].length;
+	let out = "";
+	let position = 0;
+	let i = 0;
+	while (i < tags.length) {
+		const tag = tags[i];
+		const start = tag.index ?? 0;
+		out += text.slice(position, start);
+		position = endOf(tag);
+		i++;
+		if (tag[1] === "/") continue;
+		out += UNSUPPORTED_BLOCK;
+		if (/\/\s*$/.test(tag[3])) continue;
+		const name = tag[2].toLowerCase();
+		let depth = 1;
+		for (let j = i; j < tags.length; j++) {
+			const next = tags[j];
+			if (next[2].toLowerCase() !== name || next[1] !== "/" && /\/\s*$/.test(next[3])) continue;
+			depth += next[1] === "/" ? -1 : 1;
+			if (depth === 0) {
+				position = endOf(next);
+				i = j + 1;
+				break;
+			}
+		}
+	}
+	return out + text.slice(position);
 }
 
 //#endregion
@@ -3490,6 +3562,10 @@ function readProjectConfig(project, problems) {
 		wiki
 	} : null;
 }
+/** The parsed heptabase.yaml of a project, or null with the problems when it cannot be read or is not valid. */
+function readHeptabaseConfig(project, problems) {
+	return readConfigFile(project, "heptabase.yaml", parseHeptabaseYaml, problems);
+}
 function readConfigFile(project, name, parse, problems) {
 	const path = resolveInProject(project, name);
 	let text;
@@ -3613,7 +3689,7 @@ function cardHash(body, properties) {
 * read error from looking like a deleted wiki: an unreadable `wiki/` folder stops the command, and a
 * plan that would retire most of the cards retires none.
 */
-const OPTION_SPEC$1 = {
+const OPTION_SPEC$3 = {
 	values: [
 		"project",
 		"database",
@@ -3645,7 +3721,7 @@ const OP_ORDER = [
 	"place"
 ];
 function planDown(args) {
-	const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC$1);
+	const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC$3);
 	const problems = [...optionProblems];
 	const project = parsed.values.project;
 	if (project === void 0) problems.push("missing option: --project");
@@ -3937,6 +4013,183 @@ function placement(page, entry) {
 }
 
 //#endregion
+//#region tools/wiki-tool/src/cmd-plan-up.ts
+/**
+* `wiki-tool hepta plan-up` - plan the changes from Heptabase to the wiki.
+*
+* Reads the cards the skill listed (`list_cards`, one file per page), the whiteboard tree, the card
+* map, and heptabase.yaml, and prints the actions the skill must run: `snapshot` a card into
+* `raw/sources/heptabase/` (the skill reads the card, then runs `hepta snapshot`), `download-pdf` for
+* a PDF card, or `ask` the user when the card cannot be placed. It never calls Heptabase.
+*
+* A card is planned when it has no snapshot yet, or when its `updatedAt` is newer than the time the
+* map recorded. Not planned: a mirror card (the AI wrote it), a card on an archive whiteboard, and a
+* card whose snapshot is up to date.
+*
+* A card belongs to the wiki through a root whiteboard. For each whiteboard of the card, the walk goes
+* up the stored tree (the whiteboard itself first) and stops at the first root. A card that reaches two
+* different roots, or none, needs a decision (`ask`). A card that has a snapshot already was accepted
+* then, so its update is planned without asking again. Giving `--whiteboards` replaces the stored tree.
+*/
+const OPTION_SPEC$2 = {
+	values: ["project", "now"],
+	lists: ["cards", "whiteboards"]
+};
+const PDF_CARD = "pdfCard";
+function planUp(args) {
+	const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC$2);
+	const problems = [...optionProblems];
+	const project = parsed.values.project;
+	if (project === void 0) problems.push("missing option: --project");
+	if (parsed.lists.cards.length === 0) problems.push("missing option: --cards");
+	if (problems.length > 0 || project === void 0) return {
+		ok: false,
+		problems
+	};
+	if (!isDirectory(project)) return {
+		ok: false,
+		problems: [`project folder not found: ${project}`]
+	};
+	const config = readHeptabaseConfig(project, problems);
+	let map = null;
+	try {
+		map = loadCardMap(project);
+	} catch (error) {
+		problems.push(error instanceof Error ? error.message : String(error));
+	}
+	const now = parseNowOption(parsed.values.now, problems);
+	const cards = readCards(parsed.lists.cards, problems);
+	const tree = parsed.lists.whiteboards.length > 0 ? readTree(parsed.lists.whiteboards, problems) : null;
+	if (problems.length > 0 || !config || !map || !now) return {
+		ok: false,
+		problems
+	};
+	const warnings = [];
+	if (tree) {
+		if (tree.partial) warnings.push(`the whiteboard list is partial (${tree.partial}), so the stored tree holds only these whiteboards`);
+		map.whiteboards_cache = {
+			updated_at: now.toISOString(),
+			items: tree.nodes
+		};
+		saveCardMap(project, map);
+	}
+	const parents = parentIndex(map.whiteboards_cache.items);
+	const roots = new Set(config.roots);
+	const mirrorIds = new Set(Object.values(map.pages).map((entry) => entry.card_id));
+	const skipped = {
+		archived: 0,
+		mirror: 0,
+		unchanged: 0
+	};
+	const actions = [];
+	for (const card of cards) {
+		if (mirrorIds.has(card.id)) {
+			skipped.mirror += 1;
+			continue;
+		}
+		const recorded = Object.prototype.hasOwnProperty.call(map.sources, card.id) ? map.sources[card.id] : void 0;
+		if (recorded && !isNewer(card.updatedAt, recorded.card_updated_at)) {
+			skipped.unchanged += 1;
+			continue;
+		}
+		const chains = card.whiteboards.map((board) => whiteboardChain(parents, board.id));
+		if (chains.some((chain) => chain.some((boardId) => config.whiteboards[boardId]?.kind === "archive"))) {
+			skipped.archived += 1;
+			continue;
+		}
+		if (!recorded) {
+			const reached = new Set(chains.flatMap((chain) => chain.find((boardId) => roots.has(boardId)) ?? []));
+			if (reached.size !== 1) {
+				actions.push({
+					op: "ask",
+					cardId: card.id,
+					title: card.title,
+					reason: reached.size === 0 ? "no-root" : "two-roots"
+				});
+				continue;
+			}
+		}
+		actions.push(card.type === PDF_CARD ? {
+			op: "download-pdf",
+			cardId: card.id,
+			title: card.title
+		} : {
+			op: "snapshot",
+			cardId: card.id,
+			title: card.title,
+			cardType: card.type,
+			whiteboards: card.whiteboards
+		});
+	}
+	return {
+		ok: true,
+		actions,
+		skipped,
+		warnings
+	};
+}
+/** The cards of the `list_cards` files, in order of first appearance. A later file wins for a card that two files list. */
+function readCards(paths, problems) {
+	const cards = /* @__PURE__ */ new Map();
+	for (const path of paths) {
+		let text;
+		try {
+			text = readFileSync(path, "utf8");
+		} catch {
+			problems.push(`cannot read --cards file: ${path}`);
+			continue;
+		}
+		for (const card of parseListCards(text)) cards.set(card.id, card);
+	}
+	return [...cards.values()];
+}
+/** The whiteboards of the `list_whiteboards` files, joined. `partial` says so when the last page is not the end. */
+function readTree(paths, problems) {
+	const pages = [];
+	for (const path of paths) try {
+		pages.push(readFileSync(path, "utf8"));
+	} catch {
+		problems.push(`cannot read --whiteboards file: ${path}`);
+	}
+	if (pages.length < paths.length) return null;
+	const nodes = joinListWhiteboards(pages);
+	if (nodes.length === 0) {
+		problems.push("--whiteboards file lists no whiteboards");
+		return null;
+	}
+	const trailer = parsePagingTrailer(pages[pages.length - 1]);
+	return {
+		nodes,
+		partial: trailer ? `showing ${trailer.shown[0]}-${trailer.shown[1]} of ${trailer.total}` : null
+	};
+}
+/** A whiteboard id to the id of its parent. A top-level whiteboard has `null`. */
+function parentIndex(items) {
+	return new Map(items.map((node) => [node.id, node.parentId]));
+}
+/**
+* The whiteboard and its ancestors, nearest first. A whiteboard that the tree does not know has no
+* ancestors; the chain is only the whiteboard itself. A loop in the tree ends the chain.
+*/
+function whiteboardChain(parents, boardId) {
+	const chain = [];
+	let current = boardId;
+	while (current !== null && current !== void 0 && !chain.includes(current)) {
+		chain.push(current);
+		current = parents.get(current);
+	}
+	return chain;
+}
+/** True when the card changed after the recorded time. A card list without `updatedAt` cannot say, so it is not newer. */
+function isNewer(updatedAt, recorded) {
+	if (updatedAt === void 0) return false;
+	const current = Date.parse(updatedAt);
+	if (Number.isNaN(current)) return false;
+	const before = Date.parse(recorded);
+	return Number.isNaN(before) || current > before;
+}
+
+//#endregion
 //#region tools/wiki-tool/src/cmd-record.ts
 /**
 * `wiki-tool hepta record` - tell the card map what the skill did in Heptabase.
@@ -3959,7 +4212,7 @@ function placement(page, entry) {
 * `raw/sources/heptabase/`, so the next ingest reads it. It also records the time of that edit
 * (`cardUpdatedAt`, the `updatedAt` of the card) in the map, so plan-down reports one edit once.
 */
-const OPTION_SPEC = { values: [
+const OPTION_SPEC$1 = { values: [
 	"project",
 	"event",
 	"now"
@@ -3974,7 +4227,7 @@ const HANDLERS = {
 	feedback: recordFeedback
 };
 function record(args) {
-	const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC);
+	const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC$1);
 	const problems = [...optionProblems];
 	const project = parsed.values.project;
 	const eventText = parsed.values.event;
@@ -4240,6 +4493,324 @@ function freeNotePath(project, stem) {
 }
 
 //#endregion
+//#region src/lib/wiki-config/domains.ts
+const DOMAIN_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*(?:\/[a-z0-9]+(?:-[a-z0-9]+)*)*$/;
+const KNOWN_LENSES = [
+	"business",
+	"physics",
+	"hardware",
+	"ai"
+];
+const TOP_LEVEL_KEYS = ["version", "domains"];
+const ENTRY_KEYS = [
+	"lens",
+	"description",
+	"whiteboards"
+];
+/**
+* Parse and validate the text of `domains.yaml`. Collects every issue before
+* returning. `knownLenses` defaults to the four built-in lenses.
+*/
+function parseDomainsYaml(text, knownLenses = KNOWN_LENSES) {
+	const loaded = loadYamlMapping(text);
+	if (!loaded.ok) return {
+		ok: false,
+		issues: [loaded.issue]
+	};
+	const root = loaded.value;
+	const issues = [];
+	checkVersion(root, issues);
+	reportUnknownKeys(root, TOP_LEVEL_KEYS, "", issues);
+	const domains = parseDomains(root.domains, knownLenses, issues);
+	if (issues.length > 0) return {
+		ok: false,
+		issues
+	};
+	return {
+		ok: true,
+		value: {
+			version: 1,
+			domains
+		},
+		issues: []
+	};
+}
+function parseDomains(raw, knownLenses, issues) {
+	const domains = {};
+	if (raw === void 0 || raw === null) return domains;
+	if (!isRecord(raw)) {
+		issues.push({
+			path: "domains",
+			message: "must be a mapping of domain name to entry"
+		});
+		return domains;
+	}
+	for (const [name, entry] of Object.entries(raw)) {
+		const path = childPath("domains", name);
+		const validName = DOMAIN_NAME_PATTERN.test(name);
+		if (!validName) issues.push({
+			path,
+			message: `invalid domain name "${name}"; use lowercase letters, digits, and "-", with "/" between levels`
+		});
+		const parsed = parseEntry(entry, path, knownLenses, issues);
+		if (validName) domains[name] = parsed;
+	}
+	return domains;
+}
+function parseEntry(raw, path, knownLenses, issues) {
+	const entry = {
+		lens: "",
+		description: "",
+		whiteboards: []
+	};
+	if (!isRecord(raw)) {
+		issues.push({
+			path,
+			message: "must be a mapping with lens, description, and optional whiteboards"
+		});
+		return entry;
+	}
+	reportUnknownKeys(raw, ENTRY_KEYS, path, issues);
+	if (typeof raw.lens === "string" && knownLenses.includes(raw.lens)) entry.lens = raw.lens;
+	else issues.push({
+		path: childPath(path, "lens"),
+		message: `must be one of: ${knownLenses.join(", ")}`
+	});
+	if (typeof raw.description === "string" && raw.description.trim() !== "") entry.description = raw.description;
+	else issues.push({
+		path: childPath(path, "description"),
+		message: "must be a non-empty string"
+	});
+	entry.whiteboards = parseWhiteboardIds(raw.whiteboards, childPath(path, "whiteboards"), issues);
+	return entry;
+}
+function parseWhiteboardIds(raw, path, issues) {
+	if (raw === void 0 || raw === null) return [];
+	if (!Array.isArray(raw)) {
+		issues.push({
+			path,
+			message: "must be a list of whiteboard UUIDs"
+		});
+		return [];
+	}
+	const ids = [];
+	raw.forEach((item, index) => {
+		const id = readUuid(item, `${path}[${index}]`, issues);
+		if (id !== "") ids.push(id);
+	});
+	return ids;
+}
+
+//#endregion
+//#region tools/wiki-tool/src/cmd-snapshot.ts
+/**
+* `wiki-tool hepta snapshot` - save a Heptabase card as a source of the wiki.
+*
+* The skill reads the card with `read_object`, saves the result to a file, and runs this command. The
+* command writes `raw/sources/heptabase/<card-id>.md`: frontmatter, then the card as plain Markdown. It
+* records the snapshot in the card map, so `plan-up` plans the card again only after the card changes.
+* Snapshotting a card again replaces the file; the app ingests the new text again.
+*
+* `--content` is the read_object result. A card that is longer than one page comes in several results:
+* give one `--content` for each, and the command joins them in line order. A file that is not a
+* read_object result is the card's text as it is.
+*
+* `source_kind` is `article` for a web card, a PDF card, or a card on a `source` whiteboard; else `note`.
+* `domain` is set when exactly one domain of domains.yaml hints at a whiteboard of the card, or at an
+* ancestor of one. The file and then the map are written atomically.
+*/
+const OPTION_SPEC = {
+	values: [
+		"project",
+		"card-id",
+		"title",
+		"card-type",
+		"whiteboards",
+		"url",
+		"updated-at",
+		"now"
+	],
+	lists: ["content"]
+};
+const SNAPSHOT_DIRECTORY = "raw/sources/heptabase";
+const DOMAINS_FILE = "domains.yaml";
+const LENSES_DIRECTORY = "lenses";
+/** The card types whose source is an article by an outside author. */
+const ARTICLE_TYPES = ["webCard", "pdfCard"];
+const KEYWORD_PATTERN = /^[A-Za-z][A-Za-z0-9_]*$/;
+function snapshot(args) {
+	const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC);
+	const problems = [...optionProblems];
+	for (const name of [
+		"project",
+		"card-id",
+		"title",
+		"card-type",
+		"whiteboards"
+	]) if (parsed.values[name] === void 0) problems.push(`missing option: --${name}`);
+	if (parsed.lists.content.length === 0) problems.push("missing option: --content");
+	const project = parsed.values.project;
+	if (problems.length > 0 || project === void 0) return {
+		ok: false,
+		problems
+	};
+	if (!isDirectory(project)) return {
+		ok: false,
+		problems: [`project folder not found: ${project}`]
+	};
+	const cardId = parsed.values["card-id"];
+	if (!UUID_PATTERN.test(cardId)) problems.push(`--card-id must be a card id (a lowercase UUID): ${cardId}`);
+	const title = parsed.values.title;
+	if (title.trim() === "") problems.push("--title must not be empty");
+	const cardType = parsed.values["card-type"];
+	if (!KEYWORD_PATTERN.test(cardType)) problems.push(`--card-type must be a card type such as card or webCard: ${cardType}`);
+	const boards = readBoards(parsed.values.whiteboards, problems);
+	const url = parsed.values.url?.trim() === "" ? void 0 : parsed.values.url;
+	const updatedAt = readUpdatedAt(parsed.values["updated-at"], problems);
+	const now = parseNowOption(parsed.values.now, problems);
+	const text = readContent(parsed.lists.content, problems);
+	const config = readHeptabaseConfig(project, problems);
+	let map = null;
+	try {
+		map = loadCardMap(project);
+	} catch (error) {
+		problems.push(error instanceof Error ? error.message : String(error));
+	}
+	if (map && UUID_PATTERN.test(cardId)) {
+		const mirror = Object.entries(map.pages).find(([, entry]) => entry.card_id === cardId);
+		if (mirror) problems.push(`card ${cardId} is the card of ${mirror[0]}; a mirror card is not a source`);
+	}
+	if (problems.length > 0 || !boards || !config || !map || !now || text === null) return {
+		ok: false,
+		problems
+	};
+	const warnings = [];
+	const parents = parentIndex(map.whiteboards_cache.items);
+	const onSourceBoard = boards.some((board) => config.whiteboards[board.id]?.kind === "source");
+	const sourceKind = ARTICLE_TYPES.includes(cardType) || onSourceBoard ? "article" : "note";
+	const domain = domainOf(project, boards, parents, warnings);
+	const cardUpdatedAt = updatedAt ?? now.toISOString();
+	const rawPath = `${SNAPSHOT_DIRECTORY}/${cardId}.md`;
+	const frontmatter = [
+		"---",
+		`title: ${yamlString(title)}`,
+		`heptabase_card_id: ${cardId}`,
+		`heptabase_whiteboards: [${boards.map((board) => yamlString(board.title)).join(", ")}]`,
+		`card_updated_at: ${yamlString(cardUpdatedAt)}`,
+		...url === void 0 ? [] : [`url: ${yamlString(url)}`],
+		`source_kind: ${sourceKind}`,
+		...domain === null ? [] : [`domain: ${domain}`],
+		"---"
+	];
+	const body = cardToSnapshotBody(text).replace(/\s+$/, "");
+	writeFileAtomic(resolveInProject(project, rawPath), `${(body === "" ? frontmatter : [
+		...frontmatter,
+		"",
+		body
+	]).join("\n")}\n`);
+	map.sources[cardId] = {
+		raw_path: rawPath,
+		card_updated_at: cardUpdatedAt,
+		ingest_commit: null
+	};
+	saveCardMap(project, map);
+	return {
+		ok: true,
+		card_id: cardId,
+		written: rawPath,
+		source_kind: sourceKind,
+		domain,
+		warnings
+	};
+}
+/** The `--whiteboards` JSON: a list of `{ id, title }`. */
+function readBoards(value, problems) {
+	if (value === void 0) return null;
+	let raw;
+	try {
+		raw = JSON.parse(value);
+	} catch (error) {
+		problems.push(`--whiteboards is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+		return null;
+	}
+	const boards = [];
+	if (Array.isArray(raw)) {
+		for (const item of raw) if (isRecord(item) && typeof item.id === "string" && UUID_PATTERN.test(item.id) && typeof item.title === "string") boards.push({
+			id: item.id,
+			title: item.title
+		});
+	}
+	if (!Array.isArray(raw) || boards.length !== raw.length) {
+		problems.push("--whiteboards must be a JSON list of { \"id\": <whiteboard id>, \"title\": <text> }");
+		return null;
+	}
+	return boards;
+}
+/** An ISO date and time; the text is kept as it is. */
+function readUpdatedAt(value, problems) {
+	if (value === void 0) return void 0;
+	if (/^\d{4}-\d{2}-\d{2}/.test(value) && !Number.isNaN(Date.parse(value))) return value;
+	problems.push(`--updated-at must be an ISO date and time, such as 2026-10-24T08:00:00Z: ${value}`);
+}
+/**
+* The text of the card. The files are the pages of one read_object result (joined in line order), or one
+* file of the card's own text. Null when a file cannot be read or the files are not one of these.
+*/
+function readContent(paths, problems) {
+	if (paths.length === 0) return null;
+	const texts = [];
+	for (const path of paths) try {
+		texts.push(readFileSync(path, "utf8").replace(/^﻿/, ""));
+	} catch {
+		problems.push(`cannot read --content file: ${path}`);
+	}
+	if (texts.length < paths.length) return null;
+	const pages = texts.filter(isReadObjectResult).length;
+	if (pages === texts.length) return joinReadObjectPages(texts);
+	if (pages === 0 && texts.length === 1) return texts[0];
+	problems.push("--content must be the pages of one read_object result, or one file with the text of the card");
+	return null;
+}
+/**
+* The domain whose hints name a whiteboard of the card, or an ancestor of one; null unless exactly one
+* domain does. A domains.yaml that cannot be read adds a warning and no domain: the snapshot is still
+* worth saving.
+*/
+function domainOf(project, boards, parents, warnings) {
+	const path = resolveInProject(project, DOMAINS_FILE);
+	if (!existsSync(path)) return null;
+	let text;
+	try {
+		text = readFileSync(path, "utf8").replace(/^﻿/, "");
+	} catch {
+		warnings.push(`cannot read ${DOMAINS_FILE}, so no domain was added`);
+		return null;
+	}
+	const result = parseDomainsYaml(text, knownLenses(project));
+	if (!result.ok) {
+		const issue = result.issues[0];
+		warnings.push(`${DOMAINS_FILE} is not valid, so no domain was added: ${issue.path === "" ? "" : `${issue.path}: `}${issue.message}`);
+		return null;
+	}
+	const reached = new Set(boards.flatMap((board) => whiteboardChain(parents, board.id)));
+	const matches = Object.entries(result.value.domains).filter(([, entry]) => entry.whiteboards.some((hint) => reached.has(hint)));
+	return matches.length === 1 ? matches[0][0] : null;
+}
+/** The lenses a domain may use: the built-in ones and the stems of `lenses/*.md`, as the app allows. */
+function knownLenses(project) {
+	let names = [];
+	try {
+		names = readdirSync(resolveInProject(project, LENSES_DIRECTORY));
+	} catch {}
+	const stems = names.filter((name) => name.toLowerCase().endsWith(".md")).map((name) => name.slice(0, -3));
+	return [...new Set([...KNOWN_LENSES, ...stems])];
+}
+/** A double-quoted YAML string. JSON text is one, except that YAML also breaks a line at these characters. */
+function yamlString(value) {
+	return JSON.stringify(value).replace(/[\u0085\u2028\u2029]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+//#endregion
 //#region tools/wiki-tool/src/cmd-hepta.ts
 /**
 * The `hepta` command group: sync between a wiki and Heptabase.
@@ -4252,6 +4823,8 @@ const HEPTA_GROUP = {
 	commands: {
 		init,
 		"plan-down": planDown,
+		"plan-up": planUp,
+		snapshot,
 		record
 	}
 };
