@@ -387,6 +387,18 @@ describe("hepta snapshot", () => {
       expect(mixed.output.problems).toEqual([expect.stringContaining(failed)])
     })
 
+    it("rejects a status that is not a string, such as 1 or null", async () => {
+      const project = makeProject()
+      for (const status of [1, null, true, {}, ["succeeded"]]) {
+        const failed = join(project, "failed.json")
+        writeProjectFile(project, "failed.json", JSON.stringify({ content: "Card not found.", status }))
+        const result = await snapshot(project, { files: [failed] })
+        expect(result.exitCode, JSON.stringify(status)).toBe(2)
+        expect(result.output.problems, JSON.stringify(status)).toEqual([expect.stringContaining(failed)])
+      }
+      expect(existsSync(join(project, "raw"))).toBe(false)
+    })
+
     it("accepts the status succeeded, a missing status, and plain text", async () => {
       const project = makeProject()
       expect((await snapshot(project, { cardId: id(8), files: [PAGE_1, PAGE_2] })).exitCode).toBe(0)

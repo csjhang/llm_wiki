@@ -2536,7 +2536,7 @@ function unwrap(text) {
 * not a JSON object (such as the text of a card). A failed result reads like an empty list, so a command checks this
 * before it uses the file.
 */
-function failedStatus$1(text) {
+function failedStatus(text) {
 	const body = text.replace(/^\uFEFF/, "");
 	if (!body.trimStart().startsWith("{")) return null;
 	let parsed;
@@ -2961,6 +2961,26 @@ function renderHeptabaseYaml(draft) {
 		if (id !== void 0) lines.push(`  ${spec.key}: ${scalar(id)}`);
 	}
 	return `${lines.join("\n")}\n`;
+}
+
+//#endregion
+//#region tools/wiki-tool/src/hepta-files.ts
+/**
+* Where wiki-tool keeps the text of the cards it sends, under `<project>/.llm-wiki/hepta/` (git-ignored).
+*
+* `outbox/<sha256 of the page path>.md` is the text that plan-down wants in the card of a page. The skill sends this
+* file's text to Heptabase, so the text is never typed again. `sent/<card id>.md` is the text of the last write that
+* `hepta record` saw for a card. A user's edit is the difference between the card now and this file, so the text the
+* wiki wrote is never taken for the user's change.
+*/
+const HEPTA_DIRECTORY = ".llm-wiki/hepta";
+/** The project-relative path of the outbox file of a page. */
+function outboxFile(page) {
+	return `${HEPTA_DIRECTORY}/outbox/${contentHash(page)}.md`;
+}
+/** The project-relative path of the sent file of a card. */
+function sentFile(cardId) {
+	return `${HEPTA_DIRECTORY}/sent/${cardId}.md`;
 }
 
 //#endregion
@@ -3700,7 +3720,10 @@ function cardHash(body, properties) {
 * `wiki-tool hepta plan-down` - plan the changes from the wiki to Heptabase.
 *
 * Reads the wiki pages, the card map, heptabase.yaml, and wiki.yaml, and prints the
-* actions the wiki-sync skill must run. It changes no file and never calls Heptabase.
+* actions the wiki-sync skill must run. It never calls Heptabase and never writes the card map or a wiki page.
+* It writes the text each `create`, `update`, `relink`, and `retire` action sends to
+* `.llm-wiki/hepta/outbox/<sha256 of the page path>.md` and names that file as `bodyFile`: the skill sends the
+* text of the file, so the body is never typed again, and `hepta record` keeps the file as the text that was sent.
 * The skill runs each action, then tells `hepta record` what happened, so a run that
 * stops halfway is planned again from the map.
 *
@@ -3807,12 +3830,25 @@ function planDown(args) {
 		wikiId: config.wiki.id,
 		syncedOn: { start: `${now.toISOString().slice(0, 10)}T00:00:00.000Z` }
 	});
+	writeOutbox(project, plan.actions);
 	return {
 		ok: true,
 		pass: plan.pass,
 		actions: plan.actions,
 		problems: plan.problems
 	};
+}
+/** The text a `create`, `update`, `relink`, or `retire` action sends to its card. A retire sends the title as a heading too. */
+function textToSend(action) {
+	if (action.op === "create" || action.op === "update" || action.op === "relink") return action.body;
+	return action.op === "retire" ? `# ${action.title}\n\n${action.body}` : null;
+}
+/** Writes the text of each action that sends one to its `bodyFile`, exactly as it is (no line feed is added). */
+function writeOutbox(project, actions) {
+	for (const action of actions) {
+		const text = textToSend(action);
+		if (text !== null && "bodyFile" in action) writeFileAtomic(resolveInProject(project, action.bodyFile), text);
+	}
 }
 /**
 * The cards of the `list_cards` files, by id. A later file wins for a card that two files list. A file that is the
@@ -3831,7 +3867,7 @@ function readMirrorCards(paths, problems) {
 			continue;
 		}
 		last = text;
-		const status = failedStatus$1(text);
+		const status = failedStatus(text);
 		if (status !== null) {
 			problems.push(`--mirror-cards file ${path} is the result of a call that did not succeed (status: ${status})`);
 			continue;
@@ -3939,6 +3975,7 @@ function planPage(input, renderer, page, entry) {
 		page: page.path,
 		cardId: entry.card_id,
 		body,
+		bodyFile: outboxFile(page.path),
 		contentHash: hash
 	} : {
 		op: "update",
@@ -3946,6 +3983,7 @@ function planPage(input, renderer, page, entry) {
 		cardId: entry.card_id,
 		title: page.title,
 		body,
+		bodyFile: outboxFile(page.path),
 		contentHash: hash,
 		properties: pageProperties(page, input, input.syncedOn)
 	};
@@ -3981,6 +4019,7 @@ function create(input, renderer, page) {
 		page: page.path,
 		title: page.title,
 		body,
+		bodyFile: outboxFile(page.path),
 		contentHash: cardHash(body, pageProperties(page, input)),
 		properties: pageProperties(page, input, input.syncedOn)
 	};
@@ -3993,6 +4032,7 @@ function retire(input, path, entry, title) {
 		cardId: entry.card_id,
 		title: `${RETIRED_TITLE_PREFIX}${base}`,
 		body: RETIRED_BODY,
+		bodyFile: outboxFile(path),
 		contentHash: contentHash(RETIRED_BODY),
 		properties: editsOf(input.properties, [[
 			"status",
@@ -4302,6 +4342,46 @@ function isNewer(updatedAt, recorded) {
 }
 
 //#endregion
+//#region tools/wiki-tool/src/read-content.ts
+/**
+* Reading the saved result of `read_object` for a command.
+*
+* snapshot and record (feedback) take the text of a card as files: one file for each page of the result, or one file
+* with the text of the card.
+*/
+/**
+* The text of the card. The files are the pages of one read_object result (joined in line order), or one
+* file of the card's own text. Null when a file cannot be read, is the result of a failed call or of another
+* card (`cardId` is null when the card id is not valid, and then the card is not compared), or the files are
+* not one of these. Every reason is added to `problems`.
+*/
+function readContentFiles(paths, cardId, problems) {
+	if (paths.length === 0) return null;
+	const before = problems.length;
+	const texts = [];
+	for (const path of paths) {
+		let text;
+		try {
+			text = readFileSync(path, "utf8").replace(/^﻿/, "");
+		} catch {
+			problems.push(`cannot read --content file: ${path}`);
+			continue;
+		}
+		const status = failedStatus(text);
+		const header = parseReadObjectHeader(text);
+		if (status !== null) problems.push(`--content file ${path} is the result of a call that did not succeed (status: ${status})`);
+		else if (header && cardId !== null && header.id.toLowerCase() !== cardId) problems.push(`--content file ${path} is the result for card ${header.id}, not card ${cardId}`);
+		texts.push(text);
+	}
+	if (problems.length > before) return null;
+	const pages = texts.filter(isReadObjectResult).length;
+	if (pages === texts.length) return joinReadObjectPages(texts);
+	if (pages === 0 && texts.length === 1) return texts[0];
+	problems.push("--content must be the pages of one read_object result, or one file with the text of the card");
+	return null;
+}
+
+//#endregion
 //#region tools/wiki-tool/src/cmd-record.ts
 /**
 * `wiki-tool hepta record` - tell the card map what the skill did in Heptabase.
@@ -4317,7 +4397,7 @@ function isNewer(updatedAt, recorded) {
 *   {"type":"relinked","page","cardUpdatedAt"[,"contentHash"]}
 *   {"type":"placed","page","whiteboardId"}
 *   {"type":"retired","page","cardUpdatedAt"}
-*   {"type":"feedback","page","cardId","cardUpdatedAt","content"}
+*   {"type":"feedback","page","cardId","cardUpdatedAt"}          (with one --content file for each page of read_object)
 *   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or a root whiteboard id)
 *
 * A `created` event with `"setup": false` is run right after `create_object` returned the card id, before the
@@ -4330,18 +4410,28 @@ function isNewer(updatedAt, recorded) {
 * (body and property values), which can differ from the page now (links to cards that did not
 * exist then). Without it, the hash of the page as it renders now is used.
 *
-* A `feedback` event saves the text a user wrote in a mirror card as a note under
-* `raw/sources/heptabase/`, so the next ingest reads it. It also records the time of that edit
-* (`cardUpdatedAt`, the `updatedAt` of the card) in the map, so plan-down reports one edit once.
+* `created`, `updated`, `relinked`, and `retired` keep the text that was sent: the event names the body file of the
+* action (`bodyFile`), or the tool takes the outbox file of the page that plan-down wrote, and copies it to
+* `.llm-wiki/hepta/sent/<card id>.md`. Nothing is copied when the page has no outbox file.
+*
+* A `feedback` event reads the card the skill saved (`--content`, the pages of the `read_object` result) and compares
+* it with the sent text, both as plain Markdown. When they are the same (white space aside), the card is as the wiki
+* wrote it: no note is written. Else the lines the user added and removed are saved as a note under
+* `raw/sources/heptabase/`, so the next ingest reads the user's change and not the text of the wiki. Without a sent
+* text the note holds the whole card. Either way the event records the time of that edit (`cardUpdatedAt`, the
+* `updatedAt` of the card) in the map, so plan-down reports one edit once.
 *
 * An `up-decision` event keeps the user's answer to a question of `plan-up` (an `ask` action): `skip` leaves the
 * card out, a root id says which root the card belongs to. `plan-up` then does not ask about the card again.
 */
-const OPTION_SPEC$1 = { values: [
-	"project",
-	"event",
-	"now"
-] };
+const OPTION_SPEC$1 = {
+	values: [
+		"project",
+		"event",
+		"now"
+	],
+	lists: ["content"]
+};
 const FEEDBACK_DIRECTORY = "raw/sources/heptabase";
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const HANDLERS = {
@@ -4387,11 +4477,16 @@ function record(args) {
 		ok: false,
 		problems: [`unknown event type: ${JSON.stringify(type)}`]
 	};
+	if (parsed.lists.content.length > 0 && type !== "feedback") return {
+		ok: false,
+		problems: ["--content is only for the feedback event"]
+	};
 	return handler({
 		project,
 		map,
 		event,
-		now
+		now,
+		content: parsed.lists.content
 	});
 }
 function parseEvent(text, problems) {
@@ -4415,8 +4510,9 @@ function parseEvent(text, problems) {
 /** Reads the fields of an event and collects what is wrong with them. */
 var Fields = class {
 	problems = [];
-	constructor(event) {
+	constructor(event, project) {
 		this.event = event;
+		this.project = project;
 	}
 	/** A page path under `wiki/`, normalized. */
 	page() {
@@ -4441,6 +4537,15 @@ var Fields = class {
 		if (value === void 0 && !required) return void 0;
 		if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value) && !Number.isNaN(Date.parse(value))) return value;
 		this.problems.push(`event "${key}" must be an ISO date and time`);
+	}
+	/** The project-relative body file that the event names, or undefined when it names none. It must be a file of the project. */
+	bodyFile() {
+		const value = this.event.bodyFile;
+		if (value === void 0) return void 0;
+		try {
+			if (typeof value === "string" && value.trim() !== "" && statSync(resolveInProject(this.project, value)).isFile()) return value;
+		} catch {}
+		this.problems.push("event \"bodyFile\" must be a file of the project (the bodyFile of the action)");
 	}
 	/** True when the event says `"setup": false`: the card exists, but its setup is not done. */
 	setupPending() {
@@ -4520,13 +4625,36 @@ function saved(context, event, page, entry) {
 		entry
 	};
 }
+/**
+* Keeps the text of the last write of a card (the named body file, else the outbox file of the page), then saves the map.
+* The text goes first: if the map fails to save, the text is already there for the edit check of the next run.
+*/
+function savedWithBody(context, event, page, entry, bodyFile) {
+	const text = readBody(context, page, bodyFile);
+	if (text === null) return saved(context, event, page, entry);
+	const sent = sentFile(entry.card_id);
+	writeFileAtomic(resolveInProject(context.project, sent), text);
+	return {
+		...saved(context, event, page, entry),
+		sent
+	};
+}
+/** The text plan-down wants in the card of a page: the named body file, else the outbox file. Null when there is none. */
+function readBody(context, page, bodyFile) {
+	try {
+		return readFileSync(resolveInProject(context.project, bodyFile ?? outboxFile(page)), "utf8");
+	} catch {
+		return null;
+	}
+}
 function recordCreated(context) {
-	const fields = new Fields(context.event);
+	const fields = new Fields(context.event, context.project);
 	const page = fields.page();
 	const cardId = fields.id("cardId");
 	const pending = fields.setupPending();
 	const cardUpdatedAt = fields.time("cardUpdatedAt", !pending) ?? context.now.toISOString();
 	const given = fields.hash();
+	const bodyFile = fields.bodyFile();
 	const problems = fields.problems;
 	const existing = page === "" ? void 0 : context.map.pages[page];
 	if (existing && existing.status === "active" && cardId !== "" && existing.card_id !== cardId) problems.push(`${page} is already mapped to card ${existing.card_id}`);
@@ -4544,30 +4672,31 @@ function recordCreated(context) {
 	};
 	if (pending) entry.setup_pending = true;
 	else delete entry.setup_pending;
-	return saved(context, "created", page, entry);
+	return savedWithBody(context, "created", page, entry, bodyFile);
 }
 /** `updated` and `relinked`: the body of the card changed. */
 function recordRewritten(context, event) {
-	const fields = new Fields(context.event);
+	const fields = new Fields(context.event, context.project);
 	const page = fields.page();
 	const cardUpdatedAt = fields.time("cardUpdatedAt", true);
 	const given = fields.hash();
+	const bodyFile = fields.bodyFile();
 	const problems = fields.problems;
 	const existing = page === "" ? null : mappedPage(context.map, page, problems);
 	refuseWhileWaiting(existing, page, problems);
 	const hash = problems.length === 0 ? given ?? currentHash(context, page, false, problems) : null;
 	if (problems.length > 0 || !existing || hash === null || cardUpdatedAt === void 0) return fail(problems);
-	return saved(context, event, page, {
+	return savedWithBody(context, event, page, {
 		...existing,
 		content_hash: hash,
 		last_synced_at: context.now.toISOString(),
 		card_updated_at: cardUpdatedAt,
 		status: "active"
-	});
+	}, bodyFile);
 }
 /** The membership and the properties of a new card are set. */
 function recordSetupDone(context) {
-	const fields = new Fields(context.event);
+	const fields = new Fields(context.event, context.project);
 	const page = fields.page();
 	const cardUpdatedAt = fields.time("cardUpdatedAt", true);
 	const problems = fields.problems;
@@ -4583,7 +4712,7 @@ function recordSetupDone(context) {
 	return saved(context, "setup-done", page, entry);
 }
 function recordPlaced(context) {
-	const fields = new Fields(context.event);
+	const fields = new Fields(context.event, context.project);
 	const page = fields.page();
 	const whiteboardId = fields.id("whiteboardId");
 	const problems = fields.problems;
@@ -4596,44 +4725,45 @@ function recordPlaced(context) {
 	});
 }
 function recordRetired(context) {
-	const fields = new Fields(context.event);
+	const fields = new Fields(context.event, context.project);
 	const page = fields.page();
 	const cardUpdatedAt = fields.time("cardUpdatedAt", true);
+	const bodyFile = fields.bodyFile();
 	const problems = fields.problems;
 	const existing = page === "" ? null : mappedPage(context.map, page, problems);
 	refuseWhileWaiting(existing, page, problems);
 	if (problems.length > 0 || !existing || cardUpdatedAt === void 0) return fail(problems);
-	return saved(context, "retired", page, {
+	return savedWithBody(context, "retired", page, {
 		...existing,
 		content_hash: contentHash(RETIRED_BODY),
 		last_synced_at: context.now.toISOString(),
 		card_updated_at: cardUpdatedAt,
 		status: "retired"
-	});
+	}, bodyFile);
 }
 function recordFeedback(context) {
-	const fields = new Fields(context.event);
+	const fields = new Fields(context.event, context.project);
 	const page = fields.page();
 	const cardId = fields.id("cardId");
 	const cardUpdatedAt = fields.time("cardUpdatedAt", true);
-	const content = fields.text("content");
 	const problems = fields.problems;
 	const existing = page === "" ? null : mappedPage(context.map, page, problems);
 	if (existing && cardId !== "" && existing.card_id !== cardId) problems.push(`card ${cardId} is not the card of ${page} (${existing.card_id})`);
-	if (problems.length > 0 || !existing || cardUpdatedAt === void 0) return fail(problems);
-	const stamp = context.now.toISOString().slice(0, 16).replace(/\D/g, "");
-	const relative = freeNotePath(context.project, `${FEEDBACK_DIRECTORY}/feedback-${cardId}-${stamp}`);
-	const title = `Feedback on ${readWikiPage(context.project, page)?.title ?? slugOfPath(page)}`;
-	const text = [
-		"---",
-		`title: ${JSON.stringify(title)}`,
-		`heptabase_card_id: ${cardId}`,
-		"source_kind: note",
-		"---",
-		"",
-		`${content.replace(/\s+$/, "")}\n`
-	].join("\n");
-	writeFileAtomic(resolveInProject(context.project, relative), text);
+	if (context.content.length === 0) problems.push("missing option: --content");
+	const cardText = readContentFiles(context.content, cardId === "" ? null : cardId, problems);
+	if (problems.length > 0 || !existing || cardUpdatedAt === void 0 || cardText === null) return fail(problems);
+	const card = cardToSnapshotBody(cardText);
+	const sentText = readSent(context.project, existing.card_id);
+	const sent = sentText === null ? null : cardToSnapshotBody(sentText);
+	let note = null;
+	let reason;
+	if (sent !== null && sameText(sent, card)) reason = "same as sent";
+	else if (sent === null && card.trim() === "") reason = "card is empty";
+	else {
+		const stamp = context.now.toISOString().slice(0, 16).replace(/\D/g, "");
+		note = freeNotePath(context.project, `${FEEDBACK_DIRECTORY}/feedback-${existing.card_id}-${stamp}`);
+		writeFileAtomic(resolveInProject(context.project, note), feedbackNote(context.project, page, existing.card_id, sent, card));
+	}
 	const handled = Math.max(Date.parse(cardUpdatedAt), Date.parse(existing.feedback_card_updated_at ?? ""));
 	const feedback_card_updated_at = Number.isNaN(handled) ? cardUpdatedAt : new Date(handled).toISOString();
 	context.map.pages[page] = {
@@ -4645,12 +4775,77 @@ function recordFeedback(context) {
 		ok: true,
 		event: "feedback",
 		page,
-		written: relative
+		note,
+		...reason === void 0 ? {} : { reason }
 	};
+}
+/** The sent text of a card, or null when the tool never saw a write to it. */
+function readSent(project, cardId) {
+	try {
+		return readFileSync(resolveInProject(project, sentFile(cardId)), "utf8");
+	} catch {
+		return null;
+	}
+}
+/** True when both texts are the same after every run of white space is one space. */
+function sameText(a, b) {
+	const flat = (text) => text.replace(/\s+/g, " ").trim();
+	return flat(a) === flat(b);
+}
+/**
+* The lines of `from` that `against` does not have, in the order of `from`. A line is compared without the white space
+* around it, and a line that `against` has once cancels one line of `from` only.
+*/
+function linesWithout(from, against) {
+	const counts = /* @__PURE__ */ new Map();
+	for (const line of against) counts.set(line.trim(), (counts.get(line.trim()) ?? 0) + 1);
+	return from.filter((line) => {
+		const count = counts.get(line.trim()) ?? 0;
+		if (count > 0) counts.set(line.trim(), count - 1);
+		return count === 0;
+	});
+}
+/** The lines of a text that are not blank, without trailing white space. */
+function contentLines(text) {
+	return text.split(/\r?\n/).map((line) => line.replace(/\s+$/, "")).filter((line) => line.trim() !== "");
+}
+/**
+* The note for the next ingest. With a sent text it holds the lines the user added to the card and removed from it. It
+* holds the whole card when there is no sent text, or when the lines are the same and only their order changed.
+*/
+function feedbackNote(project, page, cardId, sent, card) {
+	const sections = [];
+	if (sent !== null) {
+		const sentLines = contentLines(sent);
+		const cardLines = contentLines(card);
+		const added = linesWithout(cardLines, sentLines);
+		const removed = linesWithout(sentLines, cardLines);
+		if (added.length > 0) sections.push(["Added", added]);
+		if (removed.length > 0) sections.push(["Removed", removed]);
+	}
+	if (sections.length === 0) sections.push(["Card text", [card.replace(/\s+$/, "")]]);
+	const title = `Feedback on ${readWikiPage(project, page)?.title ?? slugOfPath(page)}`;
+	return [
+		"---",
+		"source_kind: note",
+		`title: ${JSON.stringify(title)}`,
+		`heptabase_card_id: ${cardId}`,
+		`wiki_page: ${JSON.stringify(page)}`,
+		"---",
+		"",
+		`User edits in Heptabase to the mirror card of ${page}.`,
+		...sections.flatMap(([heading, lines]) => [
+			"",
+			`## ${heading}`,
+			"",
+			lines.join("\n")
+		]),
+		""
+	].join("\n");
 }
 /** The answer to a question of `plan-up`. A root has to be one of the roots of heptabase.yaml. */
 function recordUpDecision(context) {
-	const fields = new Fields(context.event);
+	const fields = new Fields(context.event, context.project);
 	const cardId = fields.id("cardId");
 	const decision = context.event.decision;
 	const problems = fields.problems;
@@ -4857,7 +5052,7 @@ function snapshot(args) {
 	const url = parsed.values.url?.trim() === "" ? void 0 : parsed.values.url;
 	const updatedAt = readUpdatedAt(parsed.values["updated-at"], problems);
 	const now = parseNowOption(parsed.values.now, problems);
-	const text = readContent(parsed.lists.content, UUID_PATTERN.test(cardId) ? cardId : null, problems);
+	const text = readContentFiles(parsed.lists.content, UUID_PATTERN.test(cardId) ? cardId : null, problems);
 	const config = readHeptabaseConfig(project, problems);
 	let map = null;
 	try {
@@ -4945,46 +5140,6 @@ function readUpdatedAt(value, problems) {
 	if (value === void 0) return void 0;
 	if (/^\d{4}-\d{2}-\d{2}/.test(value) && !Number.isNaN(Date.parse(value))) return value;
 	problems.push(`--updated-at must be an ISO date and time, such as 2026-10-24T08:00:00Z: ${value}`);
-}
-/**
-* The text of the card. The files are the pages of one read_object result (joined in line order), or one
-* file of the card's own text. Null when a file cannot be read, is the result of a failed call or of another
-* card (`cardId` is null when the card id is not valid, and then the card is not compared), or the files are
-* not one of these.
-*/
-function readContent(paths, cardId, problems) {
-	if (paths.length === 0) return null;
-	const before = problems.length;
-	const texts = [];
-	for (const path of paths) {
-		let text;
-		try {
-			text = readFileSync(path, "utf8").replace(/^\uFEFF/, "");
-		} catch {
-			problems.push(`cannot read --content file: ${path}`);
-			continue;
-		}
-		const status = failedStatus(text);
-		const header = parseReadObjectHeader(text);
-		if (status !== null) problems.push(`--content file ${path} is the result of a call that did not succeed (status: ${status})`);
-		else if (header && cardId !== null && header.id.toLowerCase() !== cardId) problems.push(`--content file ${path} is the result for card ${header.id}, not card ${cardId}`);
-		texts.push(text);
-	}
-	if (problems.length > before) return null;
-	const pages = texts.filter(isReadObjectResult).length;
-	if (pages === texts.length) return joinReadObjectPages(texts);
-	if (pages === 0 && texts.length === 1) return texts[0];
-	problems.push("--content must be the pages of one read_object result, or one file with the text of the card");
-	return null;
-}
-/** The `status` of a JSON envelope when it is not `succeeded`; null for anything else. */
-function failedStatus(text) {
-	if (!text.trimStart().startsWith("{")) return null;
-	try {
-		const parsed = JSON.parse(text);
-		if (isRecord(parsed) && typeof parsed.status === "string" && parsed.status !== "succeeded") return parsed.status;
-	} catch {}
-	return null;
 }
 /**
 * A problem when the snapshot file is there and is not this card's: a file of the user, or of another card, must

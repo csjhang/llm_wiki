@@ -108,3 +108,11 @@ export function quietMirrorArgs(project: string): string[] {
   writeProjectFile(project, ".llm-wiki/hepta/quiet-mirror.txt", mirrorList(cards))
   return ["--mirror-cards", join(project, ".llm-wiki/hepta/quiet-mirror.txt")]
 }
+
+/** A saved read_object result: the header line and the numbered lines of `text`, in a JSON envelope. Returns its path. */
+export function cardFile(project: string, name: string, text: string, cardId = id(21), title = "Event Driven"): string {
+  const lines = text.split("\n")
+  const content = [`card "${title}" [${cardId}] ${lines.length} lines`, ...lines.map((line, index) => `${index + 1}\t${line}`)].join("\n")
+  writeProjectFile(project, `.llm-wiki/hepta/${name}`, JSON.stringify({ content, totalLines: lines.length, status: "succeeded" }))
+  return join(project, `.llm-wiki/hepta/${name}`)
+}

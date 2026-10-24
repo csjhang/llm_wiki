@@ -10,7 +10,7 @@ import { parseFrontmatter } from "@/lib/frontmatter"
 import { contentHash, loadCardMap, saveCardMap } from "./card-map"
 import { runCli } from "./cli"
 import type { CommandResult } from "./io"
-import { id, makeProject, pageText, quietMirrorArgs, removeProjects } from "./test-project"
+import { cardFile, id, makeProject, pageText, quietMirrorArgs, removeProjects, writeProjectFile } from "./test-project"
 
 afterEach(removeProjects)
 
@@ -20,10 +20,14 @@ const HASH_A = "a".repeat(64)
 const HASH_B = "b".repeat(64)
 const EDITED = "2026-10-24T09:00:00.000Z"
 
-async function record(project: string, event: unknown): Promise<{ exitCode: number; output: CommandResult }> {
+async function record(project: string, event: unknown, contentFiles: string[] = []): Promise<{ exitCode: number; output: CommandResult }> {
   const text = typeof event === "string" ? event : JSON.stringify(event)
-  return runCli(["hepta", "record", "--project", project, "--now", NOW, "--event", text])
+  const content = contentFiles.flatMap((file) => ["--content", file])
+  return runCli(["hepta", "record", "--project", project, "--now", NOW, "--event", text, ...content])
 }
+
+const outboxPath = (page: string): string => `.llm-wiki/hepta/outbox/${contentHash(page)}.md`
+const sentPath = (cardId: string): string => `.llm-wiki/hepta/sent/${cardId}.md`
 
 function mechanism(title = "Event Driven", body = "Body text."): string {
   return pageText({ type: "mechanism", title, sources: ["a.md"] }, body)
@@ -390,87 +394,309 @@ describe("hepta record", () => {
     })
   })
 
-  describe("feedback", () => {
-    it("writes a note snapshot", async () => {
-      const project = await createdProject()
-      const content = "# Event Driven\n\nA line the user added.\n\nSecond paragraph with: colons and --- dashes.\n"
-      const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content })
-      expect(result.exitCode).toBe(0)
-      const relative = `raw/sources/heptabase/feedback-${id(21)}-202610240815.md`
-      expect(result.output).toEqual({ ok: true, event: "feedback", page: PAGE, written: relative })
+  describe("the sent text", () => {
+    const read = (project: string, path: string): string => readFileSync(join(project, path), "utf8")
 
-      const parsed = parseFrontmatter(readFileSync(join(project, relative), "utf8"))
+    /** Runs plan-down and returns the action of the page: its body file is in the outbox now. */
+    async function plannedAction(project: string): Promise<{ op: string; bodyFile: string; contentHash: string; body: string }> {
+      const planned = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW, ...quietMirrorArgs(project)])
+      return (planned.output.actions as { op: string; page: string; bodyFile: string; contentHash: string; body: string }[]).find(
+        (action) => action.page === PAGE,
+      ) as { op: string; bodyFile: string; contentHash: string; body: string }
+    }
+
+    it("is the outbox file of the page, copied when the card is created", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      const action = await plannedAction(project)
+      expect(action.bodyFile).toBe(outboxPath(PAGE))
+      const result = await record(project, { type: "created", page: PAGE, cardId: id(21), cardUpdatedAt: NOW, contentHash: action.contentHash })
+      expect(result.exitCode).toBe(0)
+      expect(result.output.sent).toBe(sentPath(id(21)))
+      expect(read(project, sentPath(id(21)))).toBe(action.body)
+    })
+
+    it("is copied when the card waits for setup", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      const action = await plannedAction(project)
+      await record(project, { type: "created", page: PAGE, cardId: id(21), setup: false, contentHash: action.contentHash })
+      expect(read(project, sentPath(id(21)))).toBe(action.body)
+    })
+
+    it("is replaced by an updated, a relinked, and a retired event", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      const created = await plannedAction(project)
+      await record(project, { type: "created", page: PAGE, cardId: id(21), cardUpdatedAt: NOW, contentHash: created.contentHash })
+
+      writeProjectFile(project, PAGE, mechanism("Event Driven", "Second text."))
+      const update = await plannedAction(project)
+      expect(update.op).toBe("update")
+      const updated = await record(project, { type: "updated", page: PAGE, cardUpdatedAt: NOW, contentHash: update.contentHash })
+      expect(updated.output.sent).toBe(sentPath(id(21)))
+      expect(read(project, sentPath(id(21)))).toContain("Second text.")
+
+      writeProjectFile(project, PAGE, mechanism("Event Driven", "Third text."))
+      const third = await plannedAction(project)
+      await record(project, { type: "relinked", page: PAGE, cardUpdatedAt: NOW, contentHash: third.contentHash })
+      expect(read(project, sentPath(id(21)))).toContain("Third text.")
+
+      rmSync(join(project, PAGE))
+      const retire = await plannedAction(project)
+      expect(retire.op).toBe("retire")
+      await record(project, { type: "retired", page: PAGE, cardUpdatedAt: NOW })
+      expect(read(project, sentPath(id(21)))).toBe("# 🗄 已停用｜Card\n\n此頁已從 wiki 移除。")
+    })
+
+    it("can come from a body file that the event names", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      writeProjectFile(project, ".llm-wiki/hepta/other-body.md", "# Named\n\nText.")
+      const result = await record(project, {
+        type: "created",
+        page: PAGE,
+        cardId: id(21),
+        cardUpdatedAt: NOW,
+        contentHash: HASH_A,
+        bodyFile: ".llm-wiki/hepta/other-body.md",
+      })
+      expect(result.exitCode).toBe(0)
+      expect(read(project, sentPath(id(21)))).toBe("# Named\n\nText.")
+    })
+
+    it("is not written, and is no error, when the page has no body file", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      const result = await record(project, { type: "created", page: PAGE, cardId: id(21), cardUpdatedAt: NOW, contentHash: HASH_A })
+      expect(result.exitCode).toBe(0)
+      expect("sent" in result.output).toBe(false)
+      expect(existsSync(join(project, ".llm-wiki/hepta/sent"))).toBe(false)
+    })
+
+    it("refuses a body file that is missing or outside the project, and then changes nothing", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      writeProjectFile(project, ".llm-wiki/hepta/outbox/page.md", "# Page")
+      for (const bodyFile of [".llm-wiki/hepta/missing.md", "../outside.md", 7]) {
+        const result = await record(project, { type: "created", page: PAGE, cardId: id(21), cardUpdatedAt: NOW, contentHash: HASH_A, bodyFile })
+        expect(result.exitCode, String(bodyFile)).toBe(2)
+        expect(result.output.problems, String(bodyFile)).toEqual([expect.stringContaining("bodyFile")])
+      }
+      expect(existsSync(join(project, "heptabase-map.json"))).toBe(false)
+      expect(existsSync(join(project, ".llm-wiki/hepta/sent"))).toBe(false)
+    })
+
+    it("is not written for an event that is refused", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      const action = await plannedAction(project)
+      const result = await record(project, { type: "created", page: PAGE, cardId: "not-an-id", cardUpdatedAt: NOW, contentHash: action.contentHash })
+      expect(result.exitCode).toBe(2)
+      expect(existsSync(join(project, ".llm-wiki/hepta/sent"))).toBe(false)
+    })
+  })
+
+  describe("feedback", () => {
+    const SENT = "# Event Driven\n\nFirst line.\n\nSecond line.\n\n---\n來源：無\n由 wiki 產生，請勿直接編輯。"
+    const NOTE = `raw/sources/heptabase/feedback-${id(21)}-202610240815.md`
+
+    /** A project whose page is recorded as created, with the text that was sent. */
+    async function sentProject(sent: string | null = SENT): Promise<string> {
+      const project = await createdProject()
+      if (sent !== null) writeProjectFile(project, sentPath(id(21)), sent)
+      return project
+    }
+
+    const feedback = (project: string, text: string, event: Record<string, unknown> = {}) =>
+      record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, ...event }, [cardFile(project, "card.json", text)])
+
+    it("writes a note with the lines the user added and removed", async () => {
+      const project = await sentProject()
+      const result = await feedback(project, SENT.replace("Second line.", "A line the user wrote."))
+      expect(result.exitCode).toBe(0)
+      expect(result.output).toEqual({ ok: true, event: "feedback", page: PAGE, note: NOTE })
+
+      const parsed = parseFrontmatter(readFileSync(join(project, NOTE), "utf8"))
       expect(parsed.frontmatter).toEqual({
+        source_kind: "note",
         title: "Feedback on Event Driven",
         heptabase_card_id: id(21),
-        source_kind: "note",
+        wiki_page: PAGE,
       })
-      expect(parsed.body.trim()).toBe(content.trim())
+      expect(parsed.body).toBe(
+        `User edits in Heptabase to the mirror card of ${PAGE}.\n\n## Added\n\nA line the user wrote.\n\n## Removed\n\nSecond line.\n`,
+      )
+    })
+
+    it("has an Added section only when lines were added, and a Removed section only when lines were removed", async () => {
+      const project = await sentProject()
+      const added = await feedback(project, `${SENT}\n\nA new paragraph.`)
+      const addedBody = parseFrontmatter(readFileSync(join(project, added.output.note as string), "utf8")).body
+      expect(addedBody).toContain("## Added\n\nA new paragraph.\n")
+      expect(addedBody).not.toContain("## Removed")
+
+      const removed = await feedback(project, SENT.replace("\n\nSecond line.", ""))
+      const removedBody = parseFrontmatter(readFileSync(join(project, removed.output.note as string), "utf8")).body
+      expect(removedBody).toContain("## Removed\n\nSecond line.\n")
+      expect(removedBody).not.toContain("## Added")
+    })
+
+    it("counts a repeated line", async () => {
+      const project = await sentProject()
+      const result = await feedback(project, `${SENT}\n\nFirst line.`)
+      expect(parseFrontmatter(readFileSync(join(project, result.output.note as string), "utf8")).body).toContain("## Added\n\nFirst line.\n")
+    })
+
+    it("writes no note when the card is the sent text, but records the edit as handled", async () => {
+      const project = await sentProject()
+      const before = loadCardMap(project).pages[PAGE]
+      const result = await feedback(project, SENT)
+      expect(result.exitCode).toBe(0)
+      expect(result.output).toEqual({ ok: true, event: "feedback", page: PAGE, note: null, reason: "same as sent" })
+      expect(existsSync(join(project, "raw"))).toBe(false)
+      expect(loadCardMap(project).pages[PAGE]).toEqual({ ...before, feedback_card_updated_at: EDITED })
+    })
+
+    it("ignores white space and the form of card links when it compares", async () => {
+      const sent = `# Event Driven\n\nSee [Other](heptabase://card/${id(22)}) and more.\n\n- Item`
+      const project = await sentProject(sent)
+      const card = `# Event Driven\n\n\nSee [Other](https://app.heptabase.com/${id(40)}/card/${id(22)})  and   more.  \n\n-   Item\n`
+      expect((await feedback(project, card)).output.note).toBeNull()
+    })
+
+    it("uses the whole card text when there is no sent text, or no difference of lines to show", async () => {
+      const none = await sentProject(null)
+      const whole = await feedback(none, "# Event Driven\n\nText of the user.")
+      const wholeBody = parseFrontmatter(readFileSync(join(none, whole.output.note as string), "utf8")).body
+      expect(wholeBody).toBe(`User edits in Heptabase to the mirror card of ${PAGE}.\n\n## Card text\n\n# Event Driven\n\nText of the user.\n`)
+
+      // The same lines in another order: the text differs, but no line was added or removed.
+      const reordered = await sentProject("Alpha line.\n\nBeta line.")
+      const order = await feedback(reordered, "Beta line.\n\nAlpha line.")
+      const orderBody = parseFrontmatter(readFileSync(join(reordered, order.output.note as string), "utf8")).body
+      expect(orderBody).toContain("## Card text\n\nBeta line.\n\nAlpha line.\n")
+      expect(orderBody).not.toContain("## Added")
+    })
+
+    it("joins the pages of a result that has several pages", async () => {
+      const project = await sentProject()
+      const full = SENT.replace("Second line.", "Changed.").split("\n")
+      const content = (from: number, to: number): string =>
+        JSON.stringify({
+          content: [`card "Event Driven" [${id(21)}] ${full.length} lines`, ...full.slice(from, to).map((line, index) => `${from + index + 1}\t${line}`)].join("\n"),
+          status: "succeeded",
+        })
+      writeProjectFile(project, ".llm-wiki/hepta/p1.json", content(0, 4))
+      writeProjectFile(project, ".llm-wiki/hepta/p2.json", content(4, full.length))
+      const result = await record(
+        project,
+        { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED },
+        [join(project, ".llm-wiki/hepta/p1.json"), join(project, ".llm-wiki/hepta/p2.json")],
+      )
+      expect(result.exitCode).toBe(0)
+      expect(parseFrontmatter(readFileSync(join(project, result.output.note as string), "utf8")).body).toContain("## Added\n\nChanged.\n")
+    })
+
+    it("writes no note for an empty card without a sent text", async () => {
+      const project = await sentProject(null)
+      const result = await feedback(project, "")
+      expect(result.output).toEqual({ ok: true, event: "feedback", page: PAGE, note: null, reason: "card is empty" })
     })
 
     it("records the time of the edit it handled and nothing else", async () => {
-      const project = await createdProject()
+      const project = await sentProject()
       const before = loadCardMap(project).pages[PAGE]
-      await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content: "Edited." })
+      await feedback(project, `${SENT}\n\nMore.`)
       expect(loadCardMap(project).pages[PAGE]).toEqual({ ...before, feedback_card_updated_at: EDITED })
     })
 
     it("needs the time of the edit", async () => {
-      const project = await createdProject()
+      const project = await sentProject()
       for (const cardUpdatedAt of [undefined, "yesterday"]) {
-        const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt, content: "Edited." })
+        const result = await feedback(project, `${SENT}\n\nMore.`, { cardUpdatedAt })
         expect(result.exitCode).toBe(2)
         expect(result.output.problems).toEqual([expect.stringContaining("cardUpdatedAt")])
       }
       expect(existsSync(join(project, "raw"))).toBe(false)
     })
 
+    it("needs --content, and takes it for no other event", async () => {
+      const project = await sentProject()
+      const missing = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content: "Text in the event." })
+      expect(missing.exitCode).toBe(2)
+      expect(missing.output.problems).toEqual(["missing option: --content"])
+
+      const other = await record(project, { type: "placed", page: PAGE, whiteboardId: id(31) }, [cardFile(project, "card.json", "Text.")])
+      expect(other.exitCode).toBe(2)
+      expect(other.output.problems).toEqual(["--content is only for the feedback event"])
+    })
+
+    it("refuses a result that failed, a result of another card, and a file it cannot read", async () => {
+      const project = await sentProject()
+      const failed = join(project, "failed.json")
+      writeProjectFile(project, "failed.json", JSON.stringify({ content: "Card not found.", status: "failed" }))
+      const event = { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED }
+      expect((await record(project, event, [failed])).output.problems).toEqual([expect.stringContaining(failed)])
+
+      const other = cardFile(project, "other.json", "Text.", id(22))
+      expect((await record(project, event, [other])).output.problems).toEqual([expect.stringContaining(id(22))])
+
+      const missing = join(project, "missing.json")
+      expect((await record(project, event, [missing])).output.problems).toEqual([expect.stringContaining(missing)])
+      expect(existsSync(join(project, "raw"))).toBe(false)
+      expect(loadCardMap(project).pages[PAGE].feedback_card_updated_at).toBeUndefined()
+    })
+
     it("does not overwrite a note of the same minute", async () => {
-      const project = await createdProject()
+      const project = await sentProject()
       const written: string[] = []
-      for (const content of ["First.", "Second.", "Third."]) {
-        const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content })
-        written.push(result.output.written as string)
+      for (const line of ["First.", "Second.", "Third."]) {
+        const result = await feedback(project, `${SENT}\n\n${line}`)
+        written.push(result.output.note as string)
       }
       const stem = `raw/sources/heptabase/feedback-${id(21)}-202610240815`
       expect(written).toEqual([`${stem}.md`, `${stem}-2.md`, `${stem}-3.md`])
-      expect(written.map((path) => parseFrontmatter(readFileSync(join(project, path), "utf8")).body.trim())).toEqual([
-        "First.",
-        "Second.",
-        "Third.",
+      expect(written.map((path) => parseFrontmatter(readFileSync(join(project, path), "utf8")).body)).toEqual([
+        expect.stringContaining("## Added\n\nFirst.\n"),
+        expect.stringContaining("## Added\n\nSecond.\n"),
+        expect.stringContaining("## Added\n\nThird.\n"),
       ])
     })
 
     it("titles the note by the file name when the page is gone", async () => {
-      const project = await createdProject()
+      const project = await sentProject()
       rmSync(join(project, PAGE))
-      const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content: "Edited." })
-      const parsed = parseFrontmatter(readFileSync(join(project, result.output.written as string), "utf8"))
+      const result = await feedback(project, `${SENT}\n\nMore.`)
+      const parsed = parseFrontmatter(readFileSync(join(project, result.output.note as string), "utf8"))
       expect(parsed.frontmatter?.title).toBe("Feedback on event-driven")
     })
 
     it("keeps a title that needs quoting", async () => {
       const project = await createdProject({ [PAGE]: mechanism('Quote: "x" # y') })
-      const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content: "Edited." })
-      const parsed = parseFrontmatter(readFileSync(join(project, result.output.written as string), "utf8"))
+      const result = await feedback(project, "Text.")
+      const parsed = parseFrontmatter(readFileSync(join(project, result.output.note as string), "utf8"))
       expect(parsed.frontmatter?.title).toBe('Feedback on Quote: "x" # y')
     })
 
     it("needs the card of the page and a safe card id", async () => {
-      const project = await createdProject()
-      const wrongCard = await record(project, { type: "feedback", page: PAGE, cardId: id(22), cardUpdatedAt: EDITED, content: "Edited." })
+      const project = await sentProject()
+      const event = { type: "feedback", page: PAGE, cardId: id(22), cardUpdatedAt: EDITED }
+      const wrongCard = await record(project, event, [cardFile(project, "other.json", "Edited.", id(22))])
       expect(wrongCard.exitCode).toBe(2)
       expect(wrongCard.output.problems).toEqual([expect.stringContaining(id(21))])
 
-      const traversal = await record(project, { type: "feedback", page: PAGE, cardId: "../../escape", cardUpdatedAt: EDITED, content: "Edited." })
+      const traversal = await record(project, { ...event, cardId: "../../escape" }, [cardFile(project, "card.json", "Edited.")])
       expect(traversal.exitCode).toBe(2)
       expect(existsSync(join(project, "raw"))).toBe(false)
 
-      const unmapped = await record(project, { type: "feedback", page: "wiki/other.md", cardId: id(21), cardUpdatedAt: EDITED, content: "Edited." })
+      const unmapped = await feedback(project, "Edited.", { page: "wiki/other.md" })
       expect(unmapped.exitCode).toBe(2)
-      const empty = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED, content: "  \n" })
-      expect(empty.exitCode).toBe(2)
-      expect(empty.output.problems).toEqual([expect.stringContaining("content")])
+    })
+
+    it("works after a real create: the text the wiki wrote is not the user's change", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      const planned = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW])
+      const [action] = planned.output.actions as { body: string; contentHash: string }[]
+      await record(project, { type: "created", page: PAGE, cardId: id(21), cardUpdatedAt: NOW, contentHash: action.contentHash })
+      // Heptabase gives the card back as it was sent.
+      const same = await feedback(project, action.body)
+      expect(same.output.note).toBeNull()
+      const edited = await feedback(project, action.body.replace("Body text.", "Body text, and more."))
+      expect(parseFrontmatter(readFileSync(join(project, edited.output.note as string), "utf8")).body).toContain("## Added\n\nBody text, and more.\n")
     })
   })
 

@@ -27,7 +27,7 @@ import { parentIndex, whiteboardChain } from "./cmd-plan-up"
 import { cardToSnapshotBody } from "./convert"
 import { type CommandResult, isDirectory, resolveInProject, writeFileAtomic } from "./io"
 import { readHeptabaseConfig } from "./mirror-pages"
-import { isReadObjectResult, joinReadObjectPages, parseReadObjectHeader } from "./parse-mcp"
+import { readContentFiles } from "./read-content"
 
 const OPTION_SPEC = {
   values: ["project", "card-id", "title", "card-type", "whiteboards", "url", "updated-at", "now"],
@@ -68,7 +68,7 @@ export function snapshot(args: string[]): CommandResult {
   const url = parsed.values.url?.trim() === "" ? undefined : parsed.values.url
   const updatedAt = readUpdatedAt(parsed.values["updated-at"], problems)
   const now = parseNowOption(parsed.values.now, problems)
-  const text = readContent(parsed.lists.content, UUID_PATTERN.test(cardId) ? cardId : null, problems)
+  const text = readContentFiles(parsed.lists.content, UUID_PATTERN.test(cardId) ? cardId : null, problems)
   const config = readHeptabaseConfig(project, problems)
   let map: CardMap | null = null
   try {
@@ -142,53 +142,6 @@ function readUpdatedAt(value: string | undefined, problems: string[]): string | 
   if (/^\d{4}-\d{2}-\d{2}/.test(value) && !Number.isNaN(Date.parse(value))) return value
   problems.push(`--updated-at must be an ISO date and time, such as 2026-10-24T08:00:00Z: ${value}`)
   return undefined
-}
-
-/**
- * The text of the card. The files are the pages of one read_object result (joined in line order), or one
- * file of the card's own text. Null when a file cannot be read, is the result of a failed call or of another
- * card (`cardId` is null when the card id is not valid, and then the card is not compared), or the files are
- * not one of these.
- */
-function readContent(paths: readonly string[], cardId: string | null, problems: string[]): string | null {
-  if (paths.length === 0) return null
-  const before = problems.length
-  const texts: string[] = []
-  for (const path of paths) {
-    let text: string
-    try {
-      text = readFileSync(path, "utf8").replace(/^\uFEFF/, "")
-    } catch {
-      problems.push(`cannot read --content file: ${path}`)
-      continue
-    }
-    const status = failedStatus(text)
-    const header = parseReadObjectHeader(text)
-    if (status !== null) {
-      problems.push(`--content file ${path} is the result of a call that did not succeed (status: ${status})`)
-    } else if (header && cardId !== null && header.id.toLowerCase() !== cardId) {
-      problems.push(`--content file ${path} is the result for card ${header.id}, not card ${cardId}`)
-    }
-    texts.push(text)
-  }
-  if (problems.length > before) return null
-  const pages = texts.filter(isReadObjectResult).length
-  if (pages === texts.length) return joinReadObjectPages(texts)
-  if (pages === 0 && texts.length === 1) return texts[0]
-  problems.push("--content must be the pages of one read_object result, or one file with the text of the card")
-  return null
-}
-
-/** The `status` of a JSON envelope when it is not `succeeded`; null for anything else. */
-function failedStatus(text: string): string | null {
-  if (!text.trimStart().startsWith("{")) return null
-  try {
-    const parsed: unknown = JSON.parse(text)
-    if (isRecord(parsed) && typeof parsed.status === "string" && parsed.status !== "succeeded") return parsed.status
-  } catch {
-    // Not JSON: the text is the card's own text.
-  }
-  return null
 }
 
 /**

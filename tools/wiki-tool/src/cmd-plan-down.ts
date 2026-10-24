@@ -2,7 +2,10 @@
  * `wiki-tool hepta plan-down` - plan the changes from the wiki to Heptabase.
  *
  * Reads the wiki pages, the card map, heptabase.yaml, and wiki.yaml, and prints the
- * actions the wiki-sync skill must run. It changes no file and never calls Heptabase.
+ * actions the wiki-sync skill must run. It never calls Heptabase and never writes the card map or a wiki page.
+ * It writes the text each `create`, `update`, `relink`, and `retire` action sends to
+ * `.llm-wiki/hepta/outbox/<sha256 of the page path>.md` and names that file as `bodyFile`: the skill sends the
+ * text of the file, so the body is never typed again, and `hepta record` keeps the file as the text that was sent.
  * The skill runs each action, then tells `hepta record` what happened, so a run that
  * stops halfway is planned again from the map.
  *
@@ -37,7 +40,8 @@ import { isRecord } from "@/lib/wiki-config/yaml-util"
 import { parseArgs, parseNowOption } from "./args"
 import { type CardMap, contentHash, loadCardMap, type PageEntry } from "./card-map"
 import { readDatabase } from "./cmd-init"
-import { type CommandResult, isDirectory } from "./io"
+import { outboxFile } from "./hepta-files"
+import { type CommandResult, isDirectory, resolveInProject, writeFileAtomic } from "./io"
 import {
   cardHash,
   compareText,
@@ -75,25 +79,37 @@ export type DownAction =
       /** Empty for a page that is gone or not synced any more. */
       properties: PropertyEdit[]
     }
-  | { op: "create"; page: string; title: string; body: string; contentHash: string; properties: PropertyEdit[] }
+  | {
+      op: "create"
+      page: string
+      title: string
+      body: string
+      /** The project-relative file that holds the text to send. */
+      bodyFile: string
+      contentHash: string
+      properties: PropertyEdit[]
+    }
   | {
       op: "update"
       page: string
       cardId: string
       title: string
       body: string
+      bodyFile: string
       contentHash: string
       properties: PropertyEdit[]
       /** The `updatedAt` of the card in the list. Left out when the list has no times. */
       cardUpdatedAt?: string
     }
-  | { op: "relink"; page: string; cardId: string; body: string; contentHash: string; cardUpdatedAt?: string }
+  | { op: "relink"; page: string; cardId: string; body: string; bodyFile: string; contentHash: string; cardUpdatedAt?: string }
   | {
       op: "retire"
       page: string
       cardId: string
       title: string
+      /** The text after the title in the card. The file holds the title as a heading, an empty line, and this body. */
       body: string
+      bodyFile: string
       contentHash: string
       properties: PropertyEdit[]
       cardUpdatedAt?: string
@@ -173,7 +189,22 @@ export function planDown(args: string[]): CommandResult {
     wikiId: config.wiki.id,
     syncedOn: { start: `${now.toISOString().slice(0, 10)}T00:00:00.000Z` },
   })
+  writeOutbox(project, plan.actions)
   return { ok: true, pass: plan.pass, actions: plan.actions, problems: plan.problems }
+}
+
+/** The text a `create`, `update`, `relink`, or `retire` action sends to its card. A retire sends the title as a heading too. */
+function textToSend(action: DownAction): string | null {
+  if (action.op === "create" || action.op === "update" || action.op === "relink") return action.body
+  return action.op === "retire" ? `# ${action.title}\n\n${action.body}` : null
+}
+
+/** Writes the text of each action that sends one to its `bodyFile`, exactly as it is (no line feed is added). */
+function writeOutbox(project: string, actions: readonly DownAction[]): void {
+  for (const action of actions) {
+    const text = textToSend(action)
+    if (text !== null && "bodyFile" in action) writeFileAtomic(resolveInProject(project, action.bodyFile), text)
+  }
 }
 
 // --- inputs ------------------------------------------------------------
@@ -342,13 +373,14 @@ function planPage(input: PlanInput, renderer: MirrorRenderer, page: WikiPage, en
   if (entry.status !== "active" || hash !== entry.content_hash) {
     const linksOnly = entry.status === "active" && onlyLinksChanged(input, renderer, page, entry.content_hash, resolved)
     main = linksOnly
-      ? { op: "relink", page: page.path, cardId: entry.card_id, body, contentHash: hash }
+      ? { op: "relink", page: page.path, cardId: entry.card_id, body, bodyFile: outboxFile(page.path), contentHash: hash }
       : {
           op: "update",
           page: page.path,
           cardId: entry.card_id,
           title: page.title,
           body,
+          bodyFile: outboxFile(page.path),
           contentHash: hash,
           properties: pageProperties(page, input, input.syncedOn),
         }
@@ -382,6 +414,7 @@ function create(input: PlanInput, renderer: MirrorRenderer, page: WikiPage): Dow
     page: page.path,
     title: page.title,
     body,
+    bodyFile: outboxFile(page.path),
     contentHash: cardHash(body, pageProperties(page, input)),
     properties: pageProperties(page, input, input.syncedOn),
   }
@@ -395,6 +428,7 @@ function retire(input: PlanInput, path: string, entry: PageEntry, title: string)
     cardId: entry.card_id,
     title: `${RETIRED_TITLE_PREFIX}${base}`,
     body: RETIRED_BODY,
+    bodyFile: outboxFile(path),
     contentHash: contentHash(RETIRED_BODY),
     properties: editsOf(input.properties, [
       ["status", "select", "retired"],

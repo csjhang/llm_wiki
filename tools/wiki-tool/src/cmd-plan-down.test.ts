@@ -5,7 +5,7 @@
  * hepta group. Results of earlier steps (create, record) come from the commands themselves,
  * the way the wiki-sync skill uses them. Ids are placeholders and titles are generic.
  */
-import { chmodSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
@@ -13,7 +13,7 @@ import { type CardMap, contentHash, loadCardMap, saveCardMap } from "./card-map"
 import { runCli } from "./cli"
 import type { DownAction, PropertyEdit } from "./cmd-plan-down"
 import { cardHash } from "./mirror-pages"
-import { id, makeProject, mirrorList, pageText, PROPERTY_IDS, quietMirrorArgs, removeProjects, writeProjectFile } from "./test-project"
+import { cardFile, id, makeProject, mirrorList, pageText, PROPERTY_IDS, quietMirrorArgs, removeProjects, writeProjectFile } from "./test-project"
 
 const FIXTURES = fileURLToPath(new URL("../fixtures/", import.meta.url))
 const DATABASE = join(FIXTURES, "read_database.json")
@@ -45,8 +45,9 @@ async function plan(project: string, extra: string[] = []): Promise<{ exitCode: 
   return planWith(project, extra.includes("--mirror-cards") ? extra : [...extra, ...quietMirrorArgs(project)])
 }
 
-async function record(project: string, event: Record<string, unknown>, now = NOW): Promise<void> {
-  const result = await runCli(["hepta", "record", "--project", project, "--now", now, "--event", JSON.stringify(event)])
+async function record(project: string, event: Record<string, unknown>, now = NOW, contentFiles: string[] = []): Promise<void> {
+  const content = contentFiles.flatMap((file) => ["--content", file])
+  const result = await runCli(["hepta", "record", "--project", project, "--now", now, "--event", JSON.stringify(event), ...content])
   if (result.exitCode !== 0) throw new Error(`record failed: ${JSON.stringify(result.output)}`)
 }
 
@@ -125,6 +126,7 @@ describe("hepta plan-down", () => {
           page: MECHANISM_PATH,
           title: "Event Driven",
           body,
+          bodyFile: `.llm-wiki/hepta/outbox/${contentHash(MECHANISM_PATH)}.md`,
           // The hash covers the body and the properties, but not the sync date.
           contentHash: cardHash(body, properties.slice(0, 4)),
           properties,
@@ -199,6 +201,7 @@ describe("hepta plan-down", () => {
         cardId: id(21),
         title: "Event Driven",
         body,
+        bodyFile: `.llm-wiki/hepta/outbox/${contentHash(MECHANISM_PATH)}.md`,
         contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
         properties: expect.any(Array),
         // The time of the card in the list, for the check right before the write.
@@ -299,7 +302,8 @@ describe("hepta plan-down", () => {
 
     const first = await plan(project, ["--mirror-cards", list])
     expect(first.output.actions.map((action) => action.op)).toEqual(["skip-edited"])
-    await record(project, { type: "feedback", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: editedAt, content: "Edited." })
+    const card = cardFile(project, "card.json", "# Event Driven\n\nEdited.")
+    await record(project, { type: "feedback", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: editedAt }, NOW, [card])
 
     // The edit is handled: no second skip-edited for it.
     expect((await plan(project, ["--mirror-cards", list])).output.actions).toEqual([])
@@ -360,6 +364,7 @@ describe("hepta plan-down", () => {
         cardId: id(21),
         title: "🗄 已停用｜Card",
         body: "此頁已從 wiki 移除。",
+        bodyFile: `.llm-wiki/hepta/outbox/${contentHash(MECHANISM_PATH)}.md`,
         contentHash: contentHash("此頁已從 wiki 移除。"),
         properties: [
           { propertyId: PROPERTY_IDS.status, type: "select", value: "retired" },
@@ -512,7 +517,7 @@ describe("hepta plan-down", () => {
     expect(alpha.op === "relink" && alpha.body).toContain(`missing-page${UNSYNCED}`)
     expect(beta.op === "relink" && beta.body).toContain(`[Alpha](heptabase://card/${id(21)})`)
     // A relink carries the body and nothing else.
-    expect(Object.keys(alpha).sort()).toEqual(["body", "cardId", "cardUpdatedAt", "contentHash", "op", "page"])
+    expect(Object.keys(alpha).sort()).toEqual(["body", "bodyFile", "cardId", "cardUpdatedAt", "contentHash", "op", "page"])
 
     await recordUpdated(project, alpha)
     await recordUpdated(project, beta)
@@ -1124,6 +1129,84 @@ describe("hepta plan-down", () => {
     })
   })
 
+  describe("the outbox", () => {
+    const outboxPath = (page: string): string => `.llm-wiki/hepta/outbox/${contentHash(page)}.md`
+    const textOf = (project: string, page: string): string => readFileSync(join(project, outboxPath(page)), "utf8")
+
+    it("holds the body of a create action, named by the hash of the page path", async () => {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      const [action] = (await plan(project)).output.actions
+      expect(action.op === "create" && action.bodyFile).toBe(outboxPath(MECHANISM_PATH))
+      expect(outboxPath(MECHANISM_PATH)).toMatch(/^\.llm-wiki\/hepta\/outbox\/[0-9a-f]{64}\.md$/)
+      expect(textOf(project, MECHANISM_PATH)).toBe(action.op === "create" ? action.body : "")
+    })
+
+    it("holds the body of an update and of a relink", async () => {
+      const project = makeProject({
+        "wiki/mechanisms/alpha.md": mechanism("Alpha", "See [[beta]]."),
+        "wiki/mechanisms/beta.md": mechanism("Beta"),
+      })
+      const creates = (await plan(project)).output.actions
+      await recordCreated(project, creates[0], id(21))
+      await recordCreated(project, creates[1], id(22))
+
+      const relinks = (await plan(project)).output.actions
+      expect(relinks.map((action) => action.op)).toEqual(["relink"])
+      for (const action of relinks) {
+        if (action.op !== "relink") throw new Error("not a relink")
+        expect(action.bodyFile).toBe(outboxPath(action.page))
+        expect(textOf(project, action.page)).toBe(action.body)
+      }
+
+      writeProjectFile(project, "wiki/mechanisms/beta.md", mechanism("Beta", "Changed body."))
+      const [update] = (await plan(project)).output.actions
+      expect(update.op === "update" && update.bodyFile).toBe(outboxPath("wiki/mechanisms/beta.md"))
+      expect(textOf(project, "wiki/mechanisms/beta.md")).toContain("Changed body.")
+    })
+
+    it("holds the whole new text of a retire action: the title as a heading, an empty line, and the body", async () => {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      await recordCreated(project, (await plan(project)).output.actions[0], id(21))
+      rmSync(join(project, MECHANISM_PATH))
+      const [action] = (await plan(project)).output.actions
+      if (action.op !== "retire") throw new Error("not a retire action")
+      expect(action.bodyFile).toBe(outboxPath(MECHANISM_PATH))
+      expect(textOf(project, MECHANISM_PATH)).toBe(`# ${action.title}\n\n此頁已從 wiki 移除。`)
+    })
+
+    it("is written again by the next plan", async () => {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      await plan(project)
+      writeProjectFile(project, MECHANISM_PATH, mechanism("Event Driven", "Second text."))
+      await plan(project)
+      expect(textOf(project, MECHANISM_PATH)).toContain("Second text.")
+    })
+
+    it("is not written for actions without a body, or for a page that has no action", async () => {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      await record(project, { type: "created", page: MECHANISM_PATH, cardId: id(21), setup: false, contentHash: "a".repeat(64) })
+      const [setup] = (await plan(project)).output.actions
+      expect(setup.op).toBe("setup")
+      expect("bodyFile" in setup).toBe(false)
+      expect(existsSync(join(project, outboxPath(MECHANISM_PATH)))).toBe(false)
+
+      const blocked = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      writeProjectFile(blocked, "wiki.yaml", "version: 1\nid: other-wiki\nrole: reading\n")
+      expect((await plan(blocked, ["--database", DATABASE])).output.actions).toEqual([])
+      expect(existsSync(join(blocked, outboxPath(MECHANISM_PATH)))).toBe(false)
+    })
+
+    it("is not written for a retire that the mass-retire rule refused", async () => {
+      const project = makeProject({ "wiki/overview.md": "Overview.\n" })
+      const entries: Record<string, { card_id: string; content_hash: string }> = {}
+      for (let index = 0; index < 6; index += 1) entries[`wiki/mechanisms/p${index}.md`] = { card_id: id(21 + index), content_hash: "x" }
+      saveCardMap(project, mapOf(entries))
+      const result = await plan(project)
+      expect(result.output.actions).toEqual([])
+      expect(existsSync(join(project, ".llm-wiki/hepta/outbox"))).toBe(false)
+    })
+  })
+
   describe("a card that waits for setup", () => {
     /** A project whose page was created: the card exists, but `record created` said the setup is not done. */
     async function waitingProject(files: Record<string, string> = {}): Promise<{ project: string; created: DownAction }> {
@@ -1218,7 +1301,7 @@ describe("hepta plan-down", () => {
     })
   })
 
-  it("does not change files", async () => {
+  it("does not write the card map", async () => {
     const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
     await plan(project)
     expect(() => readFileSync(join(project, "heptabase-map.json"))).toThrow()
