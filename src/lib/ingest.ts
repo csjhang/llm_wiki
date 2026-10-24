@@ -2948,6 +2948,14 @@ async function tryReadFile(path: string): Promise<string> {
   }
 }
 
+/**
+ * `schema.md` or `purpose.md` of a project. A project keeps them in its root, where `autoIngest`
+ * reads them. A project that only has a copy in `wiki/` falls back to that copy.
+ */
+async function tryReadProjectDoc(pp: string, name: "schema.md" | "purpose.md"): Promise<string> {
+  return (await tryReadFile(`${pp}/${name}`)) || tryReadFile(`${pp}/wiki/${name}`)
+}
+
 async function tryReadSourceTextFile(path: string): Promise<string> {
   try {
     return await readFile(path, { extractImages: false })
@@ -3818,8 +3826,8 @@ export async function startIngest(
 
   const [sourceContent, schema, purpose, index] = await Promise.all([
     tryReadSourceTextFile(sp),
-    tryReadFile(`${pp}/wiki/schema.md`),
-    tryReadFile(`${pp}/wiki/purpose.md`),
+    tryReadProjectDoc(pp, "schema.md"),
+    tryReadProjectDoc(pp, "purpose.md"),
     tryReadFile(`${pp}/wiki/index.md`),
   ])
 
@@ -3906,7 +3914,7 @@ async function executeIngestWritesImpl(
     : null
 
   const [schema, index] = await Promise.all([
-    tryReadFile(`${pp}/wiki/schema.md`),
+    tryReadProjectDoc(pp, "schema.md"),
     tryReadFile(`${pp}/wiki/index.md`),
   ])
 
