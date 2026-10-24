@@ -109,6 +109,8 @@ describe("ingest prompts and the mechanism context", () => {
 
   beforeEach(async () => {
     mockStreamChat.mockClear()
+    // The hook warns about decision problems; keep test output clean.
+    vi.spyOn(console, "warn").mockImplementation(() => {})
     llm.analysis = DEFAULT_ANALYSIS
     llm.digest = DEFAULT_DIGEST
     tmp = await createTempProject("mechanism-prompts")
@@ -143,6 +145,7 @@ describe("ingest prompts and the mechanism context", () => {
   })
 
   afterEach(async () => {
+    vi.mocked(console.warn).mockRestore()
     await tmp?.cleanup()
     tmp = undefined
   })
@@ -352,6 +355,10 @@ describe("ingest prompts and the mechanism context", () => {
     expect(generation?.system).not.toContain("Not Kebab Case")
     expect(generation?.system).toContain(
       "Some analysis decision lines were invalid and were dropped. Write or update mechanism pages only for the lines listed here.",
+    )
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("[ingest:mechanism] decision problems"),
+      expect.anything(),
     )
   })
 
