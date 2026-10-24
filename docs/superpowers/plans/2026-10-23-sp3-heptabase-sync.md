@@ -22,8 +22,8 @@
 - Sync eligibility: `type` in `mechanism`, `hypothesis`, `comparison`, or `concept` with `sources` length ≥ 2.
 - Property values: `page type` = page `type`; `wiki` = `wiki.yaml` `id`; `status` = `active` or `retired`; `domain` = page `domain` (mechanism pages: omit; hypothesis pages: `to_domain`, ruling R19); `wiki page` = project-relative path; `last synced` = `{ "start": "<YYYY-MM-DD>T00:00:00.000Z" }`; hypotheses add `hypothesis status` (= `status` field) and `strength`.
 - Snapshot path: `raw/sources/heptabase/<card-id>.md`; frontmatter keys `title`, `heptabase_card_id`, `heptabase_whiteboards` (titles), `card_updated_at`, `url` (or omitted), `source_kind`, `domain` (only when a whiteboard hint maps to exactly one listed domain).
-- Verification: `npm run test:mocks`, `npm run typecheck`, and `npm run build:wiki-tool` (the bundle test fails when the committed bundle is stale).
-- Git coordination (sub-project 1 final review I7): `wiki-tool` owns one JS commit helper (`tools/wiki-tool/src/git.ts`) that applies the same rules as the app (fallback identity per missing field, `--no-verify`, `-c commit.gpgsign=false`, `.llm-wiki/` never committed, commit only listed paths) and takes `.llm-wiki/git.lock` (create-exclusive, holds pid and start time, stale after 10 minutes) around every git write. The app's `git-history.ts` and `undo.mjs` honor the same lock: wait up to 30 s, then report "another wiki tool is using git". Add this in Task 1 with tests. The helper also refuses to commit while a merge, rebase, cherry-pick, or revert is in progress (sub-project 1 re-review N3), names any temporary index after the project path hash (N5), and keeps `.gitignore` out of action commits unless the action changed it (N6).
+- Verification: `npm run test:mocks`, `npm run typecheck`, and `npm run build:wiki-tool` (the bundle test fails when the committed bundle is stale). Every task that changes `tools/wiki-tool/src/` rebuilds and commits the bundle in the same commit.
+- Git coordination (sub-project 1 final review I7): `wiki-tool` owns one JS commit helper (`tools/wiki-tool/src/git.ts`) that applies the same rules as the app (fallback identity per missing field, `--no-verify`, `-c commit.gpgsign=false`, `.llm-wiki/` never committed, commit only listed paths) and takes `.llm-wiki/git.lock` (create-exclusive, holds pid and start time, stale after 10 minutes) around every git write. The app's `git-history.ts` and `undo.mjs` honor the same lock: wait up to 30 s, then report "another wiki tool is using git". Task 8 adds this with tests (no `hepta` command commits, so it can come last). The helper also refuses to commit while a merge, rebase, cherry-pick, or revert is in progress (sub-project 1 re-review N3), names any temporary index after the project path hash (N5), and keeps `.gitignore` out of action commits unless the action changed it (N6).
 - Commit trailer: your session's Co-Authored-By line plus `Claude-Session: https://claude.ai/code/session_013yG6txX1fFsHyk4VQiasu7`.
 
 ## Review Focus
@@ -216,7 +216,7 @@
 **Interfaces:**
 - Consumes: every tool command above; Heptabase MCP tools `list_tags`, `read_database`, `list_whiteboards`, `list_cards`, `read_object`, `read_whiteboard`, `create_object`, `edit_object_content`, `update_database_card_membership`, `edit_card_properties`, `get_file_download_url`; llm_wiki MCP `llm_wiki_status`.
 
-SKILL.md (STE English) sections: Purpose; Before you start (check `heptabase.yaml`; if absent run the init flow; check the app with `llm_wiki_status` and say that ingest waits for the app); Up (Heptabase → wiki) steps; Down (wiki → Heptabase) steps; Rules (record after every MCP call that changed Heptabase; never edit a card that is not in the map; on `clientTaskFailed` retry once with `runOn: {type: "server"}`; on a missing select option stop that card and tell the user which option to add; ask the user about every `ask` action); Report (counts per action, plus problems). Every command line uses `node "<plugin dir>/scripts/wiki-tool.mjs" hepta ...`.
+SKILL.md (STE English) sections: Purpose; Before you start (check `heptabase.yaml`; if absent run the init flow; check the app with `llm_wiki_status` and say that ingest waits for the app); Up (Heptabase → wiki) steps; Down (wiki → Heptabase) steps; Rules (record after every MCP call that changed Heptabase; never edit a card that is not in the map; on `clientTaskFailed` retry once with `runOn: {type: "server"}`; on a missing select option stop that card and tell the user which option to add; ask the user about every `ask` action; for every `skip-edited` action read the card, run `record` with a `feedback` event, and list the card in the report; if the llm_wiki MCP has `llm_wiki_add_review` (sub-project 4), also add a `mirror-edited` review item); Report (counts per action, plus problems). Every command line uses `node "<plugin dir>/scripts/wiki-tool.mjs" hepta ...`.
 
 - [ ] **Step 1: Failing test** — contract test for referenced scripts.
 - [ ] **Step 2: Run** focused → FAIL
@@ -226,6 +226,31 @@ SKILL.md (STE English) sections: Purpose; Before you start (check `heptabase.yam
 
 ---
 
-## Live test protocol (run by the controller after Task 7, with the user's test setup)
+### Task 8: Shared git helper and lock
+
+**Files:**
+- Create: `tools/wiki-tool/src/git.ts`, `tools/wiki-tool/src/git-lock.ts`
+- Modify: `src-tauri/src/commands/git_history.rs` (take the lock around every git write command), `plugins/llm-wiki/skills/wiki-undo/scripts/undo.mjs` (take the lock around the revert and the commit)
+- Test: `tools/wiki-tool/src/git.test.ts`, `tools/wiki-tool/src/git-lock.test.ts`, Rust tests in `git_history.rs`, `src/lib/__tests__/wiki-undo.test.ts`
+
+**Interfaces:**
+- Produces:
+  ```ts
+  // git-lock.ts
+  export async function withGitLock<T>(projectPath: string, work: () => Promise<T> | T, opts?: { waitMs?: number; staleMs?: number }): Promise<T>
+  // git.ts
+  export function commitPaths(projectPath: string, paths: string[], message: string): { ok: true; sha: string | null } | { ok: false; problem: string }
+  ```
+  Lock file: `<project>/.llm-wiki/git.lock`, created with exclusive create (`wx`), content `{ "pid": <n>, "started_at": "<iso>", "tool": "<app|wiki-tool|wiki-undo>" }`. Wait up to 30 s (poll every 200 ms), then fail with "another wiki tool is using git". A lock older than 10 minutes is stale: remove it and take a new one. Always release in `finally`. Rust uses the same file, format, wait, and stale rules (`OpenOptions::create_new`). `commitPaths` follows the app rules from Global Constraints, refuses while `MERGE_HEAD`, `REBASE_HEAD`, `CHERRY_PICK_HEAD`, `REVERT_HEAD`, `rebase-merge/`, or `rebase-apply/` exists in the git dir, never commits `.llm-wiki/`, and leaves `.gitignore` out unless it is in `paths`. The Rust untracking commit (temporary index) also refuses during a merge or rebase, and names its temporary index after a hash of the project path.
+
+- [ ] **Step 1: Failing tests** — `second holder waits then fails with the busy message`; `stale lock is replaced`; `lock released after a throw`; `commitPaths refuses during a merge`; `commitPaths never commits .llm-wiki`; `commitPaths keeps .gitignore out unless listed`; `commitPaths uses fallback identity per missing field`; Rust: `commit waits for the lock`, `stale lock is replaced`, `untracking commit refuses during a merge`; undo: `undo waits for the lock`.
+- [ ] **Step 2: Run** focused → FAIL
+- [ ] **Step 3: Implement; rebuild the bundle**
+- [ ] **Step 4: Run** `npm run test:mocks && npm run typecheck && npm run build:wiki-tool && cargo test --manifest-path src-tauri/Cargo.toml --lib git_history` → PASS
+- [ ] **Step 5: Commit** `feat(git): share one git lock between the app, wiki-undo, and wiki-tool`
+
+---
+
+## Live test protocol (run by the controller after Task 8, with the user's test setup)
 
 Use only the test tag `#wiki-test` (mirror), `#ingest-test` (ingest), and the test whiteboard the user named. Steps: init against the test tags; add two or three chosen test-whiteboard cards to `#ingest-test`; run up-sync into a scratch wiki outside the repo; ingest with a mocked or real LLM as available; run down-sync; check the cards in `#wiki-test`; record every created card id so the user can delete them afterwards.
