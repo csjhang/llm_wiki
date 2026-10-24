@@ -7,7 +7,7 @@
  */
 import { execFileSync } from "node:child_process"
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 import yaml from "js-yaml"
 import { describe, expect, it } from "vitest"
@@ -37,6 +37,16 @@ function skillFolders(): string[] {
   return readdirSync(SKILLS_DIR)
     .filter((entry) => statSync(join(SKILLS_DIR, entry)).isDirectory())
     .sort()
+}
+
+/** The Markdown files in the `reference` folder of a skill, if it has one. */
+function referenceFiles(skillDir: string): string[] {
+  const dir = join(skillDir, "reference")
+  if (!existsSync(dir)) return []
+  return readdirSync(dir)
+    .filter((entry) => entry.endsWith(".md"))
+    .sort()
+    .map((entry) => join(dir, entry))
 }
 
 function readFrontmatter(skillFile: string): Record<string, unknown> {
@@ -95,9 +105,31 @@ describe("llm-wiki plugin contract", () => {
     expect(statSync(join(SKILLS_DIR, "wiki")).isDirectory()).toBe(true)
   })
 
+  it("every script that a SKILL.md names exists", () => {
+    // A path is `<plugin dir>/scripts/x.mjs`, `<base>/scripts/x.mjs`, `<base>/../../scripts/x.mjs`,
+    // or `scripts/x.mjs` (from the base directory of the skill).
+    const reference = /(?:(<plugin dir>|<base>)\/)?((?:\.\.\/)*)scripts\/([A-Za-z0-9._-]+\.mjs)/g
+    const named: string[] = []
+    const missing: string[] = []
+    for (const folder of skillFolders()) {
+      const skillDir = join(SKILLS_DIR, folder)
+      const text = readFileSync(join(skillDir, "SKILL.md"), "utf8")
+      for (const match of text.matchAll(reference)) {
+        const root = match[1] === "<plugin dir>" ? PLUGIN_DIR : skillDir
+        const script = resolve(root, match[2], "scripts", match[3])
+        named.push(`${folder}: ${match[0]}`)
+        if (!existsSync(script)) missing.push(`${folder}: ${match[0]} -> ${script}`)
+      }
+    }
+    // The guard fails when the pattern stops matching, so a rename cannot hide a missing script.
+    expect(named.some((entry) => entry.includes("wiki-tool.mjs"))).toBe(true)
+    expect(missing).toEqual([])
+  })
+
   it("skill files and the plugin README keep sentences short", () => {
     const files = [
       ...skillFolders().map((folder) => join(SKILLS_DIR, folder, "SKILL.md")),
+      ...skillFolders().flatMap((folder) => referenceFiles(join(SKILLS_DIR, folder))),
       join(PLUGIN_DIR, "README.md"),
     ]
     expect(files.length).toBeGreaterThan(1)
