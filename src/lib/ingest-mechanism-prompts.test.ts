@@ -573,6 +573,40 @@ describe("ingest prompts and the mechanism context", () => {
     expect(page).toMatch(/^domain: ai\/architecture$/m)
   })
 
+  it("queues the new-domain review once when a repair pass runs", async () => {
+    llm.analysis = "## Decisions\nNEW-DOMAIN: cognition/attention | ai | How attention works\n"
+    llm.generation = CONCEPT_WITHOUT_DOMAIN.replace("\n---END FILE---", "")
+    llm.repair = CONCEPT_WITHOUT_DOMAIN
+    const project = await mechanismProject()
+    // The store merges items with the same id; count what ingest hands to it instead.
+    const realAddItems = useReviewStore.getState().addItems
+    const addItems = vi.fn(realAddItems)
+    useReviewStore.setState({ addItems })
+    try {
+      await ingest(project)
+    } finally {
+      useReviewStore.setState({ addItems: realAddItems })
+    }
+
+    expect(mockStreamChat.mock.calls.some(([, messages]) =>
+      String(messages?.[0]?.content ?? "").startsWith("You are repairing truncated wiki FILE blocks"),
+    )).toBe(true)
+    const queued = addItems.mock.calls.flatMap(([items]) => items)
+    expect(queued.filter((item) => item.type === "new-domain")).toHaveLength(1)
+    expect(await fs.readFile(`${project}/wiki/concepts/attention.md`, "utf8")).toMatch(/^domain: cognition\/attention$/m)
+  })
+
+  it("sends a type: mechanism page of a work wiki to review wherever the model put it", async () => {
+    llm.analysis = "## Decisions\nDOMAIN: ai/architecture\n"
+    llm.generation = MECHANISM_PAGE.replace("wiki/mechanisms/backpressure.md", "wiki/concepts/backpressure.md")
+    const project = await mechanismProject(SOURCE_TEXT, WORK_YAML)
+    await ingest(project)
+
+    await expect(fs.access(`${project}/wiki/concepts/backpressure.md`)).rejects.toThrow()
+    await expect(fs.access(`${project}/wiki/mechanisms/backpressure.md`)).rejects.toThrow()
+    expect(reviewSummary()).toEqual([["new-mechanism", "Backpressure"]])
+  })
+
   it("writes the FILE blocks of a plain wiki unchanged", async () => {
     llm.generation = [CONCEPT_WITHOUT_DOMAIN, MECHANISM_PAGE, NEW_MECHANISM_REVIEW].join("\n\n")
     const project = await plainProject()

@@ -3,7 +3,7 @@ import type { DomainsConfig } from "@/lib/wiki-config/domains"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
 import { parseFileBlocks } from "@/lib/ingest"
 import type { LensDoc, MechanismContext } from "./context"
-import { enforceMechanismRules } from "./enforce"
+import { enforceMechanismRules, proposedDomainReview } from "./enforce"
 import { emptyDecisions } from "./types"
 import type { AnalysisDecisions } from "./types"
 
@@ -294,8 +294,49 @@ describe("enforceMechanismRules", () => {
 
     expect(result.text).toBe(`${concept}\n`)
     expect(parseFileBlocks(result.text).truncatedPaths).toEqual([])
-    expect(result.reviews).toEqual([])
     expect(result.notes).toContain("Dropped the unfinished block wiki/mechanisms/backpressure.md")
+    // The partial page stays visible as a review item.
+    expect(result.reviews).toEqual([
+      {
+        type: "new-mechanism",
+        title: "(incomplete) backpressure",
+        description: "---\ntype: mechanism\ntitle: Backpressure\n",
+        sourcePath: SOURCE_PATH,
+        affectedPages: ["wiki/mechanisms/backpressure.md"],
+        options: [
+          { label: "Write to reading wiki", action: "mech:propose-mechanism" },
+          { label: "Skip", action: "Skip" },
+        ],
+      },
+    ])
+  })
+
+  it("titles an incomplete proposal by the title of its frontmatter when the frontmatter is complete", () => {
+    const ctx = makeCtx({ identity: WORK })
+    const unfinished = "---FILE: wiki/mechanisms/backpressure.md---\n---\ntype: mechanism\ntitle: Backpressure\n---\n# Backpressure\n\nA slow con"
+    const result = enforce(unfinished, { ctx })
+
+    expect(result.text).toBe("")
+    expect(result.reviews.map((review) => review.title)).toEqual(["(incomplete) Backpressure"])
+    expect(result.reviews[0].description).toBe("---\ntype: mechanism\ntitle: Backpressure\n---\n# Backpressure\n\nA slow con")
+  })
+
+  it("drops an unfinished type: mechanism block outside wiki/mechanisms/ in a work wiki", () => {
+    const ctx = makeCtx({ identity: WORK })
+    const unfinished = "---FILE: wiki/concepts/backpressure.md---\n---\ntype: mechanism\ntitle: Backpressure\n"
+    const result = enforce(unfinished, { ctx })
+
+    expect(result.text).toBe("")
+    expect(result.reviews.map((review) => review.title)).toEqual(["(incomplete) backpressure"])
+    expect(result.reviews[0].affectedPages).toEqual(["wiki/concepts/backpressure.md"])
+  })
+
+  it("keeps an unfinished mechanism block in a reading wiki so it can be repaired", () => {
+    const unfinished = "---FILE: wiki/mechanisms/backpressure.md---\n---\ntype: mechanism\n"
+    const result = enforce(unfinished)
+
+    expect(result.text).toBe(unfinished)
+    expect(result.reviews).toEqual([])
   })
 
   it("keeps an unfinished concept block so it can be repaired", () => {
@@ -310,18 +351,21 @@ describe("enforceMechanismRules", () => {
       domain: null,
       proposedDomain: { path: "cognition/attention", lens: "ai", description: "How attention works" },
     })
-    const result = enforce(block("wiki/concepts/attention.md", page("concept")), { decisions })
+    const review = proposedDomainReview(decisions, SOURCE_PATH)
 
-    expect(result.reviews).toHaveLength(1)
-    const [review] = result.reviews
-    expect(review.type).toBe("new-domain")
-    expect(review.title).toBe("New domain: cognition/attention")
-    expect(review.sourcePath).toBe(SOURCE_PATH)
-    expect(review.description.split("\n")).toContain("PROPOSAL: cognition/attention | ai | How attention works")
-    expect(review.options).toEqual([
+    expect(review).not.toBeNull()
+    expect(review?.type).toBe("new-domain")
+    expect(review?.title).toBe("New domain: cognition/attention")
+    expect(review?.sourcePath).toBe(SOURCE_PATH)
+    expect(review?.description.split("\n")).toContain("PROPOSAL: cognition/attention | ai | How attention works")
+    expect(review?.options).toEqual([
       { label: "Approve", action: "mech:approve-domain" },
       { label: "Skip", action: "Skip" },
     ])
+  })
+
+  it("makes no new-domain review when no domain is proposed", () => {
+    expect(proposedDomainReview(decide(), SOURCE_PATH)).toBeNull()
   })
 
   it("writes a proposal description on one line", () => {
@@ -329,11 +373,78 @@ describe("enforceMechanismRules", () => {
       domain: null,
       proposedDomain: { path: "cognition/attention", lens: "ai", description: "How attention\nworks | and why" },
     })
-    const result = enforce("", { decisions })
 
-    expect(result.reviews[0].description.split("\n")).toContain(
+    expect(proposedDomainReview(decisions, SOURCE_PATH)?.description.split("\n")).toContain(
       "PROPOSAL: cognition/attention | ai | How attention works | and why",
     )
+  })
+
+  it("leaves the new-domain review to its caller, so a second pass does not repeat it", () => {
+    const decisions = decide({
+      domain: null,
+      proposedDomain: { path: "cognition/attention", lens: "ai", description: "How attention works" },
+    })
+    const result = enforce(block("wiki/concepts/attention.md", page("concept")), { decisions })
+
+    expect(contentsByPath(result.text)["wiki/concepts/attention.md"]).toContain("\ndomain: cognition/attention\n")
+    expect(result.reviews).toEqual([])
+    expect(result.notes.some((note) => note.includes("new-domain") || note.includes("proposed domain"))).toBe(false)
+  })
+
+  it("never adds domain to hypothesis pages", () => {
+    const hypothesis = page("hypothesis", ["mechanism: backpressure", "from_domain: hardware/async-circuits", "to_domain: ai/architecture"], "H")
+    const byPath = block("wiki/hypotheses/h.md", hypothesis)
+    const byType = block("wiki/synthesis/h2.md", hypothesis)
+    const unlisted = block("wiki/hypotheses/h3.md", page("hypothesis", ["domain: made/up"], "H3"))
+    const generation = [byPath, byType, unlisted].join("\n\n")
+    const result = enforce(generation)
+
+    expect(result.text).toBe(generation)
+    expect(result.notes).toEqual([])
+    // A page in wiki/hypotheses/ is a hypothesis whatever its type line says.
+    const untyped = block("wiki/Hypotheses/h4.md", page("concept", [], "H4"))
+    expect(enforce(untyped).text).toBe(untyped)
+  })
+
+  it("work wiki proposes a type: mechanism page written outside wiki/mechanisms/", () => {
+    // writeFileBlocks moves a page to the folder of its type after the rules ran.
+    const ctx = makeCtx({ identity: WORK })
+    const mechanism = page("mechanism", ["domain: ai/architecture"], "Backpressure")
+    const result = enforce(block("wiki/concepts/backpressure.md", mechanism), { ctx })
+
+    expect(result.text).toBe("")
+    expect(result.reviews).toEqual([
+      {
+        type: "new-mechanism",
+        title: "Backpressure",
+        description: mechanism,
+        sourcePath: SOURCE_PATH,
+        affectedPages: ["wiki/concepts/backpressure.md"],
+        options: [
+          { label: "Write to reading wiki", action: "mech:propose-mechanism" },
+          { label: "Skip", action: "Skip" },
+        ],
+      },
+    ])
+  })
+
+  it("reading wiki strips domain from a type: mechanism page outside wiki/mechanisms/", () => {
+    const mechanism = page("mechanism", ["domain: ai/architecture", "also: [hardware/async-circuits]"], "Backpressure")
+    const result = enforce(block("wiki/concepts/backpressure.md", mechanism))
+
+    expect(contentsByPath(result.text)["wiki/concepts/backpressure.md"]).toBe(
+      page("mechanism", ["lenses: [ai]", "instances: []"], "Backpressure"),
+    )
+    expect(result.reviews).toEqual([])
+  })
+
+  it("reads the type of a page whose frontmatter does not parse", () => {
+    const ctx = makeCtx({ identity: WORK })
+    const broken = ["---", "type: mechanism", "title: Backpressure: a trap", "---", "# Backpressure"].join("\n")
+    const result = enforce(block("wiki/concepts/backpressure.md", broken), { ctx })
+
+    expect(result.text).toBe("")
+    expect(result.reviews).toHaveLength(1)
   })
 
   it("leaves index, log, overview untouched", () => {

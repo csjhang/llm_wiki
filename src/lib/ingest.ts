@@ -46,7 +46,7 @@ import type { MultimodalConfig } from "@/stores/wiki-store"
 import { BASE_GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { loadMechanismContext } from "@/lib/mechanism-wiki/context"
 import { listMechanismSlugsStub, parseAnalysisDecisions } from "@/lib/mechanism-wiki/decisions"
-import { enforceMechanismRules } from "@/lib/mechanism-wiki/enforce"
+import { enforceMechanismRules, proposedDomainReview } from "@/lib/mechanism-wiki/enforce"
 import { appendPromptSection, prepareMechanismPrompts } from "@/lib/mechanism-wiki/prompts"
 import type { AnalysisDecisions } from "@/lib/mechanism-wiki/types"
 import { computeContextBudget } from "@/lib/context-budget"
@@ -1305,6 +1305,12 @@ async function autoIngestImpl(
     mechanismReviews.push(...enforced.reviews)
     for (const note of enforced.notes) console.log(`[ingest:mechanism] ${note}`)
     return enforced.text
+  }
+  // The proposal of a new domain is one review item per ingest, not one per pass over the text.
+  const domainReview = mechanismDecisions ? proposedDomainReview(mechanismDecisions, sp) : null
+  if (domainReview) {
+    mechanismReviews.push(domainReview)
+    console.log(`[ingest:mechanism] Sent "${domainReview.title}" to review`)
   }
   generation = enforceMechanism(generation)
   const writeResult = await writeFileBlocks(

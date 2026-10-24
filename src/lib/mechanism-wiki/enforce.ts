@@ -6,11 +6,17 @@
  * always follow it. `enforceMechanismRules` reads the FILE blocks of the
  * generation before they are written and fixes what it can:
  *
- * 1. A page in `wiki/mechanisms/` has no `domain` and no `also`, and has `lenses` and `instances`.
- * 2. Every other page under `wiki/` has a `domain`, except `index.md`, `log.md`, and `overview.md`.
- * 3. A wiki that cannot write mechanism pages gets no `wiki/mechanisms/` file. Each page becomes
- *    a `new-mechanism` review item, and so does each `new-mechanism` REVIEW block of the model.
- * 4. A domain that the analysis proposes becomes a `new-domain` review item.
+ * 1. A mechanism page has no `domain` and no `also`, and has `lenses` and `instances`.
+ * 2. Every other page under `wiki/` has a `domain`, except `index.md`, `log.md`, `overview.md`, and
+ *    hypothesis pages, which carry `from_domain` and `to_domain` instead.
+ * 3. A wiki that cannot write mechanism pages gets no mechanism page. Each page becomes a
+ *    `new-mechanism` review item, and so does each `new-mechanism` REVIEW block of the model.
+ * 4. A domain that the analysis proposes becomes a `new-domain` review item. That review comes
+ *    from `proposedDomainReview`, which the caller calls once per ingest, not once per pass.
+ *
+ * A mechanism page is a page under `wiki/mechanisms/` or a page with `type: mechanism`: the
+ * writer moves a typed page to the folder of its type after these rules ran. A hypothesis page is
+ * a page under `wiki/hypotheses/` or a page with `type: hypothesis`.
  *
  * Only the frontmatter keys that a rule names change. Every other byte of the
  * text stays: a block that needs no change is returned as it came, and so is
@@ -40,6 +46,9 @@ export interface EnforceResult {
 }
 
 const MECHANISM_DIR = "wiki/mechanisms/"
+const HYPOTHESIS_DIR = "wiki/hypotheses/"
+/** How many lines from the top `declaredType` reads when the frontmatter does not parse. */
+const TYPE_LINE_WINDOW = 30
 /** Pages that the app maintains or that hold no domain. Lower case. */
 const EXEMPT_PAGES = new Set(["wiki/index.md", "wiki/log.md", "wiki/overview.md"])
 
@@ -60,7 +69,6 @@ export function enforceMechanismRules(
   sourcePath: string,
 ): EnforceResult {
   const rules = new Rules(ctx, decisions, sourcePath)
-  rules.proposeDomain()
   const { blocks, truncatedPaths } = parseFileBlocks(generation)
   const lines = generation.split("\n")
   const out: string[] = []
@@ -82,13 +90,18 @@ export function enforceMechanismRules(
   }
 
   // A wiki that cannot write mechanism pages must not repair an unfinished mechanism block either.
+  // The partial page cannot be proposed whole, so it goes to review as it is.
   let tailEnd = lines.length
-  const unfinished = rules.canWrite ? [] : truncatedPaths.filter(isMechanismPath)
-  for (let i = cursor; i < lines.length && unfinished.length > 0; i++) {
+  for (let i = cursor; i < lines.length && !rules.canWrite && truncatedPaths.length > 0; i++) {
     const opener = OPENER_LINE.exec(withoutCarriageReturn(lines[i]))
-    if (opener === null || !unfinished.includes(opener[1].trim())) continue
-    rules.notes.push(`Dropped the unfinished block ${normalizePath(opener[1].trim())}`)
-    tailEnd = i
+    if (opener === null || !truncatedPaths.includes(opener[1].trim())) continue
+    const path = opener[1].trim()
+    const partial = lines.slice(i + 1).map(withoutCarriageReturn).join("\n")
+    if (isMechanismPage(path, partial)) {
+      rules.proposeMechanism({ path, content: partial }, "(incomplete) ")
+      rules.notes.push(`Dropped the unfinished block ${normalizePath(path)}`)
+      tailEnd = i
+    }
     break
   }
   out.push(...rules.takeReviewBlocks(lines.slice(cursor, tailEnd)))
@@ -108,7 +121,7 @@ class Rules {
 
   constructor(
     private readonly ctx: MechanismContext,
-    private readonly decisions: AnalysisDecisions,
+    decisions: AnalysisDecisions,
     private readonly sourcePath: string,
   ) {
     this.canWrite = canWriteMechanismPages(ctx)
@@ -116,35 +129,16 @@ class Rules {
     this.lenses = defaultLenses(ctx, decisions)
   }
 
-  /** Rule 4. */
-  proposeDomain(): void {
-    const proposal = this.decisions.proposedDomain
-    if (proposal === null) return
-    this.reviews.push({
-      type: "new-domain",
-      title: `New domain: ${proposal.path}`,
-      description: [
-        "The analysis proposes a domain that domains.yaml does not list. Approve it to add the domain.",
-        `PROPOSAL: ${proposal.path} | ${proposal.lens} | ${oneLine(proposal.description)}`,
-      ].join("\n"),
-      sourcePath: this.sourcePath,
-      options: [
-        { label: "Approve", action: "mech:approve-domain" },
-        { label: "Skip", action: "Skip" },
-      ],
-    })
-    this.notes.push(`Sent the proposed domain ${proposal.path} to review`)
-  }
-
   enforceBlock(block: ParsedFileBlock): BlockOutcome {
     const path = normalizePath(block.path)
     const lower = path.toLowerCase()
-    if (isMechanismPath(path)) {
+    if (isMechanismPage(path, block.content)) {
       if (this.canWrite) return this.fixMechanismPage(path, block.content)
       this.proposeMechanism(block)
       return { kind: "drop" }
     }
     if (!lower.startsWith("wiki/") || !lower.endsWith(".md") || EXEMPT_PAGES.has(lower)) return KEEP
+    if (lower.startsWith(HYPOTHESIS_DIR) || declaredType(block.content) === "hypothesis") return KEEP
     return this.fixDomain(path, block.content)
   }
 
@@ -204,12 +198,12 @@ class Rules {
     return edited.changed ? { kind: "edit", content: edited.content } : KEEP
   }
 
-  /** Rule 3, for a FILE block. */
-  private proposeMechanism(block: ParsedFileBlock): void {
+  /** Rule 3, for a FILE block. `titlePrefix` marks a page that the model did not finish. */
+  proposeMechanism(block: ParsedFileBlock, titlePrefix = ""): void {
     const title = parseFrontmatter(block.content).frontmatter?.title
     this.reviews.push({
       type: "new-mechanism",
-      title: typeof title === "string" && title.trim() !== "" ? title.trim() : fileStem(block.path),
+      title: titlePrefix + (typeof title === "string" && title.trim() !== "" ? title.trim() : fileStem(block.path)),
       description: block.content,
       sourcePath: this.sourcePath,
       affectedPages: [block.path],
@@ -261,6 +255,28 @@ class Rules {
   }
 }
 
+/**
+ * The `new-domain` review for the domain that the analysis proposes, or null when it proposes none.
+ * The caller adds it once per ingest, whatever the number of passes over the generated text.
+ */
+export function proposedDomainReview(decisions: AnalysisDecisions, sourcePath: string): NewReview | null {
+  const proposal = decisions.proposedDomain
+  if (proposal === null) return null
+  return {
+    type: "new-domain",
+    title: `New domain: ${proposal.path}`,
+    description: [
+      "The analysis proposes a domain that domains.yaml does not list. Approve it to add the domain.",
+      `PROPOSAL: ${proposal.path} | ${proposal.lens} | ${oneLine(proposal.description)}`,
+    ].join("\n"),
+    sourcePath,
+    options: [
+      { label: "Approve", action: "mech:approve-domain" },
+      { label: "Skip", action: "Skip" },
+    ],
+  }
+}
+
 /** Lens ids for a mechanism page that has no `lenses`: the lens of the decided domain, else of the proposed one. */
 function defaultLenses(ctx: MechanismContext, decisions: AnalysisDecisions): string[] {
   if (decisions.domain !== null) {
@@ -271,8 +287,26 @@ function defaultLenses(ctx: MechanismContext, decisions: AnalysisDecisions): str
   return proposal !== null && hasOwn(ctx.lenses, proposal.lens) ? [proposal.lens] : []
 }
 
-function isMechanismPath(path: string): boolean {
-  return normalizePath(path).toLowerCase().startsWith(MECHANISM_DIR)
+/** A page under `wiki/mechanisms/`, or one that says `type: mechanism`. */
+function isMechanismPage(path: string, content: string): boolean {
+  return normalizePath(path).toLowerCase().startsWith(MECHANISM_DIR) || declaredType(content) === "mechanism"
+}
+
+/**
+ * The `type` of the frontmatter, lower case, or null. When the frontmatter does not parse
+ * (broken YAML, or a page the model did not finish), the first `type:` line near the top counts.
+ */
+function declaredType(content: string): string | null {
+  const { frontmatter } = parseFrontmatter(content)
+  if (frontmatter !== null) {
+    const type = frontmatter.type
+    return typeof type === "string" ? type.trim().toLowerCase() : null
+  }
+  for (const line of content.split("\n", TYPE_LINE_WINDOW)) {
+    const match = /^type:[ \t]*["']?([\w-]+)/i.exec(line)
+    if (match !== null) return match[1].toLowerCase()
+  }
+  return null
 }
 
 function fileStem(path: string): string {
