@@ -73,7 +73,8 @@ export function wikiPageToCard(markdown: string, opts: WikiPageToCardOptions): s
     code.masked.replace(WIKILINK, (match, _embed: string, rawTarget: string, rawLabel: string | undefined) => {
       const [rawSlug, ...anchorParts] = rawTarget.split("#")
       const slug = rawSlug.trim()
-      const anchor = anchorParts.join("#").replace(/^\^/, "").trim()
+      // `^` marks a block id. It comes after the spaces: `[[# ^id]]` is the block `id`.
+      const anchor = anchorParts.join("#").trim().replace(/^\^/, "").trim()
       const label = rawLabel?.trim()
       // `[[#heading]]` points into the same page: it has no card, so it is plain text.
       if (slug === "") return anchor === "" && !label ? match : label || anchor

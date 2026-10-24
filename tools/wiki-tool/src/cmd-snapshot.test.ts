@@ -361,6 +361,30 @@ describe("hepta snapshot", () => {
       expect(loadCardMap(lost).sources[CARD].raw_path).toBe(rawPath())
     })
 
+    it("does not trust a recorded source whose path is another file", async () => {
+      const project = makeProject()
+      // The map says the card was saved elsewhere. The file at the target is not known to be this card's.
+      writeProjectFile(project, rawPath(), "A file of the user.\n")
+      const map = loadCardMap(project)
+      map.sources[CARD] = { raw_path: "raw/sources/heptabase/moved.md", card_updated_at: UPDATED, ingest_commit: null }
+      saveCardMap(project, map)
+      const result = await snapshot(project, { text: "New.\n" })
+      expect(result.exitCode).toBe(2)
+      expect(result.output.problems).toEqual([expect.stringContaining(rawPath())])
+      expect(read(project, rawPath())).toBe("A file of the user.\n")
+      expect(loadCardMap(project).sources[CARD].raw_path).toBe("raw/sources/heptabase/moved.md")
+    })
+
+    it("replaces a file that names the card even when the recorded path differs", async () => {
+      const project = makeProject()
+      writeProjectFile(project, rawPath(), `---\ntitle: "Old"\nheptabase_card_id: ${CARD}\n---\n\nOld text.\n`)
+      const map = loadCardMap(project)
+      map.sources[CARD] = { raw_path: "raw/sources/heptabase/moved.md", card_updated_at: UPDATED, ingest_commit: null }
+      saveCardMap(project, map)
+      expect((await snapshot(project, { text: "New.\n" })).exitCode).toBe(0)
+      expect(loadCardMap(project).sources[CARD].raw_path).toBe(rawPath())
+    })
+
     it("refuses a folder in the place of the file", async () => {
       const project = makeProject()
       writeProjectFile(project, `${rawPath()}/inner.txt`, "x")

@@ -50,8 +50,8 @@ export interface CardMap {
   /** `updated_at` is "" until a whiteboard list has been stored. */
   whiteboards_cache: { updated_at: string; items: WhiteboardNode[] }
   /**
-   * What the user answered when `plan-up` asked about a card: `skip`, or the id of the root whiteboard
-   * the card belongs to. Card id to answer. `hepta record` writes it. Absent until there is an answer.
+   * What the user answered when `plan-up` asked about a card: `skip` or `this-wiki`. Card id to answer. `hepta record`
+   * writes it. Absent until there is an answer. A root whiteboard id from an older version counts as `this-wiki`.
    */
   up_decisions?: Record<string, string>
 }

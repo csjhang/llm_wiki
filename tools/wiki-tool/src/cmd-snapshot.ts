@@ -4,8 +4,9 @@
  * The skill reads the card with `read_object`, saves the result to a file, and runs this command. The
  * command writes `raw/sources/heptabase/<card-id>.md`: frontmatter, then the card as plain Markdown. It
  * records the snapshot in the card map, so `plan-up` plans the card again only after the card changes.
- * Snapshotting a card again replaces the file; the app ingests the new text again. A file that is there
- * and is not a snapshot of this card is never replaced.
+ * Snapshotting a card again replaces the file; the app ingests the new text again. A file that is already
+ * there is replaced only when it is known to be this card's snapshot: the map names it as the source of the
+ * card, or its frontmatter names the card. Any other file stops the command.
  *
  * `--content` is the read_object result. A card that is longer than one page comes in several results:
  * give one `--content` for each, and the command joins them in line order. A file that is not a
@@ -145,12 +146,15 @@ function readUpdatedAt(value: string | undefined, problems: string[]): string | 
 }
 
 /**
- * A problem when the snapshot file is there and is not this card's: a file of the user, or of another card, must
- * not be replaced. It is this card's when the map has the source, or when its frontmatter names the card.
+ * A problem when the snapshot file is there and is not known to be this card's: a file of the user, or of another card,
+ * must not be replaced. It is this card's when the map records this very path as the source of the card, or when its
+ * frontmatter names the card. A source recorded at another path says nothing about this file.
  */
 function overwriteProblem(project: string, rawPath: string, cardId: string, map: CardMap): string | null {
   const path = resolveInProject(project, rawPath)
-  if (!existsSync(path) || Object.prototype.hasOwnProperty.call(map.sources, cardId)) return null
+  if (!existsSync(path)) return null
+  const recorded = Object.prototype.hasOwnProperty.call(map.sources, cardId) ? map.sources[cardId] : undefined
+  if (recorded?.raw_path === rawPath) return null
   try {
     if (parseFrontmatter(readFileSync(path, "utf8")).frontmatter?.heptabase_card_id === cardId) return null
   } catch {

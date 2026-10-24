@@ -8,6 +8,11 @@ version: 1
 roots:                        # Cards under these whiteboards belong to this wiki.
   - 00000000-0000-4000-8000-000000000001
 
+# Optional. Another wiki may use the same Heptabase space. List the root whiteboards of that wiki here.
+# A card that is only under these roots is not saved as a source of this wiki.
+# other_wiki_roots:
+#   - 00000000-0000-4000-8000-000000000016
+
 whiteboards:                  # The kind of each whiteboard. A whiteboard not listed here is a topic.
   00000000-0000-4000-8000-000000000002: { kind: topic }
   00000000-0000-4000-8000-000000000003: { kind: source, auto_ingest: false }   # auto_ingest is allowed only for kind source.

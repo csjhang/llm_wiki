@@ -19,7 +19,7 @@ import { parseArgs } from "./args"
 import { type CardMap, loadCardMap, saveCardMap } from "./card-map"
 import type { CommandResult } from "./io"
 import { isDirectory, resolveInProject, writeFileAtomic } from "./io"
-import { joinListWhiteboards, parsePagingTrailer, type WhiteboardNode } from "./parse-mcp"
+import { readWhiteboardList, storeWhiteboardList, type WhiteboardList } from "./whiteboard-tree"
 
 const HEPTABASE_YAML = "heptabase.yaml"
 
@@ -38,7 +38,7 @@ const PROPERTY_SPECS: readonly { key: PropertyKey; name: string; type: string }[
 const OPTION_SPEC = {
   values: ["project", "database", "ingest-tag", "mirror-tag"],
   // --whiteboards is given once per page of the list_whiteboards result.
-  lists: ["whiteboards", "root", "source-board", "archive-board"],
+  lists: ["whiteboards", "root", "other-root", "source-board", "archive-board"],
   flags: ["force"],
 } as const
 
@@ -52,6 +52,7 @@ export interface DatabaseSchema {
 
 interface ConfigDraft {
   roots: string[]
+  otherRoots: string[]
   sourceBoards: string[]
   archiveBoards: string[]
   tags: { ingest: string; mirror: string }
@@ -71,10 +72,12 @@ export function init(args: string[]): CommandResult {
   const databasePath = parsed.values.database
   const whiteboardsPaths = parsed.lists.whiteboards
   const roots = unique(parsed.lists.root)
+  const otherRoots = unique(parsed.lists["other-root"])
   const sourceBoards = unique(parsed.lists["source-board"])
   const archiveBoards = unique(parsed.lists["archive-board"])
   const tags = { ingest: parsed.values["ingest-tag"], mirror: parsed.values["mirror-tag"] }
   const warnings: string[] = []
+  if (tags.ingest === tags.mirror) problems.push("--ingest-tag and --mirror-tag must be two different tags")
 
   if (!isDirectory(project)) return { ok: false, problems: [`project folder not found: ${project}`] }
   const configPath = resolveInProject(project, HEPTABASE_YAML)
@@ -97,38 +100,37 @@ export function init(args: string[]): CommandResult {
 
   // The whiteboards the user named must be in the list. Only the last page can say the list goes on.
   const pages = whiteboardsPaths.map((path) => readText("--whiteboards", path, problems))
-  let tree: WhiteboardNode[] = []
+  let list: WhiteboardList | null = null
   if (pages.every((page): page is string => page !== null)) {
-    tree = joinListWhiteboards(pages)
-    const trailer = parsePagingTrailer(pages[pages.length - 1])
-    const partial = trailer ? `showing ${trailer.shown[0]}-${trailer.shown[1]} of ${trailer.total}` : null
-    if (tree.length === 0) {
+    list = readWhiteboardList(pages)
+    if (list.nodes.length === 0) {
       problems.push("--whiteboards file lists no whiteboards")
     } else {
-      const known = new Set(tree.map((node) => node.id))
+      const known = new Set(list.nodes.map((node) => node.id))
       const checkBoards = (option: string, ids: string[]): void => {
         for (const id of ids) {
           if (!known.has(id)) {
-            const note = partial ? ` (the list is partial: ${partial})` : ""
+            const note = list?.partial ? ` (the list is partial: ${list.partial})` : ""
             problems.push(`--${option} ${id} is not in the whiteboard list${note}`)
           }
         }
       }
       checkBoards("root", roots)
+      checkBoards("other-root", otherRoots)
       checkBoards("source-board", sourceBoards)
       checkBoards("archive-board", archiveBoards)
-      if (partial) {
-        warnings.push(`the whiteboard list is partial (${partial}), so the map cache holds only these whiteboards`)
-      }
     }
   }
   for (const id of sourceBoards.filter((candidate) => archiveBoards.includes(candidate))) {
     problems.push(`${id} is given as both --source-board and --archive-board`)
   }
-  if (problems.length > 0 || map === null) return { ok: false, problems }
+  for (const id of roots.filter((candidate) => otherRoots.includes(candidate))) {
+    problems.push(`${id} is given as both --root and --other-root`)
+  }
+  if (problems.length > 0 || map === null || list === null) return { ok: false, problems }
 
   // The parser has the last word on the generated text.
-  const text = renderHeptabaseYaml({ roots, sourceBoards, archiveBoards, tags, properties })
+  const text = renderHeptabaseYaml({ roots, otherRoots, sourceBoards, archiveBoards, tags, properties })
   const checked = parseHeptabaseYaml(text)
   if (!checked.ok) {
     const issues = checked.issues.map((issue) => {
@@ -139,14 +141,14 @@ export function init(args: string[]): CommandResult {
   }
 
   // The map goes first: if the second write fails, a rerun does not need --force.
-  map.whiteboards_cache = { updated_at: new Date().toISOString(), items: tree }
-  saveCardMap(project, map)
+  const mapChanged = storeWhiteboardList(map, list, new Date(), warnings)
+  if (mapChanged) saveCardMap(project, map)
   writeFileAtomic(configPath, text)
   return {
     ok: true,
-    written: ["heptabase-map.json", HEPTABASE_YAML],
+    written: [...(mapChanged ? ["heptabase-map.json"] : []), HEPTABASE_YAML],
     properties: checked.value.properties,
-    whiteboards_cached: tree.length,
+    whiteboards_cached: map.whiteboards_cache.items.length,
     warnings,
   }
 }
@@ -244,6 +246,7 @@ function renderHeptabaseYaml(draft: ConfigDraft): string {
     "roots:",
     ...draft.roots.map((id) => `  - ${scalar(id)}`),
   ]
+  if (draft.otherRoots.length > 0) lines.push("other_wiki_roots:", ...draft.otherRoots.map((id) => `  - ${scalar(id)}`))
   const boards = [
     ...draft.sourceBoards.map((id) => `  ${scalar(id)}: { kind: source, auto_ingest: false }`),
     ...draft.archiveBoards.map((id) => `  ${scalar(id)}: { kind: archive }`),

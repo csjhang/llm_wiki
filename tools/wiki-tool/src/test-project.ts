@@ -47,6 +47,10 @@ export interface ProjectOptions {
   noHeptabaseYaml?: boolean
   /** The `roots` of heptabase.yaml. The default is the one root `id(12)`. */
   roots?: string[]
+  /** The mirror tag of heptabase.yaml. The default is `id(4)`. */
+  mirrorTag?: string
+  /** The `other_wiki_roots` of heptabase.yaml. The default is none. */
+  otherRoots?: string[]
   /** The `whiteboards` of heptabase.yaml: whiteboard id to its inline settings, such as `{ kind: archive }`. */
   boards?: Record<string, string>
 }
@@ -60,14 +64,16 @@ export function makeProject(files: Record<string, string> = {}, options: Project
     const properties = Object.entries(PROPERTY_IDS).map(([key, value]) => `  ${key}: ${value}`)
     const roots = (options.roots ?? [id(12)]).map((root) => `  - ${root}`)
     const boards = Object.entries(options.boards ?? {}).map(([board, settings]) => `  ${board}: ${settings}`)
+    const otherRoots = options.otherRoots ?? []
     const lines = [
       "version: 1",
       "roots:",
       ...roots,
+      ...(otherRoots.length > 0 ? ["other_wiki_roots:", ...otherRoots.map((root) => `  - ${root}`)] : []),
       ...(boards.length > 0 ? ["whiteboards:", ...boards] : []),
       "tags:",
       `  ingest: ${id(5)}`,
-      `  mirror: ${id(4)}`,
+      `  mirror: ${options.mirrorTag ?? id(4)}`,
     ]
     writeProjectFile(project, "heptabase.yaml", [...lines, "properties:", ...properties, ""].join("\n"))
   }

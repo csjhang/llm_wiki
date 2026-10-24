@@ -434,8 +434,8 @@ describe("hepta plan-down", () => {
 
   it("omits domain for mechanism pages", async () => {
     const project = makeProject({
-      "wiki/mechanisms/a.md": mechanism("A", "Body.", { domain: "business/financial-analysis" }),
-      "wiki/concepts/b.md": pageText({ type: "concept", title: "B", sources: ["a.md", "b.md"], domain: "business/financial-analysis" }),
+      "wiki/mechanisms/a.md": mechanism("A", "Body.", { domain: "example/beta" }),
+      "wiki/concepts/b.md": pageText({ type: "concept", title: "B", sources: ["a.md", "b.md"], domain: "example/beta" }),
       "wiki/concepts/c.md": pageText({ type: "concept", title: "C", sources: ["a.md", "b.md"] }),
     })
     const actions = (await plan(project)).output.actions
@@ -445,7 +445,7 @@ describe("hepta plan-down", () => {
     }
     expect(domains("wiki/mechanisms/a.md")).toEqual([])
     expect(domains("wiki/concepts/b.md")).toEqual([
-      { propertyId: PROPERTY_IDS.domain, type: "select", value: "business/financial-analysis" },
+      { propertyId: PROPERTY_IDS.domain, type: "select", value: "example/beta" },
     ])
     // A page without a domain gets no domain property.
     expect(domains("wiki/concepts/c.md")).toEqual([])
@@ -457,15 +457,15 @@ describe("hepta plan-down", () => {
         type: "hypothesis",
         title: "Idea",
         sources: ["a.md"],
-        from_domain: "business/financial-analysis",
-        to_domain: "education/learning-science",
+        from_domain: "example/beta",
+        to_domain: "example/alpha",
         status: "testing",
         strength: "structural",
       }),
     })
     const [action] = (await plan(project)).output.actions
     expect(action.op === "create" && action.properties).toEqual([
-      { propertyId: PROPERTY_IDS.domain, type: "select", value: "education/learning-science" },
+      { propertyId: PROPERTY_IDS.domain, type: "select", value: "example/alpha" },
       { propertyId: PROPERTY_IDS.page_type, type: "select", value: "hypothesis" },
       { propertyId: PROPERTY_IDS.wiki, type: "select", value: "test" },
       { propertyId: PROPERTY_IDS.status, type: "select", value: "active" },
@@ -631,7 +631,7 @@ describe("hepta plan-down", () => {
       type: "hypothesis",
       title: "Idea",
       sources: ["a.md"],
-      to_domain: "education/learning-science",
+      to_domain: "example/alpha",
       status: "draft",
       heptabase_whiteboard: id(31),
     })
@@ -695,7 +695,7 @@ describe("hepta plan-down", () => {
         type: "concept",
         title: "Known",
         sources: ["a.md", "b.md"],
-        domain: "education/learning-science",
+        domain: "example/alpha",
       }),
       "wiki/concepts/new-domain.md": pageText({
         type: "concept",
@@ -750,7 +750,7 @@ describe("hepta plan-down", () => {
 
   it("checks the options of an update and of a retire", async () => {
     const project = makeProject({
-      "wiki/concepts/known.md": pageText({ type: "concept", title: "Known", sources: ["a.md", "b.md"], domain: "education/learning-science" }),
+      "wiki/concepts/known.md": pageText({ type: "concept", title: "Known", sources: ["a.md", "b.md"], domain: "example/alpha" }),
     })
     await recordCreated(project, (await plan(project)).output.actions[0], id(21))
     writeProjectFile(

@@ -177,6 +177,21 @@ describe("wikiPageToCard", () => {
     expect(calls).toEqual([])
   })
 
+  it("writes a same-page block reference as the block id, with or without a space after the #", () => {
+    const calls: string[] = []
+    const card = wikiPageToCard(
+      "See [[#^block-one]] and [[# ^block-two]] and [[ # ^ block-three ]] and [[#^block-four|this part]].\n",
+      options({
+        resolveLink: (slug) => {
+          calls.push(slug)
+          return null
+        },
+      }),
+    )
+    expect(card).toContain("See block-one and block-two and block-three and this part.")
+    expect(calls).toEqual([])
+  })
+
   it("passes the slug to resolveLink and titleForSlug", () => {
     const resolved: string[] = []
     const titled: string[] = []

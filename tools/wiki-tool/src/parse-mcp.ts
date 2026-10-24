@@ -30,6 +30,9 @@ const MIND_MAP_CARD = new RegExp(`^(?:\\d+\\t)?\\s*card "([^\\n]*?)" cardId: \\[
 /** A numbered line of read_object content: `<n>\t<text>`. */
 const NUMBERED_LINE = /^(\d+)\t([^\n]*)$/
 
+/** The count that ends a whiteboard line: `..., 3 whiteboards` (or `1 whiteboard`). */
+const WHITEBOARD_COUNT = /(\d+) whiteboards?\s*$/
+
 /** The line a paged list ends with. */
 const PAGING_TRAILER = /^More [^\n]*? are available\. Showing (\d+)-(\d+) of (\d+)\.[^\n]*?\boffset (\d+)\b/
 
@@ -38,12 +41,15 @@ export interface CardRef {
   title: string
   type: string
   whiteboards: { id: string; title: string }[]
+  /** The titles of the tags of the card. */
   tags: string[]
+  /** The ids of the tags of the card, in the same order. */
+  tagIds: string[]
   createdAt?: string
   updatedAt?: string
 }
 
-type CardDetails = Pick<CardRef, "whiteboards" | "tags" | "createdAt" | "updatedAt">
+type CardDetails = Pick<CardRef, "whiteboards" | "tags" | "tagIds" | "createdAt" | "updatedAt">
 
 export interface WhiteboardNode {
   id: string
@@ -164,9 +170,11 @@ function parseCardDetails(rest: string): CardDetails {
   const whiteboardsPart = (tagsLabel ? body.slice(0, tagsLabel.index) : body).replace(/^whiteboards: /, "")
   const tagsPart = tagsLabel ? body.slice(tagsLabel.index + tagsLabel[0].length) : ""
 
+  const tags = parseListedItems(tagsPart)
   const details: CardDetails = {
     whiteboards: parseListedItems(whiteboardsPart),
-    tags: parseListedItems(tagsPart).map((tag) => tag.title),
+    tags: tags.map((tag) => tag.title),
+    tagIds: tags.map((tag) => tag.id),
   }
   if (createdAt !== undefined) details.createdAt = createdAt
   if (updatedAt !== undefined) details.updatedAt = updatedAt
@@ -201,6 +209,37 @@ export function parseListWhiteboards(text: string): WhiteboardNode[] {
     ancestors.push(node)
   }
   return nodes
+}
+
+export interface CutOffWhiteboard {
+  id: string
+  title: string
+  /** The number of whiteboards below it that the line says it has. */
+  reported: number
+  /** The number of whiteboards listed below it. */
+  listed: number
+}
+
+/**
+ * The whiteboards of a list_whiteboards result that say they hold more whiteboards than the list shows below them: the
+ * tree is cut off there (the depth of the call was too small, or the list is partial). A whiteboard line ends with the
+ * number of whiteboards below it, and the whiteboards listed below it are the lines after it with a deeper indent.
+ */
+export function findCutOffWhiteboards(pages: string[]): CutOffWhiteboard[] {
+  const found: CutOffWhiteboard[] = []
+  for (const page of pages) {
+    const items = linesOf(page)
+      .map(parseObjectLine)
+      .filter((item): item is ObjectLine => item !== null && item.keyword === "whiteboard")
+    items.forEach((item, index) => {
+      const reported = Number(WHITEBOARD_COUNT.exec(item.rest)?.[1])
+      if (!Number.isFinite(reported)) return
+      let listed = 0
+      while (index + 1 + listed < items.length && items[index + 1 + listed].indent > item.indent) listed += 1
+      if (listed < reported) found.push({ id: item.id, title: item.title, reported, listed })
+    })
+  }
+  return found
 }
 
 /**

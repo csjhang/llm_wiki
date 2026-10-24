@@ -27,12 +27,12 @@ const EXAMPLE = readFileSync(
 
 /** A minimal valid file; each test overrides one part. */
 function build(
-  parts: { roots?: string; whiteboards?: string; tags?: string; properties?: string } = {},
+  parts: { roots?: string; other?: string; whiteboards?: string; tags?: string; properties?: string } = {},
 ): string {
   return `version: 1
 roots:
 ${parts.roots ?? `  - ${id(1)}`}
-whiteboards:
+${parts.other ?? ""}whiteboards:
 ${parts.whiteboards ?? `  ${id(2)}: { kind: topic }`}
 tags:
 ${parts.tags ?? `  ingest: ${id(6)}\n  mirror: ${id(7)}`}
@@ -48,8 +48,10 @@ describe("parseHeptabaseYaml", () => {
   it("parses the template example", () => {
     const config = valueOf(parseHeptabaseYaml(EXAMPLE))
     expect(config.version).toBe(1)
-    expect(Object.keys(config).sort()).toEqual(["properties", "roots", "tags", "version", "whiteboards"])
+    expect(Object.keys(config).sort()).toEqual(["other_wiki_roots", "properties", "roots", "tags", "version", "whiteboards"])
     expect(config.roots).toEqual([id(1)])
+    // The example only shows other_wiki_roots in a comment.
+    expect(config.other_wiki_roots).toEqual([])
     expect(config.whiteboards).toEqual({
       [id(2)]: { kind: "topic", auto_ingest: false },
       [id(3)]: { kind: "source", auto_ingest: false },
@@ -136,6 +138,48 @@ describe("parseHeptabaseYaml", () => {
   it("requires roots to be a list", () => {
     const text = build().replace(`roots:\n  - ${id(1)}`, `roots: ${id(1)}`)
     expect(pathsOf(parseHeptabaseYaml(text))).toEqual(["roots"])
+  })
+
+  describe("other_wiki_roots", () => {
+    it("is an empty list when it is not given, when it is empty, or when it has no value", () => {
+      expect(valueOf(parseHeptabaseYaml(build())).other_wiki_roots).toEqual([])
+      expect(valueOf(parseHeptabaseYaml(build({ other: "other_wiki_roots: []\n" }))).other_wiki_roots).toEqual([])
+      expect(valueOf(parseHeptabaseYaml(build({ other: "other_wiki_roots:\n" }))).other_wiki_roots).toEqual([])
+    })
+
+    it("lists the roots of other wikis in the same Heptabase space", () => {
+      const other = `other_wiki_roots:\n  - ${id(20)}\n  - ${id(21)}\n`
+      const config = valueOf(parseHeptabaseYaml(build({ other })))
+      expect(config.other_wiki_roots).toEqual([id(20), id(21)])
+      expect(config.roots).toEqual([id(1)])
+    })
+
+    it("can be turned on in the template example", () => {
+      const text = EXAMPLE.replace(/^# other_wiki_roots:/m, "other_wiki_roots:").replace(/^# {3}- (\S+)/m, "  - $1")
+      expect(text).not.toBe(EXAMPLE)
+      expect(valueOf(parseHeptabaseYaml(text)).other_wiki_roots).toHaveLength(1)
+    })
+
+    it("must be a list of UUIDs", () => {
+      expect(pathsOf(parseHeptabaseYaml(build({ other: `other_wiki_roots: ${id(20)}\n` })))).toEqual(["other_wiki_roots"])
+      expect(pathsOf(parseHeptabaseYaml(build({ other: `other_wiki_roots:\n  - ${id(20)}\n  - board-two\n` })))).toEqual([
+        "other_wiki_roots[1]",
+      ])
+    })
+
+    it("must not hold a root of this wiki", () => {
+      const result = parseHeptabaseYaml(build({ other: `other_wiki_roots:\n  - ${id(20)}\n  - ${id(1)}\n` }))
+      expect(pathsOf(result)).toEqual(["other_wiki_roots[1]"])
+      if (result.ok) throw new Error("expected issues")
+      expect(result.issues[0].message).toContain("roots")
+    })
+  })
+
+  it("rejects the same tag for ingest and mirror", () => {
+    const result = parseHeptabaseYaml(build({ tags: `  ingest: ${id(6)}\n  mirror: ${id(6)}` }))
+    expect(pathsOf(result)).toEqual(["tags.mirror"])
+    if (result.ok) throw new Error("expected issues")
+    expect(result.issues[0].message).toContain("tags.ingest")
   })
 
   it("requires UUIDs", () => {

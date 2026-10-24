@@ -65,6 +65,7 @@ interface InitOptions {
   ingestTag?: string
   mirrorTag?: string
   roots?: string[]
+  otherRoots?: string[]
   sourceBoards?: string[]
   archiveBoards?: string[]
   extra?: string[]
@@ -86,6 +87,7 @@ function initArgs(project: string, options: InitOptions = {}): string[] {
   ]
   for (const path of [options.whiteboards ?? WHITEBOARDS].flat()) args.push("--whiteboards", path)
   for (const root of options.roots ?? [ROOT_A, ROOT_B]) args.push("--root", root)
+  for (const root of options.otherRoots ?? []) args.push("--other-root", root)
   for (const board of options.sourceBoards ?? [SOURCE_BOARD]) args.push("--source-board", board)
   for (const board of options.archiveBoards ?? [ARCHIVE_BOARD]) args.push("--archive-board", board)
   return [...args, ...(options.extra ?? [])]
@@ -128,6 +130,7 @@ describe("hepta init", () => {
     expect(parsed.value).toEqual({
       version: 1,
       roots: [ROOT_A, ROOT_B],
+      other_wiki_roots: [],
       whiteboards: {
         [SOURCE_BOARD]: { kind: "source", auto_ingest: false },
         [ARCHIVE_BOARD]: { kind: "archive", auto_ingest: false },
@@ -141,7 +144,7 @@ describe("hepta init", () => {
   it("stores the whiteboard tree in the card map", async () => {
     const project = makeDir()
     const before = Date.now()
-    const result = await runCli(initArgs(project))
+    const result = await runCli(initArgs(project, { whiteboards: writeWhiteboardsWithoutTrailer(makeDir()) }))
     expect(result.exitCode).toBe(0)
 
     const tree = parseListWhiteboards(readFileSync(WHITEBOARDS, "utf8"))
@@ -315,6 +318,54 @@ describe("hepta init", () => {
     ])
   })
 
+  describe("other wikis", () => {
+    it("writes the roots of other wikis with --other-root", async () => {
+      const project = makeDir()
+      const whiteboards = writeWhiteboardsWithoutTrailer(makeDir())
+      const result = await runCli(initArgs(project, { whiteboards, roots: [ROOT_A], otherRoots: [ROOT_B, id(11)] }))
+      expect(result.exitCode).toBe(0)
+      const text = readFileSync(join(project, "heptabase.yaml"), "utf8")
+      expect(text).toContain(`other_wiki_roots:\n  - ${ROOT_B}\n  - ${id(11)}\n`)
+      const parsed = parseHeptabaseYaml(text)
+      expect(parsed.ok && parsed.value.other_wiki_roots).toEqual([ROOT_B, id(11)])
+    })
+
+    it("writes no other_wiki_roots without --other-root", async () => {
+      const project = makeDir()
+      await runCli(initArgs(project, { roots: [ROOT_A] }))
+      const text = readFileSync(join(project, "heptabase.yaml"), "utf8")
+      expect(text).not.toContain("other_wiki_roots")
+      const parsed = parseHeptabaseYaml(text)
+      expect(parsed.ok && parsed.value.other_wiki_roots).toEqual([])
+    })
+
+    it("rejects an unknown other root", async () => {
+      const project = makeDir()
+      const whiteboards = writeWhiteboardsWithoutTrailer(makeDir())
+      const result = await runCli(initArgs(project, { whiteboards, otherRoots: [id(99)], roots: [ROOT_A] }))
+      expect(result.exitCode).toBe(2)
+      expect(problemsOf(result.output)).toEqual([`--other-root ${id(99)} is not in the whiteboard list`])
+    })
+
+    it("rejects a whiteboard that is both a root and another wiki's root", async () => {
+      const project = makeDir()
+      const whiteboards = writeWhiteboardsWithoutTrailer(makeDir())
+      const result = await runCli(initArgs(project, { whiteboards, roots: [ROOT_A, ROOT_B], otherRoots: [ROOT_B] }))
+      expect(result.exitCode).toBe(2)
+      expect(problemsOf(result.output)).toEqual([`${ROOT_B} is given as both --root and --other-root`])
+      expect(existsSync(join(project, "heptabase.yaml"))).toBe(false)
+    })
+  })
+
+  it("rejects the same tag for ingest and mirror", async () => {
+    const project = makeDir()
+    const result = await runCli(initArgs(project, { ingestTag: MIRROR_TAG }))
+    expect(result.exitCode).toBe(2)
+    expect(problemsOf(result.output)).toEqual(["--ingest-tag and --mirror-tag must be two different tags"])
+    expect(existsSync(join(project, "heptabase.yaml"))).toBe(false)
+    expect(existsSync(join(project, "heptabase-map.json"))).toBe(false)
+  })
+
   it("rejects a board that is both a source and an archive", async () => {
     const project = makeDir()
     const result = await runCli(initArgs(project, { sourceBoards: [SOURCE_BOARD], archiveBoards: [SOURCE_BOARD] }))
@@ -331,13 +382,67 @@ describe("hepta init", () => {
     ])
   })
 
-  it("warns when the whiteboard list has more pages", async () => {
+  it("warns when the whiteboard list has more pages, and does not store it", async () => {
     const project = makeDir()
     const result = await runCli(initArgs(project))
     expect(result.exitCode).toBe(0)
     expect(result.output.warnings).toEqual([
-      "the whiteboard list is partial (showing 1-3 of 8), so the map cache holds only these whiteboards",
+      "the whiteboard list is partial (showing 1-3 of 8), so the stored tree (0 whiteboards) was not changed",
     ])
+    // heptabase.yaml is written. The map is not: a partial list would drop the whiteboards it lacks.
+    expect(result.output.written).toEqual(["heptabase.yaml"])
+    expect(result.output.whiteboards_cached).toBe(0)
+    expect(existsSync(join(project, "heptabase-map.json"))).toBe(false)
+  })
+
+  it("keeps the stored tree when the list is partial", async () => {
+    const project = makeDir()
+    await runCli(initArgs(project, { whiteboards: writeWhiteboardsWithoutTrailer(makeDir()) }))
+    const stored = loadCardMap(project).whiteboards_cache
+    expect(stored.items).toHaveLength(9)
+
+    const result = await runCli(initArgs(project, { extra: ["--force"] }))
+    expect(result.exitCode).toBe(0)
+    expect(result.output.warnings).toEqual([
+      "the whiteboard list is partial (showing 1-3 of 8), so the stored tree (9 whiteboards) was not changed",
+    ])
+    expect(result.output.whiteboards_cached).toBe(9)
+    expect(loadCardMap(project).whiteboards_cache).toEqual(stored)
+  })
+
+  it("replaces the stored tree when the list is complete", async () => {
+    const project = makeDir()
+    const map = loadCardMap(project)
+    map.whiteboards_cache = { updated_at: "2026-01-01T00:00:00.000Z", items: [{ id: id(99), title: "Old", parentId: null }] }
+    saveCardMap(project, map)
+    await runCli(initArgs(project, { whiteboards: writeWhiteboardsWithoutTrailer(makeDir()) }))
+    const cache = loadCardMap(project).whiteboards_cache
+    expect(cache.items).toHaveLength(9)
+    expect(cache.updated_at).not.toBe("2026-01-01T00:00:00.000Z")
+  })
+
+  it("warns about a whiteboard that reports more whiteboards than the list shows", async () => {
+    const project = makeDir()
+    const cutOff = join(makeDir(), "cut.txt")
+    writeFileSync(
+      cutOff,
+      [
+        "Whiteboards:",
+        `whiteboard "Root A" [${ROOT_A}] 0 cards, 0 sections, 3 non-card objects, 3 whiteboards`,
+        `  whiteboard "Board A1" [${id(3)}] 0 cards, 0 sections, 0 non-card objects, 2 whiteboards`,
+        `    whiteboard "Board A2" [${id(1)}] 33 cards, 6 sections, 1 non-card object, 0 whiteboards`,
+      ].join("\n"),
+    )
+    const result = await runCli(initArgs(project, { whiteboards: cutOff, roots: [ROOT_A], sourceBoards: [], archiveBoards: [] }))
+    expect(result.exitCode).toBe(0)
+    expect(result.output.warnings).toEqual([
+      `the whiteboard list is cut off below "Root A" [${ROOT_A}] (3 whiteboards reported, 2 listed) and below "Board A1" [${id(3)}] (2 whiteboards reported, 1 listed); call list_whiteboards again with depth 10`,
+    ])
+  })
+
+  it("does not warn about a list that shows every whiteboard it reports", async () => {
+    const result = await runCli(initArgs(makeDir(), { whiteboards: writeWhiteboardsWithoutTrailer(makeDir()) }))
+    expect(result.output.warnings).toEqual([])
   })
 
   it("warns when the database tag is not the mirror tag", async () => {
@@ -374,7 +479,7 @@ describe("hepta init", () => {
     }
     saveCardMap(project, map)
 
-    const result = await runCli(initArgs(project, { extra: ["--force"] }))
+    const result = await runCli(initArgs(project, { whiteboards: writeWhiteboardsWithoutTrailer(makeDir()), extra: ["--force"] }))
     expect(result.exitCode).toBe(0)
     expect(parseHeptabaseYaml(readFileSync(join(project, "heptabase.yaml"), "utf8")).ok).toBe(true)
     const after = loadCardMap(project)
@@ -460,7 +565,7 @@ describe("hepta init", () => {
       const result = await runCli(initArgs(makeDir(), { whiteboards: writePages(makeDir(), trailer) }))
       expect(result.exitCode).toBe(0)
       expect(result.output.warnings).toEqual([
-        "the whiteboard list is partial (showing 3-3 of 5), so the map cache holds only these whiteboards",
+        "the whiteboard list is partial (showing 3-3 of 5), so the stored tree (0 whiteboards) was not changed",
       ])
     })
 

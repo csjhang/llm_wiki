@@ -2162,6 +2162,7 @@ const OPTIONAL_PROPERTY_KEYS = [
 const TOP_LEVEL_KEYS$2 = [
 	"version",
 	"roots",
+	"other_wiki_roots",
 	"whiteboards",
 	"tags",
 	"properties"
@@ -2184,6 +2185,7 @@ function parseHeptabaseYaml(text) {
 	checkVersion(root, issues);
 	reportUnknownKeys(root, TOP_LEVEL_KEYS$2, "", issues);
 	const roots = parseRoots(root.roots, issues);
+	const otherWikiRoots = parseOtherWikiRoots(root.other_wiki_roots, roots, issues);
 	const whiteboards = parseWhiteboards(root.whiteboards, issues);
 	const tags = parseTags(root.tags, issues);
 	const properties = parseProperties(root.properties, issues);
@@ -2196,6 +2198,7 @@ function parseHeptabaseYaml(text) {
 		value: {
 			version: 1,
 			roots,
+			other_wiki_roots: otherWikiRoots,
 			whiteboards,
 			tags,
 			properties
@@ -2217,6 +2220,28 @@ function parseRoots(raw, issues) {
 		if (id !== "") roots.push(id);
 	});
 	return roots;
+}
+function parseOtherWikiRoots(raw, roots, issues) {
+	if (raw === void 0 || raw === null) return [];
+	if (!Array.isArray(raw)) {
+		issues.push({
+			path: "other_wiki_roots",
+			message: "must be a list of whiteboard UUIDs"
+		});
+		return [];
+	}
+	const others = [];
+	raw.forEach((item, index) => {
+		const path = `other_wiki_roots[${index}]`;
+		const id = readUuid(item, path, issues);
+		if (id === "") return;
+		if (roots.includes(id)) issues.push({
+			path,
+			message: "is also in roots; a whiteboard belongs to one wiki"
+		});
+		else if (!others.includes(id)) others.push(id);
+	});
+	return others;
 }
 function parseWhiteboards(raw, issues) {
 	const whiteboards = {};
@@ -2282,6 +2307,10 @@ function parseTags(raw, issues) {
 	reportUnknownKeys(raw, TAG_KEYS, "tags", issues);
 	tags.ingest = readUuid(raw.ingest, "tags.ingest", issues);
 	tags.mirror = readUuid(raw.mirror, "tags.mirror", issues);
+	if (tags.ingest !== "" && tags.ingest === tags.mirror) issues.push({
+		path: "tags.mirror",
+		message: "must be another tag than tags.ingest: a card cannot be both a source and a mirror"
+	});
 	return tags;
 }
 function parseProperties(raw, issues) {
@@ -2330,21 +2359,27 @@ function parseArgs(args, spec) {
 			problems.push(`unexpected argument: ${token}`);
 			continue;
 		}
-		const name = token.slice(2);
+		const equals = token.indexOf("=");
+		const name = token.slice(2, equals === -1 ? void 0 : equals);
+		const inline = equals === -1 ? void 0 : token.slice(equals + 1);
 		if (valueNames.has(name) || listNames.has(name)) {
-			const value = valueAfter(index);
+			let value = inline;
 			if (value === void 0) {
-				problems.push(`missing value for ${token}`);
-				continue;
+				value = valueAfter(index);
+				if (value === void 0) {
+					problems.push(`missing value for ${token}`);
+					continue;
+				}
+				index += 1;
 			}
-			index += 1;
 			if (listNames.has(name)) parsed.lists[name].push(value);
-			else if (Object.prototype.hasOwnProperty.call(parsed.values, name)) problems.push(`option given more than once: ${token}`);
+			else if (Object.prototype.hasOwnProperty.call(parsed.values, name)) problems.push(`option given more than once: --${name}`);
 			else parsed.values[name] = value;
-		} else if (flagNames.has(name)) parsed.flags[name] = true;
+		} else if (flagNames.has(name)) if (inline === void 0) parsed.flags[name] = true;
+		else problems.push(`option takes no value: --${name}`);
 		else {
 			problems.push(`unknown option: ${token}`);
-			if (valueAfter(index) !== void 0) index += 1;
+			if (inline === void 0 && valueAfter(index) !== void 0) index += 1;
 		}
 	}
 	return {
@@ -2518,6 +2553,8 @@ const LISTED_ITEM = new RegExp(`(?:^|, )([^\\n]+?) \\[(${UUID$1})\\](?=, |$)`, "
 const MIND_MAP_CARD = new RegExp(`^(?:\\d+\\t)?\\s*card "([^\\n]*?)" cardId: \\[(${UUID$1})\\]`);
 /** A numbered line of read_object content: `<n>\t<text>`. */
 const NUMBERED_LINE = /^(\d+)\t([^\n]*)$/;
+/** The count that ends a whiteboard line: `..., 3 whiteboards` (or `1 whiteboard`). */
+const WHITEBOARD_COUNT = /(\d+) whiteboards?\s*$/;
 /** The line a paged list ends with. */
 const PAGING_TRAILER = /^More [^\n]*? are available\. Showing (\d+)-(\d+) of (\d+)\.[^\n]*?\boffset (\d+)\b/;
 /** The `content` text of a JSON envelope, or the text itself when it is not one. */
@@ -2596,10 +2633,11 @@ function parseCardDetails(rest) {
 	}
 	const tagsLabel = /(?:^|, )tags: /.exec(body);
 	const whiteboardsPart = (tagsLabel ? body.slice(0, tagsLabel.index) : body).replace(/^whiteboards: /, "");
-	const tagsPart = tagsLabel ? body.slice(tagsLabel.index + tagsLabel[0].length) : "";
+	const tags = parseListedItems(tagsLabel ? body.slice(tagsLabel.index + tagsLabel[0].length) : "");
 	const details = {
 		whiteboards: parseListedItems(whiteboardsPart),
-		tags: parseListedItems(tagsPart).map((tag) => tag.title)
+		tags: tags.map((tag) => tag.title),
+		tagIds: tags.map((tag) => tag.id)
 	};
 	if (createdAt !== void 0) details.createdAt = createdAt;
 	if (updatedAt !== void 0) details.updatedAt = updatedAt;
@@ -2641,6 +2679,30 @@ function parseListWhiteboards(text) {
 		ancestors.push(node);
 	}
 	return nodes;
+}
+/**
+* The whiteboards of a list_whiteboards result that say they hold more whiteboards than the list shows below them: the
+* tree is cut off there (the depth of the call was too small, or the list is partial). A whiteboard line ends with the
+* number of whiteboards below it, and the whiteboards listed below it are the lines after it with a deeper indent.
+*/
+function findCutOffWhiteboards(pages) {
+	const found = [];
+	for (const page of pages) {
+		const items = linesOf(page).map(parseObjectLine).filter((item) => item !== null && item.keyword === "whiteboard");
+		items.forEach((item, index) => {
+			const reported = Number(WHITEBOARD_COUNT.exec(item.rest)?.[1]);
+			if (!Number.isFinite(reported)) return;
+			let listed = 0;
+			while (index + 1 + listed < items.length && items[index + 1 + listed].indent > item.indent) listed += 1;
+			if (listed < reported) found.push({
+				id: item.id,
+				title: item.title,
+				reported,
+				listed
+			});
+		});
+	}
+	return found;
 }
 /**
 * One whiteboard tree from the pages of a paged list_whiteboards result, in page order.
@@ -2710,6 +2772,47 @@ function parsePagingTrailer(text) {
 }
 
 //#endregion
+//#region tools/wiki-tool/src/whiteboard-tree.ts
+/** The depth to ask `list_whiteboards` for. The default depth of the tool cuts a deep tree off. */
+const LIST_DEPTH = 10;
+/** The most cut-off whiteboards a warning names. */
+const MAX_NAMED = 3;
+/** The tree of the pages of one `list_whiteboards` result, in page order. */
+function readWhiteboardList(pages) {
+	const trailer = pages.length === 0 ? null : parsePagingTrailer(pages[pages.length - 1]);
+	return {
+		nodes: joinListWhiteboards(pages),
+		partial: trailer ? `showing ${trailer.shown[0]}-${trailer.shown[1]} of ${trailer.total}` : null,
+		cutOff: cutOffWarning(pages)
+	};
+}
+function cutOffWarning(pages) {
+	const found = findCutOffWhiteboards(pages);
+	if (found.length === 0) return null;
+	const named = found.slice(0, MAX_NAMED).map((board) => `"${board.title}" [${board.id}] (${board.reported} whiteboards reported, ${board.listed} listed)`);
+	const more = found.length > MAX_NAMED ? ` and ${found.length - MAX_NAMED} more` : "";
+	return `the whiteboard list is cut off below ${named.join(" and below ")}${more}; call list_whiteboards again with depth ${10}`;
+}
+/**
+* Keeps the list as the stored tree of the map, unless the list is partial or the same as the stored tree. Adds the
+* warnings that go with the list. Returns true when the map changed and must be saved.
+*/
+function storeWhiteboardList(map, list, now, warnings) {
+	if (list.partial) {
+		const stored = map.whiteboards_cache.items.length;
+		warnings.push(`the whiteboard list is partial (${list.partial}), so the stored tree (${stored} whiteboards) was not changed`);
+	}
+	if (list.cutOff) warnings.push(list.cutOff);
+	if (list.partial) return false;
+	if (JSON.stringify(map.whiteboards_cache.items) === JSON.stringify(list.nodes)) return false;
+	map.whiteboards_cache = {
+		updated_at: now.toISOString(),
+		items: list.nodes
+	};
+	return true;
+}
+
+//#endregion
 //#region tools/wiki-tool/src/cmd-init.ts
 /**
 * `wiki-tool hepta init` - write the first draft of heptabase.yaml.
@@ -2774,6 +2877,7 @@ const OPTION_SPEC$4 = {
 	lists: [
 		"whiteboards",
 		"root",
+		"other-root",
 		"source-board",
 		"archive-board"
 	],
@@ -2799,6 +2903,7 @@ function init(args) {
 	const databasePath = parsed.values.database;
 	const whiteboardsPaths = parsed.lists.whiteboards;
 	const roots = unique(parsed.lists.root);
+	const otherRoots = unique(parsed.lists["other-root"]);
 	const sourceBoards = unique(parsed.lists["source-board"]);
 	const archiveBoards = unique(parsed.lists["archive-board"]);
 	const tags = {
@@ -2806,6 +2911,7 @@ function init(args) {
 		mirror: parsed.values["mirror-tag"]
 	};
 	const warnings = [];
+	if (tags.ingest === tags.mirror) problems.push("--ingest-tag and --mirror-tag must be two different tags");
 	if (!isDirectory(project)) return {
 		ok: false,
 		problems: [`project folder not found: ${project}`]
@@ -2822,33 +2928,33 @@ function init(args) {
 	const properties = database ? mapProperties(database.schema, problems, warnings) : {};
 	if (database?.tagId && database.tagId !== tags.mirror) warnings.push(`the database belongs to tag ${database.tagId}, but --mirror-tag is ${tags.mirror}`);
 	const pages = whiteboardsPaths.map((path) => readText("--whiteboards", path, problems));
-	let tree = [];
+	let list = null;
 	if (pages.every((page) => page !== null)) {
-		tree = joinListWhiteboards(pages);
-		const trailer = parsePagingTrailer(pages[pages.length - 1]);
-		const partial = trailer ? `showing ${trailer.shown[0]}-${trailer.shown[1]} of ${trailer.total}` : null;
-		if (tree.length === 0) problems.push("--whiteboards file lists no whiteboards");
+		list = readWhiteboardList(pages);
+		if (list.nodes.length === 0) problems.push("--whiteboards file lists no whiteboards");
 		else {
-			const known = new Set(tree.map((node) => node.id));
+			const known = new Set(list.nodes.map((node) => node.id));
 			const checkBoards = (option, ids) => {
 				for (const id of ids) if (!known.has(id)) {
-					const note = partial ? ` (the list is partial: ${partial})` : "";
+					const note = list?.partial ? ` (the list is partial: ${list.partial})` : "";
 					problems.push(`--${option} ${id} is not in the whiteboard list${note}`);
 				}
 			};
 			checkBoards("root", roots);
+			checkBoards("other-root", otherRoots);
 			checkBoards("source-board", sourceBoards);
 			checkBoards("archive-board", archiveBoards);
-			if (partial) warnings.push(`the whiteboard list is partial (${partial}), so the map cache holds only these whiteboards`);
 		}
 	}
 	for (const id of sourceBoards.filter((candidate) => archiveBoards.includes(candidate))) problems.push(`${id} is given as both --source-board and --archive-board`);
-	if (problems.length > 0 || map === null) return {
+	for (const id of roots.filter((candidate) => otherRoots.includes(candidate))) problems.push(`${id} is given as both --root and --other-root`);
+	if (problems.length > 0 || map === null || list === null) return {
 		ok: false,
 		problems
 	};
 	const text = renderHeptabaseYaml({
 		roots,
+		otherRoots,
 		sourceBoards,
 		archiveBoards,
 		tags,
@@ -2861,17 +2967,14 @@ function init(args) {
 			return `invalid ${HEPTABASE_YAML}: ${issue.path === "" ? "" : `${issue.path}: `}${issue.message}`;
 		})
 	};
-	map.whiteboards_cache = {
-		updated_at: (/* @__PURE__ */ new Date()).toISOString(),
-		items: tree
-	};
-	saveCardMap(project, map);
+	const mapChanged = storeWhiteboardList(map, list, /* @__PURE__ */ new Date(), warnings);
+	if (mapChanged) saveCardMap(project, map);
 	writeFileAtomic(configPath, text);
 	return {
 		ok: true,
-		written: ["heptabase-map.json", HEPTABASE_YAML],
+		written: [...mapChanged ? ["heptabase-map.json"] : [], HEPTABASE_YAML],
 		properties: checked.value.properties,
-		whiteboards_cached: tree.length,
+		whiteboards_cached: map.whiteboards_cache.items.length,
 		warnings
 	};
 }
@@ -2952,6 +3055,7 @@ function renderHeptabaseYaml(draft) {
 		"roots:",
 		...draft.roots.map((id) => `  - ${scalar(id)}`)
 	];
+	if (draft.otherRoots.length > 0) lines.push("other_wiki_roots:", ...draft.otherRoots.map((id) => `  - ${scalar(id)}`));
 	const boards = [...draft.sourceBoards.map((id) => `  ${scalar(id)}: { kind: source, auto_ingest: false }`), ...draft.archiveBoards.map((id) => `  ${scalar(id)}: { kind: archive }`)];
 	lines.push(...boards.length > 0 ? ["whiteboards:", ...boards] : ["whiteboards: {}"]);
 	lines.push("tags:", `  ingest: ${scalar(draft.tags.ingest)}`, `  mirror: ${scalar(draft.tags.mirror)}`);
@@ -3241,7 +3345,7 @@ function wikiPageToCard(markdown, opts) {
 	const converted = code.restore(code.masked.replace(WIKILINK, (match, _embed, rawTarget, rawLabel) => {
 		const [rawSlug, ...anchorParts] = rawTarget.split("#");
 		const slug = rawSlug.trim();
-		const anchor = anchorParts.join("#").replace(/^\^/, "").trim();
+		const anchor = anchorParts.join("#").trim().replace(/^\^/, "").trim();
 		const label = rawLabel?.trim();
 		if (slug === "") return anchor === "" && !label ? match : label || anchor;
 		const target = opts.resolveLink(slug);
@@ -4162,17 +4266,22 @@ function placement(page, entry) {
 * a PDF card, or `ask` the user when the card cannot be placed. It never calls Heptabase.
 *
 * A card is planned when it has no snapshot yet, or when its `updatedAt` is newer than the time the
-* map recorded. Not planned: a mirror card (the AI wrote it), a card on an archive whiteboard, and a
-* card whose snapshot is up to date.
+* map recorded. Not planned, in this order: a mirror card of the map (the AI wrote it), a card whose
+* snapshot is up to date, a card on an archive whiteboard, and a card that has the mirror tag of this
+* wiki (a mirror card is never a source, whatever the map says).
 *
-* A card belongs to the wiki through a root whiteboard. For each whiteboard of the card, the walk goes
-* up the stored tree (the whiteboard itself first) and stops at the first root. A card that reaches two
-* different roots, or none, needs a decision (`ask`). A card that has a snapshot already was accepted
-* then, so its update is planned without asking again. The answer to an `ask` is kept in the map
-* (`hepta record` event `up-decision`): `skip` leaves the card out, a root id is the root of the card.
+* A card belongs to a wiki through a root whiteboard. For each whiteboard of the card, the walk goes up
+* the stored tree (the whiteboard itself first) and stops at the first root of this wiki (`roots`) or of
+* another wiki that uses the same Heptabase space (`other_wiki_roots`). A card under the roots of this wiki
+* only is planned, however many of them. A card only under the roots of other wikis is skipped
+* (`other-wiki`). A card under both needs a decision (`ask`, `two-wikis`), and a card under no root needs one
+* too (`no-root`). A card that has a snapshot already was accepted then, so its update is planned without
+* asking again. The answer to an `ask` is kept in the map (`hepta record` event `up-decision`): `skip` leaves
+* the card out, `this-wiki` makes it a source of this wiki. `plan-up` does not ask again while the answer stays
+* in the map and the card is not snapshotted yet.
 *
-* Giving `--whiteboards` replaces the stored tree, unless the list is partial (its last page says that
-* more whiteboards follow): a partial list would drop the boards it lacks, so it only adds a warning.
+* Giving `--whiteboards` stores the tree in the map, but only when it differs from the stored one. A partial
+* list (its last page says that more whiteboards follow) would drop the boards it lacks, so it only adds a warning.
 */
 const OPTION_SPEC$2 = {
 	values: ["project", "now"],
@@ -4208,25 +4317,21 @@ function planUp(args) {
 		problems
 	};
 	const warnings = [];
-	if (tree?.partial) {
-		const stored = map.whiteboards_cache.items.length;
-		warnings.push(`the whiteboard list is partial (${tree.partial}), so the stored tree (${stored} whiteboards) was not changed`);
-	} else if (tree) {
-		map.whiteboards_cache = {
-			updated_at: now.toISOString(),
-			items: tree.nodes
-		};
-		saveCardMap(project, map);
+	if (tree) {
+		if (storeWhiteboardList(map, tree, now, warnings)) saveCardMap(project, map);
 	} else if (map.whiteboards_cache.items.length === 0) warnings.push("the whiteboard tree is empty; pass --whiteboards");
 	const parents = parentIndex(map.whiteboards_cache.items);
 	const roots = new Set(config.roots);
+	const otherRoots = new Set(config.other_wiki_roots);
 	const mirrorIds = new Set(Object.values(map.pages).map((entry) => entry.card_id));
 	const decisions = map.up_decisions ?? {};
 	const skipped = {
 		archived: 0,
 		mirror: 0,
+		"mirror-tag": 0,
 		unchanged: 0,
-		declined: 0
+		declined: 0,
+		"other-wiki": 0
 	};
 	const actions = [];
 	for (const card of cards) {
@@ -4244,21 +4349,31 @@ function planUp(args) {
 			skipped.archived += 1;
 			continue;
 		}
+		if (card.tagIds.includes(config.tags.mirror)) {
+			skipped["mirror-tag"] += 1;
+			continue;
+		}
 		if (!recorded) {
 			const decision = Object.prototype.hasOwnProperty.call(decisions, card.id) ? decisions[card.id] : void 0;
 			if (decision === "skip") {
 				skipped.declined += 1;
 				continue;
 			}
-			const reached = decision !== void 0 && roots.has(decision) ? new Set([decision]) : new Set(chains.flatMap((chain) => chain.find((boardId) => roots.has(boardId)) ?? []));
-			if (reached.size !== 1) {
-				actions.push({
-					op: "ask",
-					cardId: card.id,
-					title: card.title,
-					reason: reached.size === 0 ? "no-root" : "two-roots"
-				});
-				continue;
+			if (decision !== "this-wiki" && !(decision !== void 0 && UUID_PATTERN.test(decision))) {
+				const wikis = wikisOf(chains, roots, otherRoots);
+				if (wikis.other && !wikis.thisWiki) {
+					skipped["other-wiki"] += 1;
+					continue;
+				}
+				if (wikis.other || !wikis.thisWiki) {
+					actions.push({
+						op: "ask",
+						cardId: card.id,
+						title: card.title,
+						reason: wikis.other ? "two-wikis" : "no-root"
+					});
+					continue;
+				}
 			}
 		}
 		actions.push(card.type === PDF_CARD ? {
@@ -4279,6 +4394,23 @@ function planUp(args) {
 		skipped,
 		warnings
 	};
+}
+/**
+* Which wikis a card is under. For each whiteboard chain (nearest first) the first root of this wiki or of another wiki
+* decides, so a root of this wiki inside a root of another wiki counts for this wiki.
+*/
+function wikisOf(chains, roots, otherRoots) {
+	const wikis = {
+		thisWiki: false,
+		other: false
+	};
+	for (const chain of chains) {
+		const nearest = chain.find((boardId) => roots.has(boardId) || otherRoots.has(boardId));
+		if (nearest === void 0) continue;
+		if (roots.has(nearest)) wikis.thisWiki = true;
+		else wikis.other = true;
+	}
+	return wikis;
 }
 /** The cards of the `list_cards` files, in order of first appearance. A later file wins for a card that two files list. */
 function readCards(paths, problems) {
@@ -4304,16 +4436,12 @@ function readTree(paths, problems) {
 		problems.push(`cannot read --whiteboards file: ${path}`);
 	}
 	if (pages.length < paths.length) return null;
-	const nodes = joinListWhiteboards(pages);
-	if (nodes.length === 0) {
+	const list = readWhiteboardList(pages);
+	if (list.nodes.length === 0) {
 		problems.push("--whiteboards file lists no whiteboards");
 		return null;
 	}
-	const trailer = parsePagingTrailer(pages[pages.length - 1]);
-	return {
-		nodes,
-		partial: trailer ? `showing ${trailer.shown[0]}-${trailer.shown[1]} of ${trailer.total}` : null
-	};
+	return list;
 }
 /** A whiteboard id to the id of its parent. A top-level whiteboard has `null`. */
 function parentIndex(items) {
@@ -4398,7 +4526,7 @@ function readContentFiles(paths, cardId, problems) {
 *   {"type":"placed","page","whiteboardId"}
 *   {"type":"retired","page","cardUpdatedAt"}
 *   {"type":"feedback","page","cardId","cardUpdatedAt"}          (with one --content file for each page of read_object)
-*   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or a root whiteboard id)
+*   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or "this-wiki")
 *
 * A `created` event with `"setup": false` is run right after `create_object` returned the card id, before the
 * card is in the mirror tag. The map keeps the page as `setup_pending`, so a failure in the next calls never
@@ -4422,7 +4550,8 @@ function readContentFiles(paths, cardId, problems) {
 * `updatedAt` of the card) in the map, so plan-down reports one edit once.
 *
 * An `up-decision` event keeps the user's answer to a question of `plan-up` (an `ask` action): `skip` leaves the
-* card out, a root id says which root the card belongs to. `plan-up` then does not ask about the card again.
+* card out, `this-wiki` makes it a source of this wiki. `plan-up` plans no question for the card while the answer is
+* in the map and the card has no snapshot.
 */
 const OPTION_SPEC$1 = {
 	values: [
@@ -4843,16 +4972,13 @@ function feedbackNote(project, page, cardId, sent, card) {
 		""
 	].join("\n");
 }
-/** The answer to a question of `plan-up`. A root has to be one of the roots of heptabase.yaml. */
+/** The answer to a question of `plan-up`: `skip` leaves the card out, `this-wiki` makes it a source of this wiki. */
 function recordUpDecision(context) {
 	const fields = new Fields(context.event, context.project);
 	const cardId = fields.id("cardId");
 	const decision = context.event.decision;
 	const problems = fields.problems;
-	if (decision === "skip") {} else if (typeof decision === "string" && UUID_PATTERN.test(decision)) {
-		const config = readHeptabaseConfig(context.project, problems);
-		if (config && !config.roots.includes(decision)) problems.push(`decision ${decision} is not a root in heptabase.yaml`);
-	} else problems.push("event \"decision\" must be \"skip\" or the id of a root whiteboard (a lowercase UUID)");
+	if (decision !== "skip" && decision !== "this-wiki") problems.push("event \"decision\" must be \"skip\" or \"this-wiki\"");
 	if (problems.length > 0 || typeof decision !== "string") return fail(problems);
 	context.map.up_decisions = {
 		...context.map.up_decisions,
@@ -4991,8 +5117,9 @@ function parseWhiteboardIds(raw, path, issues) {
 * The skill reads the card with `read_object`, saves the result to a file, and runs this command. The
 * command writes `raw/sources/heptabase/<card-id>.md`: frontmatter, then the card as plain Markdown. It
 * records the snapshot in the card map, so `plan-up` plans the card again only after the card changes.
-* Snapshotting a card again replaces the file; the app ingests the new text again. A file that is there
-* and is not a snapshot of this card is never replaced.
+* Snapshotting a card again replaces the file; the app ingests the new text again. A file that is already
+* there is replaced only when it is known to be this card's snapshot: the map names it as the source of the
+* card, or its frontmatter names the card. Any other file stops the command.
 *
 * `--content` is the read_object result. A card that is longer than one page comes in several results:
 * give one `--content` for each, and the command joins them in line order. A file that is not a
@@ -5142,12 +5269,14 @@ function readUpdatedAt(value, problems) {
 	problems.push(`--updated-at must be an ISO date and time, such as 2026-10-24T08:00:00Z: ${value}`);
 }
 /**
-* A problem when the snapshot file is there and is not this card's: a file of the user, or of another card, must
-* not be replaced. It is this card's when the map has the source, or when its frontmatter names the card.
+* A problem when the snapshot file is there and is not known to be this card's: a file of the user, or of another card,
+* must not be replaced. It is this card's when the map records this very path as the source of the card, or when its
+* frontmatter names the card. A source recorded at another path says nothing about this file.
 */
 function overwriteProblem(project, rawPath, cardId, map) {
 	const path = resolveInProject(project, rawPath);
-	if (!existsSync(path) || Object.prototype.hasOwnProperty.call(map.sources, cardId)) return null;
+	if (!existsSync(path)) return null;
+	if ((Object.prototype.hasOwnProperty.call(map.sources, cardId) ? map.sources[cardId] : void 0)?.raw_path === rawPath) return null;
 	try {
 		if (parseFrontmatter(readFileSync(path, "utf8")).frontmatter?.heptabase_card_id === cardId) return null;
 	} catch {}

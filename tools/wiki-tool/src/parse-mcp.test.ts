@@ -9,6 +9,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import {
+  findCutOffWhiteboards,
   joinListWhiteboards,
   isReadObjectResult,
   joinReadObjectPages,
@@ -55,10 +56,12 @@ describe("parseListCards", () => {
       type: "card",
       whiteboards: [{ id: id(1), title: "Board A2" }],
       tags: ["wiki-test"],
+      tagIds: [id(4)],
       createdAt: "2026-09-28T17:39:37.772Z",
       updatedAt: "2026-10-04T07:28:31.245Z",
     })
     expect(cards[2].tags).toEqual(["wiki-test", "ingest-test"])
+    expect(cards[2].tagIds).toEqual([id(4), id(5)])
     expect(cards[2].updatedAt).toBe("2026-10-04T07:28:41.259Z")
   })
 
@@ -78,6 +81,7 @@ describe("parseListCards", () => {
       { id: id(1), title: "Board A2" },
     ])
     expect(cards[0].tags).toEqual([])
+    expect(cards[0].tagIds).toEqual([])
     expect(cards[1].createdAt).toBe("2023-09-14T15:02:54.883Z")
   })
 
@@ -102,6 +106,7 @@ describe("parseListCards", () => {
       type: "card",
       whiteboards: [],
       tags: [],
+      tagIds: [],
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-02T00:00:00.000Z",
     })
@@ -124,6 +129,7 @@ describe("parseListCards", () => {
         type: "card",
         whiteboards: [{ id: id(2), title: board }],
         tags: [`t${PARAGRAPH_SEPARATOR}u`],
+        tagIds: [id(3)],
         createdAt: "2026-01-01T00:00:00.000Z",
         updatedAt: "2026-01-02T00:00:00.000Z",
       },
@@ -148,11 +154,12 @@ describe("parseListCards", () => {
       { id: id(3), title: "Notes" },
     ])
     expect(card.tags).toEqual(["a, b"])
+    expect(card.tagIds).toEqual([id(4)])
   })
 
   it("accepts a line without whiteboards, tags, or timestamps", () => {
     const [card] = parseListCards(`card "Bare" [${id(5)}]`)
-    expect(card).toEqual({ id: id(5), title: "Bare", type: "card", whiteboards: [], tags: [] })
+    expect(card).toEqual({ id: id(5), title: "Bare", type: "card", whiteboards: [], tags: [], tagIds: [] })
     expect("createdAt" in card).toBe(false)
   })
 })
@@ -535,5 +542,38 @@ describe("parsePagingTrailer", () => {
   it("does not read a card title that looks like a trailer", () => {
     const text = `Cards:\ncard "More cards are available. Showing 1-3 of 9. Call list_cards with offset 3 to list the next page." [${id(1)}]`
     expect(parsePagingTrailer(text)).toBeNull()
+  })
+})
+
+describe("findCutOffWhiteboards", () => {
+  const line = (depth: number, n: number, title: string, below: number): string =>
+    `${"  ".repeat(depth)}whiteboard "${title}" [${id(n)}] 0 cards, 0 sections, 0 non-card objects, ${below} whiteboard${below === 1 ? "" : "s"}`
+
+  it("finds nothing in the fixture list, where every count matches the lines below it", () => {
+    expect(findCutOffWhiteboards([fixture("list_whiteboards.txt")])).toEqual([])
+  })
+
+  it("finds a whiteboard that has fewer whiteboards listed below it than it reports", () => {
+    const text = ["Whiteboards:", line(0, 1, "Root", 3), line(1, 2, "Child", 2), line(2, 3, "Leaf", 0)].join("\n")
+    expect(findCutOffWhiteboards([text])).toEqual([
+      { id: id(1), title: "Root", reported: 3, listed: 2 },
+      { id: id(2), title: "Child", reported: 2, listed: 1 },
+    ])
+  })
+
+  it("counts the whiteboards below it by indent, not the ones after it", () => {
+    const text = ["Whiteboards:", line(0, 1, "First", 1), line(1, 2, "Inside", 0), line(0, 3, "Second", 1), line(0, 4, "Next", 0)].join("\n")
+    expect(findCutOffWhiteboards([text])).toEqual([{ id: id(3), title: "Second", reported: 1, listed: 0 }])
+  })
+
+  it("reads the singular count and each page on its own", () => {
+    const first = ["Whiteboards:", line(0, 1, "One", 1), line(1, 2, "Below", 0)].join("\n")
+    const second = ["Whiteboards:", line(0, 3, "Two", 1)].join("\n")
+    expect(findCutOffWhiteboards([first, second])).toEqual([{ id: id(3), title: "Two", reported: 1, listed: 0 }])
+  })
+
+  it("ignores a whiteboard line without a count, and the text of a JSON envelope", () => {
+    const content = ["Whiteboards:", `whiteboard "Bare" [${id(1)}]`, line(0, 2, "Cut", 2)].join("\n")
+    expect(findCutOffWhiteboards([envelope(content)])).toEqual([{ id: id(2), title: "Cut", reported: 2, listed: 0 }])
   })
 })

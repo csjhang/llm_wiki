@@ -31,13 +31,18 @@ export type PropertyKey =
 export interface HeptabaseConfig {
   version: 1
   roots: string[]
+  /**
+   * Root whiteboards of other wikis that use the same Heptabase space. A card that is only under these roots is not
+   * a source of this wiki. An empty list when the space belongs to this wiki alone.
+   */
+  other_wiki_roots: string[]
   whiteboards: Record<string, WhiteboardSetting>
   tags: { ingest: string; mirror: string }
   properties: Partial<Record<PropertyKey, string>>
 }
 
 // Wiki identity (id, role, mechanism library) lives in `wiki.yaml`. See wiki-identity.ts.
-const TOP_LEVEL_KEYS = ["version", "roots", "whiteboards", "tags", "properties"] as const
+const TOP_LEVEL_KEYS = ["version", "roots", "other_wiki_roots", "whiteboards", "tags", "properties"] as const
 const WHITEBOARD_KEYS = ["kind", "auto_ingest"] as const
 const TAG_KEYS = ["ingest", "mirror"] as const
 const PROPERTY_KEYS: readonly PropertyKey[] = [...REQUIRED_PROPERTY_KEYS, ...OPTIONAL_PROPERTY_KEYS]
@@ -55,6 +60,7 @@ export function parseHeptabaseYaml(text: string): ParseResult<HeptabaseConfig> {
   checkVersion(root, issues)
   reportUnknownKeys(root, TOP_LEVEL_KEYS, "", issues)
   const roots = parseRoots(root.roots, issues)
+  const otherWikiRoots = parseOtherWikiRoots(root.other_wiki_roots, roots, issues)
   const whiteboards = parseWhiteboards(root.whiteboards, issues)
   const tags = parseTags(root.tags, issues)
   const properties = parseProperties(root.properties, issues)
@@ -65,6 +71,7 @@ export function parseHeptabaseYaml(text: string): ParseResult<HeptabaseConfig> {
     value: {
       version: 1,
       roots,
+      other_wiki_roots: otherWikiRoots,
       whiteboards,
       tags,
       properties,
@@ -84,6 +91,26 @@ function parseRoots(raw: unknown, issues: ConfigIssue[]): string[] {
     if (id !== "") roots.push(id)
   })
   return roots
+}
+
+function parseOtherWikiRoots(raw: unknown, roots: readonly string[], issues: ConfigIssue[]): string[] {
+  if (raw === undefined || raw === null) return []
+  if (!Array.isArray(raw)) {
+    issues.push({ path: "other_wiki_roots", message: "must be a list of whiteboard UUIDs" })
+    return []
+  }
+  const others: string[] = []
+  raw.forEach((item, index) => {
+    const path = `other_wiki_roots[${index}]`
+    const id = readUuid(item, path, issues)
+    if (id === "") return
+    if (roots.includes(id)) {
+      issues.push({ path, message: "is also in roots; a whiteboard belongs to one wiki" })
+    } else if (!others.includes(id)) {
+      others.push(id)
+    }
+  })
+  return others
 }
 
 function parseWhiteboards(raw: unknown, issues: ConfigIssue[]): Record<string, WhiteboardSetting> {
@@ -148,6 +175,9 @@ function parseTags(raw: unknown, issues: ConfigIssue[]): HeptabaseConfig["tags"]
   reportUnknownKeys(raw, TAG_KEYS, "tags", issues)
   tags.ingest = readUuid(raw.ingest, "tags.ingest", issues)
   tags.mirror = readUuid(raw.mirror, "tags.mirror", issues)
+  if (tags.ingest !== "" && tags.ingest === tags.mirror) {
+    issues.push({ path: "tags.mirror", message: "must be another tag than tags.ingest: a card cannot be both a source and a mirror" })
+  }
   return tags
 }
 

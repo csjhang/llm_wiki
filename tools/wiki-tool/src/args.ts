@@ -3,8 +3,9 @@
  *
  * A command lists the options it takes by name (without the `--`): `values` take
  * one value each and may be given once, `lists` take one value each and may repeat,
- * `flags` take no value. parseArgs collects every problem instead of stopping at
- * the first, so one run can report them all.
+ * `flags` take no value. A value is the next token (`--name value`), or the text after the first `=`
+ * (`--name=value`); only the second form can give a value that starts with `--`. parseArgs collects every
+ * problem instead of stopping at the first, so one run can report them all.
  */
 
 export interface ArgSpec {
@@ -43,27 +44,33 @@ export function parseArgs(args: readonly string[], spec: ArgSpec): { parsed: Par
       problems.push(`unexpected argument: ${token}`)
       continue
     }
-    const name = token.slice(2)
+    const equals = token.indexOf("=")
+    const name = token.slice(2, equals === -1 ? undefined : equals)
+    const inline = equals === -1 ? undefined : token.slice(equals + 1)
     if (valueNames.has(name) || listNames.has(name)) {
-      const value = valueAfter(index)
+      let value = inline
       if (value === undefined) {
-        problems.push(`missing value for ${token}`)
-        continue
+        value = valueAfter(index)
+        if (value === undefined) {
+          problems.push(`missing value for ${token}`)
+          continue
+        }
+        index += 1
       }
-      index += 1
       if (listNames.has(name)) {
         parsed.lists[name].push(value)
       } else if (Object.prototype.hasOwnProperty.call(parsed.values, name)) {
-        problems.push(`option given more than once: ${token}`)
+        problems.push(`option given more than once: --${name}`)
       } else {
         parsed.values[name] = value
       }
     } else if (flagNames.has(name)) {
-      parsed.flags[name] = true
+      if (inline === undefined) parsed.flags[name] = true
+      else problems.push(`option takes no value: --${name}`)
     } else {
       problems.push(`unknown option: ${token}`)
       // The token after an unknown option is probably its value; do not report it as well.
-      if (valueAfter(index) !== undefined) index += 1
+      if (inline === undefined && valueAfter(index) !== undefined) index += 1
     }
   }
   return { parsed, problems }

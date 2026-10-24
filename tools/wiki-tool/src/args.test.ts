@@ -41,6 +41,36 @@ describe("parseArgs", () => {
     expect(parseArgs(["--root"], SPEC).problems).toEqual(["missing value for --root"])
   })
 
+  it("takes the value of --name=value, so a value may start with --", () => {
+    const { parsed, problems } = parseArgs(
+      ["--project=/p", "--root=--odd", "--root=b", "--database=a=b.json", "--force"],
+      SPEC,
+    )
+    expect(problems).toEqual([])
+    expect(parsed.values).toEqual({ project: "/p", database: "a=b.json" })
+    expect(parsed.lists).toEqual({ root: ["--odd", "b"] })
+    expect(parsed.flags).toEqual({ force: true })
+  })
+
+  it("mixes --name value and --name=value, and keeps an empty inline value", () => {
+    const { parsed, problems } = parseArgs(["--project", "/p", "--database="], SPEC)
+    expect(problems).toEqual([])
+    expect(parsed.values).toEqual({ project: "/p", database: "" })
+  })
+
+  it("reports a repeated single option whatever the form", () => {
+    expect(parseArgs(["--project=a", "--project", "b"], SPEC).problems).toEqual(["option given more than once: --project"])
+    expect(parseArgs(["--project=a", "--project=b"], SPEC).problems).toEqual(["option given more than once: --project"])
+  })
+
+  it("reports an inline value for a flag, and an unknown option with an inline value without eating the next token", () => {
+    expect(parseArgs(["--force=yes"], SPEC).problems).toEqual(["option takes no value: --force"])
+    expect(parseArgs(["--nope=x", "--project", "p"], SPEC)).toMatchObject({
+      problems: ["unknown option: --nope=x"],
+      parsed: { values: { project: "p" } },
+    })
+  })
+
   it("does not find options through the prototype chain", () => {
     expect(parseArgs(["--constructor", "x"], SPEC).problems).toEqual(["unknown option: --constructor"])
   })

@@ -13,7 +13,7 @@
  *   {"type":"placed","page","whiteboardId"}
  *   {"type":"retired","page","cardUpdatedAt"}
  *   {"type":"feedback","page","cardId","cardUpdatedAt"}          (with one --content file for each page of read_object)
- *   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or a root whiteboard id)
+ *   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or "this-wiki")
  *
  * A `created` event with `"setup": false` is run right after `create_object` returned the card id, before the
  * card is in the mirror tag. The map keeps the page as `setup_pending`, so a failure in the next calls never
@@ -37,7 +37,8 @@
  * `updatedAt` of the card) in the map, so plan-down reports one edit once.
  *
  * An `up-decision` event keeps the user's answer to a question of `plan-up` (an `ask` action): `skip` leaves the
- * card out, a root id says which root the card belongs to. `plan-up` then does not ask about the card again.
+ * card out, `this-wiki` makes it a source of this wiki. `plan-up` plans no question for the card while the answer is
+ * in the map and the card has no snapshot.
  */
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { posix } from "node:path"
@@ -52,7 +53,6 @@ import {
   cardHash,
   createRenderer,
   pageProperties,
-  readHeptabaseConfig,
   readProjectConfig,
   readWikiPage,
   readWikiPages,
@@ -516,19 +516,14 @@ function feedbackNote(project: string, page: string, cardId: string, sent: strin
   ].join("\n")
 }
 
-/** The answer to a question of `plan-up`. A root has to be one of the roots of heptabase.yaml. */
+/** The answer to a question of `plan-up`: `skip` leaves the card out, `this-wiki` makes it a source of this wiki. */
 function recordUpDecision(context: RecordContext): CommandResult {
   const fields = new Fields(context.event, context.project)
   const cardId = fields.id("cardId")
   const decision = context.event.decision
   const problems = fields.problems
-  if (decision === "skip") {
-    // Nothing to check.
-  } else if (typeof decision === "string" && UUID_PATTERN.test(decision)) {
-    const config = readHeptabaseConfig(context.project, problems)
-    if (config && !config.roots.includes(decision)) problems.push(`decision ${decision} is not a root in heptabase.yaml`)
-  } else {
-    problems.push('event "decision" must be "skip" or the id of a root whiteboard (a lowercase UUID)')
+  if (decision !== "skip" && decision !== "this-wiki") {
+    problems.push('event "decision" must be "skip" or "this-wiki"')
   }
   if (problems.length > 0 || typeof decision !== "string") return fail(problems)
 

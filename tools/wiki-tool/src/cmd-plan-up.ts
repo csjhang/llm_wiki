@@ -7,35 +7,36 @@
  * a PDF card, or `ask` the user when the card cannot be placed. It never calls Heptabase.
  *
  * A card is planned when it has no snapshot yet, or when its `updatedAt` is newer than the time the
- * map recorded. Not planned: a mirror card (the AI wrote it), a card on an archive whiteboard, and a
- * card whose snapshot is up to date.
+ * map recorded. Not planned, in this order: a mirror card of the map (the AI wrote it), a card whose
+ * snapshot is up to date, a card on an archive whiteboard, and a card that has the mirror tag of this
+ * wiki (a mirror card is never a source, whatever the map says).
  *
- * A card belongs to the wiki through a root whiteboard. For each whiteboard of the card, the walk goes
- * up the stored tree (the whiteboard itself first) and stops at the first root. A card that reaches two
- * different roots, or none, needs a decision (`ask`). A card that has a snapshot already was accepted
- * then, so its update is planned without asking again. The answer to an `ask` is kept in the map
- * (`hepta record` event `up-decision`): `skip` leaves the card out, a root id is the root of the card.
+ * A card belongs to a wiki through a root whiteboard. For each whiteboard of the card, the walk goes up
+ * the stored tree (the whiteboard itself first) and stops at the first root of this wiki (`roots`) or of
+ * another wiki that uses the same Heptabase space (`other_wiki_roots`). A card under the roots of this wiki
+ * only is planned, however many of them. A card only under the roots of other wikis is skipped
+ * (`other-wiki`). A card under both needs a decision (`ask`, `two-wikis`), and a card under no root needs one
+ * too (`no-root`). A card that has a snapshot already was accepted then, so its update is planned without
+ * asking again. The answer to an `ask` is kept in the map (`hepta record` event `up-decision`): `skip` leaves
+ * the card out, `this-wiki` makes it a source of this wiki. `plan-up` does not ask again while the answer stays
+ * in the map and the card is not snapshotted yet.
  *
- * Giving `--whiteboards` replaces the stored tree, unless the list is partial (its last page says that
- * more whiteboards follow): a partial list would drop the boards it lacks, so it only adds a warning.
+ * Giving `--whiteboards` stores the tree in the map, but only when it differs from the stored one. A partial
+ * list (its last page says that more whiteboards follow) would drop the boards it lacks, so it only adds a warning.
  */
 import { readFileSync } from "node:fs"
 import { parseArgs, parseNowOption } from "./args"
+import { UUID_PATTERN } from "@/lib/wiki-config/types"
 import { type CardMap, loadCardMap, saveCardMap } from "./card-map"
 import { type CommandResult, isDirectory } from "./io"
 import { readHeptabaseConfig } from "./mirror-pages"
-import {
-  type CardRef,
-  joinListWhiteboards,
-  parseListCards,
-  parsePagingTrailer,
-  type WhiteboardNode,
-} from "./parse-mcp"
+import { type CardRef, parseListCards, type WhiteboardNode } from "./parse-mcp"
+import { readWhiteboardList, storeWhiteboardList, type WhiteboardList } from "./whiteboard-tree"
 
 /** What the skill does for a card. */
 export type UpAction =
   | { op: "snapshot"; cardId: string; title: string; cardType: string; whiteboards: { id: string; title: string }[] }
-  | { op: "ask"; cardId: string; title: string; reason: "two-roots" | "no-root" }
+  | { op: "ask"; cardId: string; title: string; reason: "two-wikis" | "no-root" }
   | { op: "download-pdf"; cardId: string; title: string }
 
 const OPTION_SPEC = {
@@ -68,21 +69,18 @@ export function planUp(args: string[]): CommandResult {
   if (problems.length > 0 || !config || !map || !now) return { ok: false, problems }
 
   const warnings: string[] = []
-  if (tree?.partial) {
-    const stored = map.whiteboards_cache.items.length
-    warnings.push(`the whiteboard list is partial (${tree.partial}), so the stored tree (${stored} whiteboards) was not changed`)
-  } else if (tree) {
-    map.whiteboards_cache = { updated_at: now.toISOString(), items: tree.nodes }
-    saveCardMap(project, map)
+  if (tree) {
+    if (storeWhiteboardList(map, tree, now, warnings)) saveCardMap(project, map)
   } else if (map.whiteboards_cache.items.length === 0) {
     warnings.push("the whiteboard tree is empty; pass --whiteboards")
   }
 
   const parents = parentIndex(map.whiteboards_cache.items)
   const roots = new Set(config.roots)
+  const otherRoots = new Set(config.other_wiki_roots)
   const mirrorIds = new Set(Object.values(map.pages).map((entry) => entry.card_id))
   const decisions = map.up_decisions ?? {}
-  const skipped = { archived: 0, mirror: 0, unchanged: 0, declined: 0 }
+  const skipped = { archived: 0, mirror: 0, "mirror-tag": 0, unchanged: 0, declined: 0, "other-wiki": 0 }
   const actions: UpAction[] = []
 
   for (const card of cards) {
@@ -100,21 +98,27 @@ export function planUp(args: string[]): CommandResult {
       skipped.archived += 1
       continue
     }
+    if (card.tagIds.includes(config.tags.mirror)) {
+      skipped["mirror-tag"] += 1
+      continue
+    }
     if (!recorded) {
       const decision = Object.prototype.hasOwnProperty.call(decisions, card.id) ? decisions[card.id] : undefined
       if (decision === "skip") {
         skipped.declined += 1
         continue
       }
-      // The first root each whiteboard reaches; two whiteboards under one root are one root. The root the user
-      // chose counts as the only root, unless heptabase.yaml does not list it any more.
-      const reached =
-        decision !== undefined && roots.has(decision)
-          ? new Set([decision])
-          : new Set(chains.flatMap((chain) => chain.find((boardId) => roots.has(boardId)) ?? []))
-      if (reached.size !== 1) {
-        actions.push({ op: "ask", cardId: card.id, title: card.title, reason: reached.size === 0 ? "no-root" : "two-roots" })
-        continue
+      // The user's answer `this-wiki` settles it. So does a root id from an older answer.
+      if (decision !== "this-wiki" && !(decision !== undefined && UUID_PATTERN.test(decision))) {
+        const wikis = wikisOf(chains, roots, otherRoots)
+        if (wikis.other && !wikis.thisWiki) {
+          skipped["other-wiki"] += 1
+          continue
+        }
+        if (wikis.other || !wikis.thisWiki) {
+          actions.push({ op: "ask", cardId: card.id, title: card.title, reason: wikis.other ? "two-wikis" : "no-root" })
+          continue
+        }
       }
     }
     actions.push(
@@ -124,6 +128,25 @@ export function planUp(args: string[]): CommandResult {
     )
   }
   return { ok: true, actions, skipped, warnings }
+}
+
+/**
+ * Which wikis a card is under. For each whiteboard chain (nearest first) the first root of this wiki or of another wiki
+ * decides, so a root of this wiki inside a root of another wiki counts for this wiki.
+ */
+function wikisOf(
+  chains: readonly (readonly string[])[],
+  roots: ReadonlySet<string>,
+  otherRoots: ReadonlySet<string>,
+): { thisWiki: boolean; other: boolean } {
+  const wikis = { thisWiki: false, other: false }
+  for (const chain of chains) {
+    const nearest = chain.find((boardId) => roots.has(boardId) || otherRoots.has(boardId))
+    if (nearest === undefined) continue
+    if (roots.has(nearest)) wikis.thisWiki = true
+    else wikis.other = true
+  }
+  return wikis
 }
 
 /** The cards of the `list_cards` files, in order of first appearance. A later file wins for a card that two files list. */
@@ -143,7 +166,7 @@ function readCards(paths: readonly string[], problems: string[]): CardRef[] {
 }
 
 /** The whiteboards of the `list_whiteboards` files, joined. `partial` says so when the last page is not the end. */
-function readTree(paths: readonly string[], problems: string[]): { nodes: WhiteboardNode[]; partial: string | null } | null {
+function readTree(paths: readonly string[], problems: string[]): WhiteboardList | null {
   const pages: string[] = []
   for (const path of paths) {
     try {
@@ -153,13 +176,12 @@ function readTree(paths: readonly string[], problems: string[]): { nodes: Whiteb
     }
   }
   if (pages.length < paths.length) return null
-  const nodes = joinListWhiteboards(pages)
-  if (nodes.length === 0) {
+  const list = readWhiteboardList(pages)
+  if (list.nodes.length === 0) {
     problems.push("--whiteboards file lists no whiteboards")
     return null
   }
-  const trailer = parsePagingTrailer(pages[pages.length - 1])
-  return { nodes, partial: trailer ? `showing ${trailer.shown[0]}-${trailer.shown[1]} of ${trailer.total}` : null }
+  return list
 }
 
 /** A whiteboard id to the id of its parent. A top-level whiteboard has `null`. */
