@@ -18,6 +18,7 @@
 - Semantic lint findings are review items (`contradiction`, `duplicate`, `suggestion`, or `confirm`), never automatic edits.
 - Semantic lint marker: `.llm-wiki/semantic-lint.json` `{ "commit": "<sha>", "at": "<iso>" }`. "Changed domains" = domains of pages changed between that commit and `HEAD`, plus their `also` domains.
 - Recut commit subject: `recut: <operation> <from> → <to> (<N> pages)`.
+- Sub-project 2 ruling T18: add `instances`, `lenses`, `also_from` to `FIELDS_TO_UNION` in `src/lib/dedup.ts` (Task 1, with a test that a plain page is unchanged), so a confirmed duplicate merge keeps mechanism instances and source entry points.
 - Commit trailer: your session's Co-Authored-By line plus `Claude-Session: https://claude.ai/code/session_013yG6txX1fFsHyk4VQiasu7`.
 - Verification: `npm run test:mocks`, `npm run typecheck`, `npm run build:wiki-tool`.
 
