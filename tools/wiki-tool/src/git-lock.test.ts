@@ -4,11 +4,12 @@
  * The app (Rust), wiki-undo, and wiki-tool all use this one file, so the file
  * name, the JSON shape, and the wait and stale rules are part of the contract.
  */
+import { spawnSync } from "node:child_process"
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { withGitLock } from "./git-lock"
+import { removeLockIfUnchanged, withGitLock } from "./git-lock"
 
 const BUSY = "another wiki tool is using git"
 const MINUTE = 60_000
@@ -36,8 +37,16 @@ function writeLock(project: string, text: string): void {
   writeFileSync(lockPath(project), text)
 }
 
-function lockText(tool: string, startedAt: Date): string {
-  return JSON.stringify({ pid: 4242, started_at: startedAt.toISOString(), tool })
+/** The text of a lock file. The pid defaults to this process, which is alive. */
+function lockText(tool: string, startedAt: Date, pid: number = process.pid): string {
+  return JSON.stringify({ pid, started_at: startedAt.toISOString(), tool })
+}
+
+/** The pid of a process that has already exited on this machine. */
+function deadPid(): number {
+  const child = spawnSync(process.execPath, ["-e", "0"])
+  if (typeof child.pid !== "number") throw new Error("could not start a process")
+  return child.pid
 }
 
 function sleep(ms: number): Promise<void> {
@@ -170,11 +179,47 @@ describe("withGitLock", () => {
     await expect(withGitLock(project, () => "ran", { waitMs: 300 })).rejects.toThrow(BUSY)
   })
 
+  it("replaces at once a fresh lock whose process is gone", async () => {
+    const project = makeProject()
+    writeLock(project, lockText("app", new Date(), deadPid()))
+
+    const started = Date.now()
+    expect(await withGitLock(project, () => "ran")).toBe("ran")
+
+    expect(Date.now() - started).toBeLessThan(1000)
+    expect(existsSync(lockPath(project))).toBe(false)
+  })
+
+  it("keeps a fresh lock whose process is alive", async () => {
+    const project = makeProject()
+    writeLock(project, lockText("app", new Date(), process.pid))
+
+    await expect(withGitLock(project, () => "ran", { waitMs: 300 })).rejects.toThrow(BUSY)
+    expect(JSON.parse(readFileSync(lockPath(project), "utf8")).tool).toBe("app")
+  })
+
+  it("judges a lock without a usable pid by its age only", async () => {
+    for (const pid of [undefined, 0, -5, 1.5, "abc"]) {
+      const project = makeProject()
+      writeLock(project, JSON.stringify({ pid, started_at: new Date().toISOString(), tool: "app" }))
+      await expect(withGitLock(project, () => "ran", { waitMs: 250 })).rejects.toThrow(BUSY)
+    }
+  })
+
   it("takes the stale limit from the options", async () => {
     const project = makeProject()
     writeLock(project, lockText("app", new Date(Date.now() - 2000)))
 
     expect(await withGitLock(project, () => "ran", { staleMs: 1000 })).toBe("ran")
+  })
+
+  it("does not create a project folder that is missing", async () => {
+    const parent = makeProject()
+    const missing = join(parent, "no-such-project")
+
+    await expect(withGitLock(missing, () => "ran")).rejects.toThrow(/not found/)
+
+    expect(existsSync(missing)).toBe(false)
   })
 
   it("lock released after a throw", async () => {
@@ -205,5 +250,34 @@ describe("withGitLock", () => {
       writeLock(project, lockText("wiki-undo", new Date()))
     })
     expect(JSON.parse(readFileSync(lockPath(project), "utf8")).tool).toBe("wiki-undo")
+  })
+})
+
+describe("removeLockIfUnchanged", () => {
+  it("removes the lock when it still holds the text that was judged stale", () => {
+    const project = makeProject()
+    const stale = lockText("app", new Date(Date.now() - 11 * MINUTE))
+    writeLock(project, stale)
+
+    expect(removeLockIfUnchanged(lockPath(project), stale)).toBe(true)
+
+    expect(existsSync(lockPath(project))).toBe(false)
+  })
+
+  it("leaves a lock that another tool took after the judgment", () => {
+    const project = makeProject()
+    const judged = lockText("app", new Date(Date.now() - 11 * MINUTE))
+    const fresh = lockText("wiki-undo", new Date())
+    writeLock(project, fresh)
+
+    // The caller is told to look again; the new lock is not removed.
+    expect(removeLockIfUnchanged(lockPath(project), judged)).toBe(true)
+
+    expect(readFileSync(lockPath(project), "utf8")).toBe(fresh)
+  })
+
+  it("reports a lock that is already gone", () => {
+    const project = makeProject()
+    expect(removeLockIfUnchanged(lockPath(project), "anything")).toBe(true)
   })
 })

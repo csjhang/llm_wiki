@@ -340,8 +340,52 @@ fn lock_age(path: &Path, text: &str) -> Option<Duration> {
     )
 }
 
-/// Remove the lock when it is stale. Returns true when the caller should try to
-/// take the lock again right away: the lock was removed, or it is already gone.
+/// Whether the process with this pid is not running on this machine. Only
+/// Linux can say (through `/proc`); elsewhere the answer is "unknown", which
+/// counts as running. A pid is meaningful only on the machine and in the
+/// process namespace that wrote it.
+#[cfg(target_os = "linux")]
+fn process_is_gone(pid: u64) -> bool {
+    // Without a mounted /proc nothing can be said about any pid.
+    pid >= 1
+        && Path::new("/proc/self").exists()
+        && !Path::new("/proc").join(pid.to_string()).exists()
+}
+
+#[cfg(not(target_os = "linux"))]
+fn process_is_gone(_pid: u64) -> bool {
+    false
+}
+
+/// True when the lock names a process that is not running. A lock without a
+/// usable pid says nothing.
+fn holder_is_gone(text: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|json| json.get("pid")?.as_u64())
+        .is_some_and(process_is_gone)
+}
+
+/// Remove the lock only if it still holds `judged`, the text that was judged
+/// stale. Another tool may have replaced the stale lock with its own since the
+/// judgment, and that new lock must stay. Returns true when the caller should
+/// try to take the lock again right away: the lock was removed, is gone, or was
+/// replaced.
+fn remove_lock_if_unchanged(path: &Path, judged: &str) -> bool {
+    match read_lock_text(path) {
+        None => return !path.exists(),
+        Some(current) if current != judged => return true,
+        Some(_) => {}
+    }
+    match fs::remove_file(path) {
+        Ok(()) => true,
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
+/// Remove the lock when it is stale: older than `stale_after`, or held by a
+/// process that is gone. Returns true when the caller should try to take the
+/// lock again right away.
 fn clear_stale_lock(path: &Path, stale_after: Duration) -> bool {
     let Some(text) = read_lock_text(path) else {
         return !path.exists();
@@ -349,18 +393,10 @@ fn clear_stale_lock(path: &Path, stale_after: Duration) -> bool {
     let Some(age) = lock_age(path, &text) else {
         return true;
     };
-    if age <= stale_after {
+    if age <= stale_after && !holder_is_gone(&text) {
         return false;
     }
-    // Look again right before removing: another tool may have replaced the
-    // stale lock with its own since the read above.
-    if read_lock_text(path).as_deref() != Some(text.as_str()) {
-        return true;
-    }
-    match fs::remove_file(path) {
-        Ok(()) => true,
-        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-    }
+    remove_lock_if_unchanged(path, &text)
 }
 
 /// `create_new` found the lock taken. On Windows a lock that is being deleted
@@ -612,8 +648,8 @@ fn untrack_index_name(project_path: &str) -> String {
 /// temporary index from HEAD so it holds nothing else: no staged change of the
 /// user and nothing outside a nested project folder. Then drop the files from
 /// the real index (they stay on disk). Returns true when it made that commit.
-/// While a merge, rebase, cherry-pick, or revert is in progress it refuses
-/// instead: a commit made then would end or move that operation. The temporary
+/// While a merge, rebase, cherry-pick, or revert is in progress it refuses to
+/// make that commit: a commit made then would end or move that operation. The temporary
 /// index is named after a hash of the project path, so two projects in one
 /// repository never share it.
 fn untrack_llm_wiki(project_path: &str, envs: &[(&str, &str)]) -> Result<bool, String> {
@@ -631,7 +667,7 @@ fn untrack_llm_wiki(project_path: &str, envs: &[(&str, &str)]) -> Result<bool, S
         .trim()
         .is_empty();
 
-    let git_dir = if in_index || in_head {
+    let git_dir = if in_head {
         let git_dir = run_git_ok(project_path, &["rev-parse", "--absolute-git-dir"], envs)?
             .stdout
             .trim()
@@ -639,6 +675,7 @@ fn untrack_llm_wiki(project_path: &str, envs: &[(&str, &str)]) -> Result<bool, S
         // A commit made now would join the operation instead of standing
         // alone: in a merge it becomes the merge commit, in a rebase or a
         // cherry-pick it moves the sequence along. Leave it to the user.
+        // (Dropping the files from the index alone makes no commit.)
         if let Some(operation) = operation_in_progress(Path::new(&git_dir)) {
             return Err(format!(
                 "Cannot stop tracking .llm-wiki while a {operation} is in progress. \
@@ -2520,13 +2557,30 @@ mod tests {
     }
 
     /// Put a lock file in the shape every tool writes, as another tool would.
+    /// The holder is this test process, which is alive.
     fn write_lock(dir: &Path, tool: &str, started_at: DateTime<Utc>) {
+        write_lock_of(dir, tool, started_at, std::process::id());
+    }
+
+    fn write_lock_of(dir: &Path, tool: &str, started_at: DateTime<Utc>, pid: u32) {
         let text = serde_json::json!({
-            "pid": 4242,
+            "pid": pid,
             "started_at": started_at.to_rfc3339_opts(SecondsFormat::Millis, true),
             "tool": tool,
         });
         write(dir, ".llm-wiki/git.lock", &text.to_string());
+    }
+
+    /// The pid of a process that has already exited.
+    fn exited_pid() -> u32 {
+        let mut child = Command::new("git")
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        child.wait().unwrap();
+        pid
     }
 
     /// Run `work` with the lock wait set to `wait_ms`, so a test does not wait 30 s.
@@ -2634,6 +2688,75 @@ mod tests {
         write(&dir, "wiki/a.md", "a edited again");
         let result = with_lock_wait(300, || git_commit_all_inner(&path_str(&dir), "x"));
         assert_eq!(result, Err("another wiki tool is using git".to_string()));
+    }
+
+    // Needs /proc to look a process up; elsewhere the check is skipped.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_fresh_lock_whose_process_is_gone_is_replaced_at_once() {
+        let dir = repo_with_a_page_to_commit();
+        write_lock_of(&dir, "wiki-tool", Utc::now(), exited_pid());
+
+        let started = Instant::now();
+        let sha = git_commit_all_inner(&path_str(&dir), "ingest: a (1 pages)").unwrap();
+
+        assert!(sha.is_some());
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!lock_path(&dir).exists());
+    }
+
+    #[test]
+    fn a_fresh_lock_whose_process_is_alive_is_kept() {
+        let dir = repo_with_a_page_to_commit();
+        write_lock_of(&dir, "wiki-tool", Utc::now(), std::process::id());
+
+        let result = with_lock_wait(300, || git_commit_all_inner(&path_str(&dir), "x"));
+
+        assert_eq!(result, Err("another wiki tool is using git".to_string()));
+        assert!(lock_path(&dir).exists());
+    }
+
+    #[test]
+    fn a_lock_without_a_usable_pid_is_judged_by_its_age_only() {
+        for pid in [
+            serde_json::json!(null),
+            serde_json::json!(0),
+            serde_json::json!(-5),
+            serde_json::json!(1.5),
+            serde_json::json!("abc"),
+        ] {
+            let dir = repo_with_a_page_to_commit();
+            let text = serde_json::json!({
+                "pid": pid,
+                "started_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                "tool": "wiki-tool",
+            });
+            write(&dir, ".llm-wiki/git.lock", &text.to_string());
+
+            let result = with_lock_wait(250, || git_commit_all_inner(&path_str(&dir), "x"));
+
+            assert_eq!(result, Err("another wiki tool is using git".to_string()));
+        }
+    }
+
+    #[test]
+    fn a_stale_lock_is_removed_only_while_it_holds_the_text_that_was_judged() {
+        let dir = temp_dir();
+        let judged = r#"{"pid":1,"started_at":"2020-01-01T00:00:00.000Z","tool":"app"}"#;
+        let newer = r#"{"pid":2,"started_at":"2099-01-01T00:00:00.000Z","tool":"wiki-undo"}"#;
+
+        // Another tool replaced the stale lock after it was judged: leave the new one.
+        write(&dir, ".llm-wiki/git.lock", newer);
+        assert!(remove_lock_if_unchanged(&lock_path(&dir), judged));
+        assert_eq!(read(&dir, ".llm-wiki/git.lock"), newer);
+
+        // Unchanged: removed.
+        write(&dir, ".llm-wiki/git.lock", judged);
+        assert!(remove_lock_if_unchanged(&lock_path(&dir), judged));
+        assert!(!lock_path(&dir).exists());
+
+        // Already gone: nothing to do, try again.
+        assert!(remove_lock_if_unchanged(&lock_path(&dir), judged));
     }
 
     #[test]
@@ -2870,6 +2993,31 @@ mod tests {
                 git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).contains(".llm-wiki/secret")
             );
         }
+    }
+
+    #[test]
+    fn a_merge_in_progress_does_not_block_dropping_a_staged_only_llm_wiki_from_the_index() {
+        // HEAD has no `.llm-wiki`; only the index does. The untracking then makes no
+        // commit (it only runs `git rm --cached`), so the merge is not in its way.
+        let dir = repo_with_committed_wiki();
+        write(&dir, ".llm-wiki/secret", "v1");
+        git(&dir, &["add", "-f", ".llm-wiki/secret"]);
+        fs::write(
+            dir.join(".git/MERGE_HEAD"),
+            git(&dir, &["rev-parse", "HEAD"]),
+        )
+        .unwrap();
+        write(&dir, "wiki/a.md", "a edited");
+
+        let error =
+            git_commit_paths_inner(&path_str(&dir), &strings(&["wiki/a.md"]), "x").unwrap_err();
+
+        assert!(
+            !error.contains("stop tracking"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(git(&dir, &["ls-files", ".llm-wiki"]).trim(), "");
+        assert!(dir.join(".llm-wiki/secret").exists());
     }
 
     #[test]

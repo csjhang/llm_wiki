@@ -7,14 +7,15 @@
  * that git does not have, and never commits `.llm-wiki/`. It does not write
  * `.gitignore`: that file is committed only when the caller lists it.
  *
- * It does not take the git lock. The caller wraps the call:
- *   await withGitLock(project, () => commitPaths(project, paths, message))
+ * commitPaths does not take the git lock (it is synchronous). Callers use
+ * commitPathsLocked, which holds `.llm-wiki/git.lock` around it.
  *
  * Runs `git` with execFileSync, so no shell reads the paths or the message.
  */
 import { execFileSync } from "node:child_process"
 import { existsSync } from "node:fs"
 import { join, resolve } from "node:path"
+import { type GitLockOptions, withGitLock } from "./git-lock"
 
 export type CommitResult = { ok: true; sha: string | null } | { ok: false; problem: string }
 
@@ -121,7 +122,13 @@ function changedFiles(project: string, paths: string[]): { toAdd: string[]; chan
   const literal = ["--literal-pathspecs"]
   const untracked = git(project, [...literal, "ls-files", "-z", "--others", "--exclude-standard", "--", ...paths])
   const edited = git(project, [...literal, "ls-files", "-z", "--modified", "--deleted", "--", ...paths])
-  const staged = git(project, [...literal, "diff", "--cached", "--name-only", "--relative", "-z", "--", ...paths])
+  // `--no-renames`: a staged rename must list both names. With rename detection
+  // only the new name appears, and the commit would leave the deletion staged.
+  const staged = git(project, [
+    ...literal,
+    ...["diff", "--cached", "--no-renames", "--name-only", "--relative", "-z"],
+    ...["--", ...paths],
+  ])
   const toAdd = [...new Set([...nulEntries(untracked), ...nulEntries(edited)])]
   return { toAdd, changed: [...new Set([...toAdd, ...nulEntries(staged)])] }
 }
@@ -160,7 +167,8 @@ function commitChecked(project: string, paths: string[], message: string): Commi
  * and nothing else. Returns the new commit's sha, or `sha: null` when the paths
  * had nothing to commit. Returns `ok: false` with a problem text for a path that
  * is unsafe, for a project that is not a git repository, and while a merge,
- * rebase, cherry-pick, or revert is in progress. Take the git lock around the call.
+ * rebase, cherry-pick, or revert is in progress. Does not take the git lock:
+ * use commitPathsLocked.
  */
 export function commitPaths(projectPath: string, paths: string[], message: string): CommitResult {
   const checked = checkPaths(paths)
@@ -176,4 +184,19 @@ export function commitPaths(projectPath: string, paths: string[], message: strin
   } catch (error) {
     return { ok: false, problem: error instanceof Error ? error.message : String(error) }
   }
+}
+
+/**
+ * commitPaths under the git lock of the project (`.llm-wiki/git.lock`): the
+ * call to use. Waits for another tool to let go (30 s by default), then rejects
+ * with "another wiki tool is using git". A refusal of commitPaths comes back as
+ * its `{ ok: false, problem }` result, and the lock is released either way.
+ */
+export function commitPathsLocked(
+  projectPath: string,
+  paths: string[],
+  message: string,
+  lockOptions?: GitLockOptions,
+): Promise<CommitResult> {
+  return withGitLock(projectPath, () => commitPaths(projectPath, paths, message), lockOptions)
 }

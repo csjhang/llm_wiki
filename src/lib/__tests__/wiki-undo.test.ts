@@ -665,9 +665,10 @@ describe("revertAction git lock", () => {
     return join(repo, ".llm-wiki", "git.lock")
   }
 
-  function writeLock(repo: string, tool: string, startedAt: Date): void {
+  /** The pid defaults to this process, which is alive. */
+  function writeLock(repo: string, tool: string, startedAt: Date, pid: number = process.pid): void {
     mkdirSync(join(repo, ".llm-wiki"), { recursive: true })
-    writeFileSync(lockFile(repo), JSON.stringify({ pid: 4242, started_at: startedAt.toISOString(), tool }))
+    writeFileSync(lockFile(repo), JSON.stringify({ pid, started_at: startedAt.toISOString(), tool }))
   }
 
   /** A repo with one undoable ingest commit. */
@@ -721,6 +722,18 @@ describe("revertAction git lock", () => {
 
     expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha)
 
+    expect(existsSync(lockFile(repo))).toBe(false)
+  })
+
+  it("replaces at once a fresh lock whose process is gone", () => {
+    const { repo, sha } = makeUndoableRepo()
+    const exited = spawnSync(process.execPath, ["-e", "0"])
+    writeLock(repo, "app", new Date(), exited.pid)
+
+    const started = Date.now()
+    expectUndone(undo.revertAction(repo, sha, "2026-02-03"), repo, sha)
+
+    expect(Date.now() - started).toBeLessThan(2000)
     expect(existsSync(lockFile(repo))).toBe(false)
   })
 

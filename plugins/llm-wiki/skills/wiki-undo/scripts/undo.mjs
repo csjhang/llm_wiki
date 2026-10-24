@@ -49,7 +49,8 @@ const RECORD_SEPARATOR = "\x1e"
 // The same lock as tools/wiki-tool/src/git-lock.ts and src-tauri/src/commands/git_history.rs:
 // the file `<project>/.llm-wiki/git.lock`, created exclusively, holding
 // `{ "pid", "started_at", "tool" }`. Wait up to 30 s, polling every 200 ms. A
-// lock older than 10 minutes is left over and is replaced. This script has no
+// lock is left over, and is replaced, when it is older than 10 minutes or when
+// its pid is not a running process on this machine. This script has no
 // dependency and runs without a build step, so it carries its own small copy
 // instead of importing the wiki-tool one. The copy is synchronous because
 // revertAction is. Change the three copies together.
@@ -96,22 +97,53 @@ function lockAgeMs(path, text) {
   }
 }
 
-/** Remove the lock when it is stale. Returns true when the caller should try to take it again right away. */
-function clearStaleLock(path, staleMs) {
-  const text = readLockText(path)
-  if (text === null) return true
-  const age = lockAgeMs(path, text)
-  if (age === null) return true
-  if (age <= staleMs) return false
-  // Look again right before removing: another tool may have replaced the stale
-  // lock with its own since the read above.
-  if (readLockText(path) !== text) return true
+/**
+ * True when the lock names a process that does not run on this machine. A lock
+ * without a usable pid says nothing, and EPERM means the process exists.
+ */
+function holderIsGone(text) {
+  let pid
+  try {
+    pid = JSON.parse(text)?.pid
+  } catch {
+    return false
+  }
+  // Signal 0 only checks that the process exists. Pid 0 would mean the whole process group.
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid < 1) return false
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch (error) {
+    return error?.code === "ESRCH"
+  }
+}
+
+/**
+ * Remove the lock only if it still holds `judged`, the text that was judged
+ * stale. Another tool may have replaced the stale lock with its own since the
+ * judgment, and that new lock must stay. Returns true when the caller should try
+ * to take the lock again right away: the lock was removed, is gone, or was replaced.
+ */
+function removeLockIfUnchanged(path, judged) {
+  const current = readLockText(path)
+  if (current === null) return true
+  if (current !== judged) return true
   try {
     unlinkSync(path)
     return true
   } catch (error) {
     return error?.code === "ENOENT"
   }
+}
+
+/** Remove the lock when it is stale. Returns true when the caller should try to take it again right away. */
+function clearStaleLock(path, staleMs) {
+  const text = readLockText(path)
+  if (text === null) return true
+  const age = lockAgeMs(path, text)
+  if (age === null) return true
+  if (age <= staleMs && !holderIsGone(text)) return false
+  return removeLockIfUnchanged(path, text)
 }
 
 /** Create the lock file. Returns what was written, or null when another tool holds the lock. */

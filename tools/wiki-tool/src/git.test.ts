@@ -10,7 +10,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
-import { commitPaths } from "./git"
+import { commitPaths, commitPathsLocked } from "./git"
 
 const tempDirs: string[] = []
 
@@ -64,7 +64,7 @@ function commitAll(repo: string, subject: string, files: Record<string, string>)
 
 /** The files changed by HEAD, sorted. */
 function headFiles(repo: string): string[] {
-  return git(repo, "show", "--name-only", "--format=", "HEAD")
+  return git(repo, "show", "--name-only", "--no-renames", "--format=", "HEAD")
     .split("\n")
     .filter((line) => line !== "")
     .sort()
@@ -154,6 +154,20 @@ describe("commitPaths", () => {
     expectSha(commitPaths(repo, ["wiki/media/s/"], "ingest: media"), repo)
 
     expect(headFiles(repo)).toEqual(["wiki/media/s/1.png", "wiki/media/s/deep/2.png"])
+  })
+
+  it("commits a staged rename inside the listed paths as a delete and an add", () => {
+    const repo = makeCommittedRepo()
+    commitAll(repo, "chore: page", { "wiki/old/c.md": "page c with enough text to count as a rename\n" })
+    mkdirSync(join(repo, "wiki/new"))
+    git(repo, "mv", "wiki/old/c.md", "wiki/new/c.md")
+    expect(git(repo, "diff", "--cached", "--name-status").trim()).toMatch(/^R/)
+
+    expectSha(commitPaths(repo, ["wiki/old", "wiki/new"], "recut: move c"), repo)
+
+    expect(headFiles(repo)).toEqual(["wiki/new/c.md", "wiki/old/c.md"])
+    expect(git(repo, "ls-tree", "-r", "--name-only", "HEAD")).not.toContain("wiki/old/c.md")
+    expect(git(repo, "status", "--porcelain").trim()).toBe("")
   })
 
   it("commits the first commit of a repo that has none", () => {
@@ -413,5 +427,67 @@ describe("commitPaths", () => {
       const { repo } = commitWithConfig({})
       expect(readFileSync(join(repo, ".git", "config"), "utf8")).not.toContain("llm-wiki@localhost")
     })
+  })
+})
+
+describe("commitPathsLocked", () => {
+  function writeForeignLock(repo: string, startedAt = new Date()): string {
+    const file = join(repo, ".llm-wiki", "git.lock")
+    mkdirSync(dirname(file), { recursive: true })
+    writeFileSync(file, JSON.stringify({ pid: process.pid, started_at: startedAt.toISOString(), tool: "app" }))
+    return file
+  }
+
+  it("commits under the lock and releases it", async () => {
+    const repo = makeCommittedRepo()
+    write(repo, "wiki/a.md", "a edited\n")
+    // post-commit runs inside git, so it sees whether the lock file exists.
+    const hook = join(repo, ".git/hooks/post-commit")
+    mkdirSync(dirname(hook), { recursive: true })
+    writeFileSync(hook, "#!/bin/sh\ncp .llm-wiki/git.lock .git/lock-seen-by-commit\n")
+    chmodSync(hook, 0o755)
+
+    const result = await commitPathsLocked(repo, ["wiki/a.md"], "ingest: a")
+
+    expectSha(result, repo)
+    expect(JSON.parse(readFileSync(join(repo, ".git/lock-seen-by-commit"), "utf8")).tool).toBe("wiki-tool")
+    expect(existsSync(join(repo, ".llm-wiki", "git.lock"))).toBe(false)
+    expect(headFiles(repo)).toEqual(["wiki/a.md"])
+  })
+
+  it("waits for another tool, then commits", async () => {
+    const repo = makeCommittedRepo()
+    write(repo, "wiki/a.md", "a edited\n")
+    const file = writeForeignLock(repo)
+    setTimeout(() => rmSync(file), 300)
+
+    const started = Date.now()
+    const result = await commitPathsLocked(repo, ["wiki/a.md"], "ingest: a")
+
+    expectSha(result, repo)
+    expect(Date.now() - started).toBeGreaterThanOrEqual(250)
+  })
+
+  it("rejects with the busy message and commits nothing while another tool keeps the lock", async () => {
+    const repo = makeCommittedRepo()
+    write(repo, "wiki/a.md", "a edited\n")
+    const file = writeForeignLock(repo)
+    const before = commitCount(repo)
+
+    await expect(commitPathsLocked(repo, ["wiki/a.md"], "ingest: a", { waitMs: 300 })).rejects.toThrow(
+      "another wiki tool is using git",
+    )
+
+    expect(commitCount(repo)).toBe(before)
+    expect(existsSync(file)).toBe(true)
+  })
+
+  it("returns a refusal as a result and still releases the lock", async () => {
+    const repo = makeCommittedRepo()
+
+    const result = await commitPathsLocked(repo, [".llm-wiki/secret"], "ingest: a")
+
+    expectProblem(result, /never committed/)
+    expect(existsSync(join(repo, ".llm-wiki", "git.lock"))).toBe(false)
   })
 })

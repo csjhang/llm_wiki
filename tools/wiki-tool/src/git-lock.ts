@@ -6,8 +6,9 @@
  * commands at the same time. The file is created exclusively and holds
  * `{ "pid": <n>, "started_at": "<iso>", "tool": "<app|wiki-tool|wiki-undo>" }`.
  * A second tool polls every 200 ms for up to 30 s, then gives up with
- * "another wiki tool is using git". A lock older than 10 minutes belongs to a
- * tool that died: it is removed and taken over.
+ * "another wiki tool is using git". A lock is left over, and is removed and
+ * taken over, when it is older than 10 minutes or when its `pid` is not a
+ * running process on this machine.
  *
  * The same rules are in `src-tauri/src/commands/git_history.rs` and in
  * `plugins/llm-wiki/skills/wiki-undo/scripts/undo.mjs`. Change all three together.
@@ -15,6 +16,7 @@
  */
 import { closeSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeSync } from "node:fs"
 import { join } from "node:path"
+import { isDirectory } from "./io"
 
 /** The error message when another tool keeps the lock for the whole wait. */
 export const GIT_LOCK_BUSY_MESSAGE = "another wiki tool is using git"
@@ -62,22 +64,55 @@ function lockAgeMs(path: string, text: string): number | null {
   }
 }
 
-/** Remove the lock when it is stale. Returns true when the caller should try to take it again right away. */
-function clearStaleLock(path: string, staleMs: number): boolean {
-  const text = readText(path)
-  if (text === null) return true
-  const age = lockAgeMs(path, text)
-  if (age === null) return true
-  if (age <= staleMs) return false
-  // Look again right before removing: another tool may have replaced the stale
-  // lock with its own since the read above.
-  if (readText(path) !== text) return true
+/**
+ * True when the lock names a process that does not run on this machine. A lock
+ * without a usable pid says nothing, and `EPERM` means the process exists. The
+ * pid is meaningful only on the machine and in the process namespace that
+ * wrote it.
+ */
+function holderIsGone(text: string): boolean {
+  let pid: unknown
+  try {
+    pid = JSON.parse(text)?.pid
+  } catch {
+    return false
+  }
+  // Signal 0 only checks that the process exists. Pid 0 would mean the whole process group.
+  if (typeof pid !== "number" || !Number.isInteger(pid) || pid < 1) return false
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === "ESRCH"
+  }
+}
+
+/**
+ * Remove the lock only if it still holds `judged`, the text that was judged
+ * stale. Another tool may have replaced the stale lock with its own since the
+ * judgment, and that new lock must stay. Returns true when the caller should try
+ * to take the lock again right away: the lock was removed, is gone, or was replaced.
+ */
+export function removeLockIfUnchanged(path: string, judged: string): boolean {
+  const current = readText(path)
+  if (current === null) return true
+  if (current !== judged) return true
   try {
     unlinkSync(path)
     return true
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "ENOENT"
   }
+}
+
+/** Remove the lock when it is stale. Returns true when the caller should try to take it again right away. */
+function clearStaleLock(path: string, staleMs: number): boolean {
+  const text = readText(path)
+  if (text === null) return true
+  const age = lockAgeMs(path, text)
+  if (age === null) return true
+  if (age <= staleMs && !holderIsGone(text)) return false
+  return removeLockIfUnchanged(path, text)
 }
 
 /** Create the lock file. Returns what was written, or null when another tool holds the lock. */
@@ -143,6 +178,8 @@ export async function withGitLock<T>(
   work: () => Promise<T> | T,
   opts: GitLockOptions = {},
 ): Promise<T> {
+  // `mkdir -p` below would create a project folder that does not exist.
+  if (!isDirectory(projectPath)) throw new Error(`project folder not found: ${projectPath}`)
   const folder = join(projectPath, LOCK_FOLDER)
   mkdirSync(folder, { recursive: true })
   const path = join(folder, LOCK_FILE)
