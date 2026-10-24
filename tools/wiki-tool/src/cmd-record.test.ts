@@ -10,7 +10,7 @@ import { parseFrontmatter } from "@/lib/frontmatter"
 import { contentHash, loadCardMap, saveCardMap } from "./card-map"
 import { runCli } from "./cli"
 import type { CommandResult } from "./io"
-import { id, makeProject, pageText, removeProjects } from "./test-project"
+import { id, makeProject, pageText, quietMirrorArgs, removeProjects } from "./test-project"
 
 afterEach(removeProjects)
 
@@ -63,14 +63,14 @@ describe("hepta record", () => {
 
     it("computes the content hash when the event has none", async () => {
       const project = makeProject({ [PAGE]: mechanism() })
-      const planned = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW])
+      const planned = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW, ...quietMirrorArgs(project)])
       const [action] = planned.output.actions as { contentHash: string; body: string }[]
       expect(action.contentHash).toMatch(/^[0-9a-f]{64}$/)
 
       await record(project, { type: "created", page: PAGE, cardId: id(21), cardUpdatedAt: NOW })
       expect(loadCardMap(project).pages[PAGE].content_hash).toBe(action.contentHash)
       // The page is in sync, so the next plan has nothing to do.
-      const next = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW])
+      const next = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW, ...quietMirrorArgs(project)])
       expect(next.output.actions).toEqual([])
     })
 
@@ -313,13 +313,13 @@ describe("hepta record", () => {
     it("computes the hash of the page as it is now when the event has none", async () => {
       const project = await createdProject()
       await runCli(["hepta", "record", "--project", project, "--now", NOW, "--event", JSON.stringify({ type: "updated", page: PAGE, cardUpdatedAt: NOW })])
-      const next = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW])
+      const next = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW, ...quietMirrorArgs(project)])
       expect(next.output.actions).toEqual([])
     })
 
     it("makes a retired page active again", async () => {
       const project = await createdProject()
-      await record(project, { type: "retired", page: PAGE })
+      await record(project, { type: "retired", page: PAGE, cardUpdatedAt: NOW })
       await record(project, { type: "updated", page: PAGE, cardUpdatedAt: NOW, contentHash: HASH_B })
       expect(loadCardMap(project).pages[PAGE].status).toBe("active")
     })
@@ -357,31 +357,35 @@ describe("hepta record", () => {
   describe("retired", () => {
     it("marks the page retired", async () => {
       const project = await createdProject()
-      const result = await record(project, { type: "retired", page: PAGE })
+      const result = await record(project, { type: "retired", page: PAGE, cardUpdatedAt: "2026-10-24T08:20:00.000Z" })
       expect(result.exitCode).toBe(0)
       expect(loadCardMap(project).pages[PAGE]).toEqual({
         card_id: id(21),
         content_hash: contentHash("此頁已從 wiki 移除。"),
         last_synced_at: NOW,
-        card_updated_at: "2026-10-24T08:15:35.000Z",
+        card_updated_at: "2026-10-24T08:20:00.000Z",
         placements: [],
         status: "retired",
       })
     })
 
-    it("takes the card time of the event when there is one", async () => {
+    it("needs the card time, like every event that writes to a card", async () => {
       const project = await createdProject()
-      await record(project, { type: "retired", page: PAGE, cardUpdatedAt: "2026-10-24T08:20:00.000Z" })
-      expect(loadCardMap(project).pages[PAGE].card_updated_at).toBe("2026-10-24T08:20:00.000Z")
+      for (const cardUpdatedAt of [undefined, "yesterday"]) {
+        const result = await record(project, { type: "retired", page: PAGE, cardUpdatedAt })
+        expect(result.exitCode).toBe(2)
+        expect(result.output.problems).toEqual([expect.stringContaining("cardUpdatedAt")])
+      }
+      expect(loadCardMap(project).pages[PAGE].status).toBe("active")
     })
 
     it("stops the next plan from retiring the page again", async () => {
       const project = await createdProject()
       rmSync(join(project, PAGE))
-      const planned = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW])
+      const planned = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW, ...quietMirrorArgs(project)])
       expect((planned.output.actions as { op: string }[]).map((action) => action.op)).toEqual(["retire"])
-      await record(project, { type: "retired", page: PAGE })
-      const next = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW])
+      await record(project, { type: "retired", page: PAGE, cardUpdatedAt: NOW })
+      const next = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW, ...quietMirrorArgs(project)])
       expect(next.output.actions).toEqual([])
     })
   })
@@ -532,7 +536,7 @@ describe("hepta record", () => {
       for (const event of [
         { type: "placed", page: PAGE, whiteboardId: id(31) },
         { type: "updated", page: PAGE, cardUpdatedAt: NOW, contentHash: HASH_B },
-        { type: "retired", page: PAGE },
+        { type: "retired", page: PAGE, cardUpdatedAt: NOW },
       ]) {
         await record(project, event)
         sizes.push(readFileSync(join(project, "heptabase-map.json"), "utf8").length)

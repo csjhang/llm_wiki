@@ -82,6 +82,27 @@ function unwrap(text: string): string {
   return body
 }
 
+/**
+ * A description of the `status` of a JSON tool result when it has one and it is not exactly `succeeded`, such as
+ * `failed` or `1`. Null for a result with status `succeeded`, for a result without a `status`, and for text that is
+ * not a JSON object (such as the text of a card). A failed result reads like an empty list, so a command checks this
+ * before it uses the file.
+ */
+export function failedStatus(text: string): string | null {
+  const body = text.replace(/^\uFEFF/, "")
+  if (!body.trimStart().startsWith("{")) return null
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(body)
+  } catch {
+    return null
+  }
+  if (parsed === null || typeof parsed !== "object" || !Object.prototype.hasOwnProperty.call(parsed, "status")) return null
+  const status = (parsed as { status: unknown }).status
+  if (status === "succeeded") return null
+  return typeof status === "string" ? status : JSON.stringify(status)
+}
+
 /** Lines end at a line feed, or at a carriage return plus line feed. A lone carriage return stays in its line. */
 function linesOf(text: string): string[] {
   return unwrap(text).split(/\r?\n/)

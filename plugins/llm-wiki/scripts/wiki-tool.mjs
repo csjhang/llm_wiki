@@ -2530,6 +2530,26 @@ function unwrap(text) {
 	} catch {}
 	return body;
 }
+/**
+* A description of the `status` of a JSON tool result when it has one and it is not exactly `succeeded`, such as
+* `failed` or `1`. Null for a result with status `succeeded`, for a result without a `status`, and for text that is
+* not a JSON object (such as the text of a card). A failed result reads like an empty list, so a command checks this
+* before it uses the file.
+*/
+function failedStatus$1(text) {
+	const body = text.replace(/^\uFEFF/, "");
+	if (!body.trimStart().startsWith("{")) return null;
+	let parsed;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		return null;
+	}
+	if (parsed === null || typeof parsed !== "object" || !Object.prototype.hasOwnProperty.call(parsed, "status")) return null;
+	const status = parsed.status;
+	if (status === "succeeded") return null;
+	return typeof status === "string" ? status : JSON.stringify(status);
+}
 /** Lines end at a line feed, or at a carriage return plus line feed. A lone carriage return stays in its line. */
 function linesOf(text) {
 	return unwrap(text).split(/\r?\n/);
@@ -3699,7 +3719,12 @@ function cardHash(body, properties) {
 * property values, but not the sync date.
 *
 * A mirror card that the user edited is never overwritten: its page gets a `skip-edited`, whether
-* the page changed or not, until `hepta record` saves the edit as feedback. Two safety rules keep a
+* the page changed or not, until `hepta record` saves the edit as feedback. The edit check needs the whole list
+* of the mirror tag, so `--mirror-cards` is required once a card is mapped, and a list that is a failed result or
+* stops before its last page is refused. A card of the map that the list does not hold (taken out of the tag, or
+* deleted) gets no action at all and a problem, so a half-read list never makes a write. Every action that writes
+* to a card names the time the card had when it was planned (`cardUpdatedAt`): the skill checks the card again right
+* before it writes. Two safety rules keep a
 * read error from looking like a deleted wiki: an unreadable `wiki/` folder stops the command, and a
 * plan that would retire most of the cards retires none.
 */
@@ -3711,7 +3736,8 @@ const OPTION_SPEC$3 = {
 	],
 	lists: ["mirror-cards"]
 };
-/** A card counts as edited when it changed this long after the last sync. */
+const NEEDS_MIRROR_LIST = "pass every page of list_cards for the mirror tag with --mirror-cards";
+/** A card counts as edited when it changed this long after the last write that the map recorded. */
 const EDIT_GRACE_MS = 6e4;
 /** A plan that retires this many cards, and more than half of the active ones, is refused. */
 const MASS_RETIRE_MINIMUM = 5;
@@ -3756,7 +3782,9 @@ function planDown(args) {
 		problems.push(error instanceof Error ? error.message : String(error));
 	}
 	const now = parseNowOption(parsed.values.now, problems);
-	const cards = readMirrorCards(parsed.lists["mirror-cards"], problems);
+	const mirrorFiles = parsed.lists["mirror-cards"];
+	if (map && mirrorFiles.length === 0 && Object.values(map.pages).some((entry) => entry.status === "active")) problems.push(NEEDS_MIRROR_LIST);
+	const cards = readMirrorCards(mirrorFiles, problems);
 	let options = null;
 	if (parsed.values.database !== void 0) {
 		const database = readDatabase(parsed.values.database, problems);
@@ -3773,6 +3801,7 @@ function planDown(args) {
 		map,
 		pages,
 		cards,
+		listed: mirrorFiles.length > 0,
 		options,
 		properties: config.heptabase.properties,
 		wikiId: config.wiki.id,
@@ -3785,19 +3814,32 @@ function planDown(args) {
 		problems: plan.problems
 	};
 }
-/** The cards of the `list_cards` files, by id. A later file wins for a card that two files list. */
+/**
+* The cards of the `list_cards` files, by id. A later file wins for a card that two files list. A file that is the
+* result of a failed call, and a last file that still has a next page, are refused: both read like a shorter list.
+*/
 function readMirrorCards(paths, problems) {
 	const cards = /* @__PURE__ */ new Map();
+	let last = null;
 	for (const path of paths) {
 		let text;
 		try {
 			text = readFileSync(path, "utf8");
 		} catch {
 			problems.push(`cannot read --mirror-cards file: ${path}`);
+			last = null;
+			continue;
+		}
+		last = text;
+		const status = failedStatus$1(text);
+		if (status !== null) {
+			problems.push(`--mirror-cards file ${path} is the result of a call that did not succeed (status: ${status})`);
 			continue;
 		}
 		for (const card of parseListCards(text)) cards.set(card.id, card);
 	}
+	const trailer = last === null ? null : parsePagingTrailer(last);
+	if (trailer) problems.push(`the last --mirror-cards file has a next page (showing ${trailer.shown[0]}-${trailer.shown[1]} of ${trailer.total}); pass every page of the list`);
 	return cards;
 }
 function indexOptions(schema) {
@@ -3964,32 +4006,53 @@ function retire(input, path, entry, title) {
 	};
 }
 /**
-* Applies the two checks that every plan of a page passes. A card that the user edited is not
-* overwritten: the page gets a `skip-edited` instead of its action, or alone when it has none.
-* And a select value must be an option of the database.
+* Applies the checks that every plan of a page passes. The card must be in the list of the mirror tag, or the page gets
+* no action: a card that is gone from the tag is not touched. A card that the user edited is not overwritten: the page
+* gets a `skip-edited` instead of its action, or alone when it has none. And a select value must be an option of the
+* database. An action that writes to the card gets the time the card has in the list.
 */
 function finish(input, path, main, place, notes) {
 	const entry = input.map.pages[path];
 	let checked = main;
-	if (entry && (entry.status === "active" || main)) checked = editedCard(input, entry, path) ?? main;
+	let planned = place;
+	if (entry && (entry.status === "active" || main && input.listed)) {
+		const card = input.cards.get(entry.card_id);
+		if (!card) return {
+			blockers: [`card ${entry.card_id} of ${path} is not in the mirror tag (removed from the tag or deleted?)`],
+			notes: []
+		};
+		checked = editedCard(entry, path, card) ?? main;
+		const stamp = card.updatedAt;
+		if (stamp !== void 0) {
+			if (checked?.op === "update" || checked?.op === "relink" || checked?.op === "retire") checked = {
+				...checked,
+				cardUpdatedAt: stamp
+			};
+			if (planned?.op === "place") planned = {
+				...planned,
+				cardUpdatedAt: stamp
+			};
+		}
+	}
 	const blockers = checked && "properties" in checked ? missingOptions(checked.properties, input.options) : [];
 	return {
 		main: checked,
-		place,
+		place: planned,
 		blockers,
 		notes
 	};
 }
 /**
-* A `skip-edited` action when the card changed more than 60 seconds after the last sync of the page,
-* and after the last edit that `hepta record` saved as feedback.
+* A `skip-edited` action when the card changed more than 60 seconds after the last write that the map recorded
+* (the card time of that write, which is on the clock of Heptabase), and after the last edit that `hepta record`
+* saved as feedback. The sync time is on the clock of this machine and is used only when the map has no card time.
 */
-function editedCard(input, entry, path) {
-	const card = input.cards.get(entry.card_id);
-	if (!card?.updatedAt) return null;
+function editedCard(entry, path, card) {
+	if (!card.updatedAt) return null;
 	const changed = Date.parse(card.updatedAt);
-	const synced = Date.parse(entry.last_synced_at);
-	if (Number.isNaN(changed) || Number.isNaN(synced) || changed - synced <= EDIT_GRACE_MS) return null;
+	const written = Date.parse(entry.card_updated_at ?? "");
+	const baseline = Number.isNaN(written) ? Date.parse(entry.last_synced_at) : written;
+	if (Number.isNaN(changed) || Number.isNaN(baseline) || changed - baseline <= EDIT_GRACE_MS) return null;
 	if (changed <= (entry.feedback_card_updated_at === void 0 ? NaN : Date.parse(entry.feedback_card_updated_at))) return null;
 	return {
 		op: "skip-edited",
@@ -4253,7 +4316,7 @@ function isNewer(updatedAt, recorded) {
 *   {"type":"updated","page","cardUpdatedAt"[,"contentHash"]}
 *   {"type":"relinked","page","cardUpdatedAt"[,"contentHash"]}
 *   {"type":"placed","page","whiteboardId"}
-*   {"type":"retired","page"[,"cardUpdatedAt"]}
+*   {"type":"retired","page","cardUpdatedAt"}
 *   {"type":"feedback","page","cardId","cardUpdatedAt","content"}
 *   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or a root whiteboard id)
 *
@@ -4535,16 +4598,16 @@ function recordPlaced(context) {
 function recordRetired(context) {
 	const fields = new Fields(context.event);
 	const page = fields.page();
-	const cardUpdatedAt = fields.time("cardUpdatedAt", false);
+	const cardUpdatedAt = fields.time("cardUpdatedAt", true);
 	const problems = fields.problems;
 	const existing = page === "" ? null : mappedPage(context.map, page, problems);
 	refuseWhileWaiting(existing, page, problems);
-	if (problems.length > 0 || !existing) return fail(problems);
+	if (problems.length > 0 || !existing || cardUpdatedAt === void 0) return fail(problems);
 	return saved(context, "retired", page, {
 		...existing,
 		content_hash: contentHash(RETIRED_BODY),
 		last_synced_at: context.now.toISOString(),
-		card_updated_at: cardUpdatedAt ?? existing.card_updated_at,
+		card_updated_at: cardUpdatedAt,
 		status: "retired"
 	});
 }

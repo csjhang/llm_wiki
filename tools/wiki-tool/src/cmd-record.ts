@@ -11,7 +11,7 @@
  *   {"type":"updated","page","cardUpdatedAt"[,"contentHash"]}
  *   {"type":"relinked","page","cardUpdatedAt"[,"contentHash"]}
  *   {"type":"placed","page","whiteboardId"}
- *   {"type":"retired","page"[,"cardUpdatedAt"]}
+ *   {"type":"retired","page","cardUpdatedAt"}
  *   {"type":"feedback","page","cardId","cardUpdatedAt","content"}
  *   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or a root whiteboard id)
  *
@@ -324,17 +324,17 @@ function recordPlaced(context: RecordContext): CommandResult {
 function recordRetired(context: RecordContext): CommandResult {
   const fields = new Fields(context.event)
   const page = fields.page()
-  const cardUpdatedAt = fields.time("cardUpdatedAt", false)
+  const cardUpdatedAt = fields.time("cardUpdatedAt", true)
   const problems = fields.problems
   const existing = page === "" ? null : mappedPage(context.map, page, problems)
   refuseWhileWaiting(existing, page, problems)
-  if (problems.length > 0 || !existing) return fail(problems)
+  if (problems.length > 0 || !existing || cardUpdatedAt === undefined) return fail(problems)
 
   return saved(context, "retired", page, {
     ...existing,
     content_hash: contentHash(RETIRED_BODY),
     last_synced_at: context.now.toISOString(),
-    card_updated_at: cardUpdatedAt ?? existing.card_updated_at,
+    card_updated_at: cardUpdatedAt,
     status: "retired",
   })
 }

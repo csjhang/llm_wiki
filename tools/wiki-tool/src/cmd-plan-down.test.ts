@@ -13,7 +13,7 @@ import { type CardMap, contentHash, loadCardMap, saveCardMap } from "./card-map"
 import { runCli } from "./cli"
 import type { DownAction, PropertyEdit } from "./cmd-plan-down"
 import { cardHash } from "./mirror-pages"
-import { id, makeProject, pageText, PROPERTY_IDS, removeProjects, writeProjectFile } from "./test-project"
+import { id, makeProject, mirrorList, pageText, PROPERTY_IDS, quietMirrorArgs, removeProjects, writeProjectFile } from "./test-project"
 
 const FIXTURES = fileURLToPath(new URL("../fixtures/", import.meta.url))
 const DATABASE = join(FIXTURES, "read_database.json")
@@ -31,9 +31,18 @@ interface PlanOutput {
   problems: unknown[]
 }
 
-async function plan(project: string, extra: string[] = []): Promise<{ exitCode: number; output: PlanOutput }> {
+/** Run plan-down with exactly the given options. */
+async function planWith(project: string, extra: string[] = []): Promise<{ exitCode: number; output: PlanOutput }> {
   const result = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW, ...extra])
   return { exitCode: result.exitCode, output: result.output as unknown as PlanOutput }
+}
+
+/**
+ * Run plan-down the way the skill does: with the list of the mirror tag. When the test gives no list, the list is a quiet
+ * one: it holds every card of the map, last updated when the map saw it. plan-down needs the list once a card is mapped.
+ */
+async function plan(project: string, extra: string[] = []): Promise<{ exitCode: number; output: PlanOutput }> {
+  return planWith(project, extra.includes("--mirror-cards") ? extra : [...extra, ...quietMirrorArgs(project)])
 }
 
 async function record(project: string, event: Record<string, unknown>, now = NOW): Promise<void> {
@@ -68,15 +77,6 @@ function hashOf(action: DownAction): string {
 
 function mechanism(title: string, body = "Body text.", extra: Record<string, string | string[]> = {}): string {
   return pageText({ type: "mechanism", title, sources: ["a.md"], ...extra }, body)
-}
-
-/** A list_cards text of the mirror tag: one line per card. */
-function mirrorList(cards: { id: string; title: string; updated: string }[]): string {
-  const lines = cards.map(
-    (card) =>
-      `card "${card.title}" [${card.id}] whiteboards: none, tags: wiki-test [${id(4)}], created: 2026-09-01T00:00:00.000Z; updated: ${card.updated}`,
-  )
-  return ["Cards:", ...lines].join("\n")
 }
 
 function writeMirrorList(project: string, cards: { id: string; title: string; updated: string }[]): string {
@@ -201,6 +201,8 @@ describe("hepta plan-down", () => {
         body,
         contentHash: expect.stringMatching(/^[0-9a-f]{64}$/),
         properties: expect.any(Array),
+        // The time of the card in the list, for the check right before the write.
+        cardUpdatedAt: NOW,
       },
     ])
     const update = changed[0]
@@ -248,7 +250,8 @@ describe("hepta plan-down", () => {
   it("does not plan an update for a new sync date", async () => {
     const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
     await recordCreated(project, (await plan(project)).output.actions[0], id(21))
-    const later = await runCli(["hepta", "plan-down", "--project", project, "--now", "2026-12-01T00:00:00Z"])
+    const list = writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: NOW }])
+    const later = await runCli(["hepta", "plan-down", "--project", project, "--now", "2026-12-01T00:00:00Z", "--mirror-cards", list])
     expect(later.output.actions).toEqual([])
   })
 
@@ -315,6 +318,11 @@ describe("hepta plan-down", () => {
   it("gives no action to a card that is not in the map, even when it is edited and has the title of a page", async () => {
     const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
     const strangers = writeMirrorList(project, [{ id: id(99), title: "Event Driven", updated: "2026-10-24T12:00:00.000Z" }])
+    const withOwn = (): string =>
+      writeMirrorList(project, [
+        { id: id(99), title: "Event Driven", updated: "2026-10-24T12:00:00.000Z" },
+        { id: id(21), title: "Event Driven", updated: NOW },
+      ])
 
     // The page has no card yet: it is created, whatever cards have its title.
     const created = await plan(project, ["--mirror-cards", strangers])
@@ -323,7 +331,7 @@ describe("hepta plan-down", () => {
 
     // The page has a card: the other card is still not touched.
     writeProjectFile(project, MECHANISM_PATH, mechanism("Event Driven", "Changed body."))
-    const changed = await plan(project, ["--mirror-cards", strangers])
+    const changed = await plan(project, ["--mirror-cards", withOwn()])
     expect(changed.output.actions).toMatchObject([{ op: "update", cardId: id(21) }])
     expect(JSON.stringify(changed.output)).not.toContain(id(99))
   })
@@ -343,20 +351,21 @@ describe("hepta plan-down", () => {
     await recordCreated(project, (await plan(project)).output.actions[0], id(21))
     rmSync(join(project, MECHANISM_PATH))
 
-    // Without the card list the title falls back to the file name.
+    // The title of the card comes from the list.
     const bare = await plan(project)
     expect(bare.output.actions).toEqual([
       {
         op: "retire",
         page: MECHANISM_PATH,
         cardId: id(21),
-        title: "🗄 已停用｜event-driven",
+        title: "🗄 已停用｜Card",
         body: "此頁已從 wiki 移除。",
         contentHash: contentHash("此頁已從 wiki 移除。"),
         properties: [
           { propertyId: PROPERTY_IDS.status, type: "select", value: "retired" },
           { propertyId: PROPERTY_IDS.last_synced, type: "date", value: { start: "2026-10-24T00:00:00.000Z" } },
         ],
+        cardUpdatedAt: NOW,
       },
     ])
 
@@ -503,7 +512,7 @@ describe("hepta plan-down", () => {
     expect(alpha.op === "relink" && alpha.body).toContain(`missing-page${UNSYNCED}`)
     expect(beta.op === "relink" && beta.body).toContain(`[Alpha](heptabase://card/${id(21)})`)
     // A relink carries the body and nothing else.
-    expect(Object.keys(alpha).sort()).toEqual(["body", "cardId", "contentHash", "op", "page"])
+    expect(Object.keys(alpha).sort()).toEqual(["body", "cardId", "cardUpdatedAt", "contentHash", "op", "page"])
 
     await recordUpdated(project, alpha)
     await recordUpdated(project, beta)
@@ -630,7 +639,7 @@ describe("hepta plan-down", () => {
 
     const second = await plan(project)
     expect(second.output.actions).toEqual([
-      { op: "place", page: "wiki/hypotheses/idea.md", cardId: id(21), whiteboardId: id(31) },
+      { op: "place", page: "wiki/hypotheses/idea.md", cardId: id(21), whiteboardId: id(31), cardUpdatedAt: NOW },
     ])
 
     await record(project, { type: "placed", page: "wiki/hypotheses/idea.md", whiteboardId: id(31) })
@@ -643,7 +652,9 @@ describe("hepta plan-down", () => {
       hypothesis.replace(`heptabase_whiteboard: "${id(31)}"`, `heptabase_whiteboard: "${id(32)}"`),
     )
     const third = (await plan(project)).output.actions
-    expect(third).toEqual([{ op: "place", page: "wiki/hypotheses/idea.md", cardId: id(21), whiteboardId: id(32) }])
+    expect(third).toEqual([
+      { op: "place", page: "wiki/hypotheses/idea.md", cardId: id(21), whiteboardId: id(32), cardUpdatedAt: NOW },
+    ])
   })
 
   it("reports a heptabase_whiteboard that is not an id", async () => {
@@ -846,6 +857,271 @@ describe("hepta plan-down", () => {
     })
     const [action] = (await plan(project)).output.actions
     expect(action.op === "create" && action.body).toContain(`來源：[outside](heptabase://card/${id(61)})`)
+  })
+
+  describe("the list of the mirror tag", () => {
+    const NEEDS_LIST = "pass every page of list_cards for the mirror tag with --mirror-cards"
+
+    /** A project with one mapped card. */
+    async function mappedProject(): Promise<string> {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      await recordCreated(project, (await plan(project)).output.actions[0], id(21))
+      return project
+    }
+
+    function listFile(project: string, name: string, text: string): string {
+      writeProjectFile(project, `.llm-wiki/hepta/${name}`, text)
+      return join(project, `.llm-wiki/hepta/${name}`)
+    }
+
+    const QUIET = [{ id: id(21), title: "Event Driven", updated: NOW }]
+
+    it("is required once a card is mapped", async () => {
+      const project = await mappedProject()
+      const result = await planWith(project)
+      expect(result.exitCode).toBe(2)
+      expect(result.output).toEqual({ ok: false, problems: [NEEDS_LIST] })
+    })
+
+    it("is required when the only mapped card waits for setup", async () => {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      await record(project, { type: "created", page: MECHANISM_PATH, cardId: id(21), setup: false, contentHash: "a".repeat(64) })
+      expect((await planWith(project)).output.problems).toEqual([NEEDS_LIST])
+    })
+
+    it("is not required when no card is active", async () => {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      expect((await planWith(project)).exitCode).toBe(0)
+      saveCardMap(project, mapOf({ [MECHANISM_PATH]: { card_id: id(21), content_hash: "x", status: "retired" } }))
+      expect((await planWith(project)).exitCode).toBe(0)
+    })
+
+    it("accepts the text 'No cards found.' as an empty list", async () => {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      saveCardMap(project, mapOf({ [MECHANISM_PATH]: { card_id: id(21), content_hash: "x" } }))
+      const result = await planWith(project, ["--mirror-cards", listFile(project, "empty.txt", "No cards found.")])
+      expect(result.exitCode).toBe(0)
+      expect(result.output.problems).toEqual([{ page: MECHANISM_PATH, problem: expect.stringContaining("is not in the mirror tag") }])
+    })
+
+    it("accepts a JSON result whose status is succeeded", async () => {
+      const project = await mappedProject()
+      const file = listFile(project, "ok.json", JSON.stringify({ status: "succeeded", content: mirrorList(QUIET) }))
+      expect(await planWith(project, ["--mirror-cards", file])).toMatchObject({ exitCode: 0, output: { actions: [], problems: [] } })
+    })
+
+    it("refuses a result whose status is anything but succeeded", async () => {
+      const project = await mappedProject()
+      for (const status of ["failed", "clientTaskFailed", "Succeeded", 1, null, true, {}, ""]) {
+        const file = listFile(project, "bad.json", JSON.stringify({ status, content: mirrorList(QUIET) }))
+        const result = await planWith(project, ["--mirror-cards", file])
+        expect(result.exitCode, JSON.stringify(status)).toBe(2)
+        expect(result.output.problems, JSON.stringify(status)).toEqual([
+          expect.stringContaining(`--mirror-cards file ${file} is the result of a call that did not succeed (status: `),
+        ])
+      }
+    })
+
+    it("refuses a list whose last page has a next page", async () => {
+      const project = await mappedProject()
+      const trailer = "More cards are available. Showing 1-1 of 3. Call list_cards with offset 1 to list the next page."
+      const first = listFile(project, "p1.txt", `${mirrorList(QUIET)}\n${trailer}`)
+      const only = await planWith(project, ["--mirror-cards", first])
+      expect(only.exitCode).toBe(2)
+      expect(only.output.problems).toEqual([expect.stringContaining("next page")])
+
+      // The first of two pages may have a trailer. The last page decides.
+      const last = listFile(project, "p2.txt", mirrorList([{ id: id(22), title: "Other", updated: NOW }]))
+      const both = await planWith(project, ["--mirror-cards", first, "--mirror-cards", last])
+      expect(both.exitCode).toBe(0)
+      const swapped = await planWith(project, ["--mirror-cards", last, "--mirror-cards", first])
+      expect(swapped.exitCode).toBe(2)
+    })
+  })
+
+  describe("a mapped card that is not in the mirror list", () => {
+    const missingProblem = (card = id(21), page = MECHANISM_PATH): { page: string; problem: string } => ({
+      page,
+      problem: `card ${card} of ${page} is not in the mirror tag (removed from the tag or deleted?)`,
+    })
+
+    async function mappedProject(extra: Record<string, string> = {}): Promise<string> {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven"), ...extra })
+      await recordCreated(project, (await plan(project)).output.actions.find((a) => a.page === MECHANISM_PATH) as DownAction, id(21))
+      return project
+    }
+
+    const OTHER = [{ id: id(99), title: "Other", updated: NOW }]
+
+    it("gets no action and one problem, even when the page changed", async () => {
+      const project = await mappedProject()
+      writeProjectFile(project, MECHANISM_PATH, mechanism("Event Driven", "Changed body."))
+      const result = await plan(project, ["--mirror-cards", writeMirrorList(project, OTHER)])
+      expect(result.exitCode).toBe(0)
+      expect(result.output.actions).toEqual([])
+      expect(result.output.problems).toEqual([missingProblem()])
+    })
+
+    it("is not reported again when nothing is wrong", async () => {
+      const project = await mappedProject()
+      const result = await plan(project, ["--mirror-cards", writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: NOW }])])
+      expect(result.output.problems).toEqual([])
+    })
+
+    it("is not retired when its page is gone", async () => {
+      const project = await mappedProject()
+      rmSync(join(project, MECHANISM_PATH))
+      const result = await plan(project, ["--mirror-cards", writeMirrorList(project, OTHER)])
+      expect(result.output.actions).toEqual([])
+      expect(result.output.problems).toEqual([missingProblem()])
+    })
+
+    it("is not relinked, and not placed", async () => {
+      const hypothesis = pageText({ type: "hypothesis", title: "Idea", sources: ["a.md"], status: "draft", heptabase_whiteboard: id(31) })
+      const project = await mappedProject({ "wiki/hypotheses/idea.md": hypothesis, "wiki/mechanisms/beta.md": mechanism("Beta") })
+      const creates = (await plan(project)).output.actions
+      expect(creates.map((action) => action.op)).toEqual(["create", "create"])
+      await recordCreated(project, creates[0], id(22))
+      await recordCreated(project, creates[1], id(23))
+      expect((await plan(project)).output.actions.map((action) => action.op)).toEqual(["place"])
+      const result = await plan(project, ["--mirror-cards", writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: NOW }])])
+      expect(result.output.actions).toEqual([])
+      expect(result.output.problems).toEqual([missingProblem(id(22), "wiki/hypotheses/idea.md"), missingProblem(id(23), "wiki/mechanisms/beta.md")])
+    })
+
+    it("does not stop the other pages", async () => {
+      const project = await mappedProject({ "wiki/mechanisms/beta.md": mechanism("Beta") })
+      const result = await plan(project, ["--mirror-cards", writeMirrorList(project, OTHER)])
+      expect(result.output.actions.map((action) => [action.op, action.page])).toEqual([["create", "wiki/mechanisms/beta.md"]])
+      expect(result.output.problems).toEqual([missingProblem()])
+    })
+
+    it("does not count as a retire for the mass-retire rule", async () => {
+      const project = makeProject()
+      const entries: Record<string, { card_id: string; content_hash: string }> = {}
+      for (let index = 0; index < 6; index += 1) entries[`wiki/mechanisms/p${index}.md`] = { card_id: id(21 + index), content_hash: "x" }
+      saveCardMap(project, mapOf(entries))
+      mkdirSync(join(project, "wiki"), { recursive: true })
+      const result = await plan(project, ["--mirror-cards", writeMirrorList(project, OTHER)])
+      expect(result.output.actions).toEqual([])
+      expect(result.output.problems).toHaveLength(6)
+      expect(JSON.stringify(result.output.problems)).not.toContain("refusing to retire")
+    })
+
+    it("is not checked for a retired card that nothing writes to", async () => {
+      const project = makeProject()
+      saveCardMap(project, mapOf({ [MECHANISM_PATH]: { card_id: id(21), content_hash: "x", status: "retired" } }))
+      saveCardMap(project, { ...loadCardMap(project), pages: { ...loadCardMap(project).pages, "wiki/mechanisms/other.md": { ...mapOf({ x: { card_id: id(22), content_hash: "x" } }).pages.x } } })
+      writeProjectFile(project, "wiki/mechanisms/other.md", mechanism("Other"))
+      const result = await plan(project, ["--mirror-cards", writeMirrorList(project, [{ id: id(22), title: "Other", updated: NOW }])])
+      expect(result.output.problems).toEqual([])
+    })
+  })
+
+  describe("the time of the card at plan time", () => {
+    const PLAN_TIME = "2026-10-24T08:00:30.000Z"
+
+    it("is on update, relink, retire, and place", async () => {
+      const hypothesis = pageText({ type: "hypothesis", title: "Idea", sources: ["a.md"], status: "draft", heptabase_whiteboard: id(31) })
+      const project = makeProject({
+        "wiki/mechanisms/alpha.md": mechanism("Alpha", "See [[beta]]."),
+        "wiki/mechanisms/beta.md": mechanism("Beta"),
+        "wiki/mechanisms/gone.md": mechanism("Gone"),
+        "wiki/hypotheses/idea.md": hypothesis,
+      })
+      const creates = (await plan(project)).output.actions
+      expect(creates.map((action) => action.page)).toEqual([
+        "wiki/hypotheses/idea.md",
+        "wiki/mechanisms/alpha.md",
+        "wiki/mechanisms/beta.md",
+        "wiki/mechanisms/gone.md",
+      ])
+      const ids = [id(21), id(22), id(23), id(24)]
+      for (const [index, action] of creates.entries()) await recordCreated(project, action, ids[index])
+      rmSync(join(project, "wiki/mechanisms/gone.md"))
+      const list = writeMirrorList(
+        project,
+        ids.map((cardId) => ({ id: cardId, title: "Card", updated: PLAN_TIME })),
+      )
+      const relinks = await plan(project, ["--mirror-cards", list])
+      // The retire comes first. A relink waits until no create, update, or retire is left.
+      expect(relinks.output.actions.map((action) => [action.op, action.page, "cardUpdatedAt" in action ? action.cardUpdatedAt : null])).toEqual([
+        ["place", "wiki/hypotheses/idea.md", PLAN_TIME],
+        ["retire", "wiki/mechanisms/gone.md", PLAN_TIME],
+      ])
+      await record(project, { type: "retired", page: "wiki/mechanisms/gone.md", cardUpdatedAt: PLAN_TIME })
+      await record(project, { type: "placed", page: "wiki/hypotheses/idea.md", whiteboardId: id(31) })
+      const second = await plan(project, ["--mirror-cards", list])
+      expect(second.output.pass).toBe(2)
+      expect(second.output.actions.map((action) => [action.op, "cardUpdatedAt" in action ? action.cardUpdatedAt : null])).toEqual([
+        ["relink", PLAN_TIME],
+      ])
+      writeProjectFile(project, "wiki/mechanisms/beta.md", mechanism("Beta", "Changed body."))
+      const third = await plan(project, ["--mirror-cards", list])
+      expect(third.output.actions.map((action) => [action.op, "cardUpdatedAt" in action ? action.cardUpdatedAt : null])).toEqual([
+        ["update", PLAN_TIME],
+      ])
+    })
+
+    it("is left out when the list has no times", async () => {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      await recordCreated(project, (await plan(project)).output.actions[0], id(21))
+      writeProjectFile(project, MECHANISM_PATH, mechanism("Event Driven", "Changed body."))
+      const file = join(project, ".llm-wiki/hepta/no-times.txt")
+      writeProjectFile(project, ".llm-wiki/hepta/no-times.txt", `card "Event Driven" [${id(21)}] whiteboards: none, tags: none`)
+      const [action] = (await plan(project, ["--mirror-cards", file])).output.actions
+      expect(action.op).toBe("update")
+      expect("cardUpdatedAt" in action).toBe(false)
+    })
+  })
+
+  describe("the edit check", () => {
+    /** A card that was written at `written` (the Heptabase clock) when this machine's clock read NOW. */
+    async function skewedProject(written: string | undefined): Promise<string> {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      await recordCreated(project, (await plan(project)).output.actions[0], id(21))
+      const map = loadCardMap(project)
+      if (written === undefined) delete (map.pages[MECHANISM_PATH] as { card_updated_at?: string }).card_updated_at
+      else map.pages[MECHANISM_PATH].card_updated_at = written
+      saveCardMap(project, map)
+      return project
+    }
+
+    const updatedAt = (project: string, updated: string): string[] => [
+      "--mirror-cards",
+      writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated }]),
+    ]
+
+    it("compares with the card time of the last write, not the clock of this machine", async () => {
+      // The Heptabase clock runs an hour ahead of the machine: the card time is 09:00, the sync time 08:00.
+      const project = await skewedProject("2026-10-24T09:00:00.000Z")
+      const ops = async (updated: string): Promise<string[]> =>
+        (await plan(project, updatedAt(project, updated))).output.actions.map((action) => action.op)
+      // The card has the time of the last write: it is not an edit, although it is an hour after the sync.
+      expect(await ops("2026-10-24T09:00:00.000Z")).toEqual([])
+      expect(await ops("2026-10-24T09:01:00.000Z")).toEqual([])
+      expect(await ops("2026-10-24T09:01:01.000Z")).toEqual(["skip-edited"])
+    })
+
+    it("catches an edit that is within the clock skew of this machine", async () => {
+      // The machine clock runs an hour ahead: the sync time is later than the card time.
+      const project = await skewedProject("2026-10-24T07:00:00.000Z")
+      expect((await plan(project, updatedAt(project, "2026-10-24T07:05:00.000Z"))).output.actions.map((a) => a.op)).toEqual(["skip-edited"])
+    })
+
+    it("falls back to the sync time when the map has no card time", async () => {
+      const project = await skewedProject(undefined)
+      expect((await plan(project, updatedAt(project, "2026-10-24T08:01:00.000Z"))).output.actions).toEqual([])
+      expect((await plan(project, updatedAt(project, "2026-10-24T08:01:01.000Z"))).output.actions.map((a) => a.op)).toEqual(["skip-edited"])
+    })
+
+    it("falls back to the sync time when the card time is empty or not a time", async () => {
+      for (const written of ["", "yesterday"]) {
+        const project = await skewedProject(written)
+        expect((await plan(project, updatedAt(project, "2026-10-24T08:01:00.000Z"))).output.actions, written).toEqual([])
+        expect((await plan(project, updatedAt(project, "2026-10-24T08:02:00.000Z"))).output.actions.map((a) => a.op), written).toEqual(["skip-edited"])
+      }
+    })
   })
 
   describe("a card that waits for setup", () => {
@@ -1089,7 +1365,7 @@ describe("hepta plan-down", () => {
     it("reports a card map that cannot be read", async () => {
       const project = makeProject()
       writeProjectFile(project, "heptabase-map.json", "{ not json")
-      const result = await plan(project)
+      const result = await planWith(project)
       expect(result.exitCode).toBe(2)
       expect(result.output.problems).toEqual([expect.stringContaining("heptabase-map.json")])
     })

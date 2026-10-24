@@ -8,6 +8,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
+import { loadCardMap } from "./card-map"
 
 export function id(n: number): string {
   return `00000000-0000-4000-8000-${String(n).padStart(12, "0")}`
@@ -82,4 +83,28 @@ export function pageText(fields: Record<string, string | string[]>, body = "Body
   }
   lines.push("---", "", body, "")
   return lines.join("\n")
+}
+
+/** A list_cards text of the mirror tag: one line per card. */
+export function mirrorList(cards: { id: string; title: string; updated: string }[]): string {
+  const lines = cards.map(
+    (card) =>
+      `card "${card.title}" [${card.id}] whiteboards: none, tags: wiki-test [${id(4)}], created: 2026-09-01T00:00:00.000Z; updated: ${card.updated}`,
+  )
+  return lines.length === 0 ? "No cards found." : ["Cards:", ...lines].join("\n")
+}
+
+/**
+ * The `--mirror-cards` option for a project, as the skill would pass it when nobody touched the cards: the list holds
+ * every card of the map (a card that waits for setup is not in the tag yet), last updated when the map saw it. Empty
+ * when the map has no active card, because plan-down needs no list then.
+ */
+export function quietMirrorArgs(project: string): string[] {
+  const entries = Object.values(loadCardMap(project).pages)
+  if (!entries.some((entry) => entry.status === "active")) return []
+  const cards = entries
+    .filter((entry) => !entry.setup_pending)
+    .map((entry) => ({ id: entry.card_id, title: "Card", updated: entry.card_updated_at }))
+  writeProjectFile(project, ".llm-wiki/hepta/quiet-mirror.txt", mirrorList(cards))
+  return ["--mirror-cards", join(project, ".llm-wiki/hepta/quiet-mirror.txt")]
 }

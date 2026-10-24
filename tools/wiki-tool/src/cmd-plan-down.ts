@@ -21,7 +21,12 @@
  * property values, but not the sync date.
  *
  * A mirror card that the user edited is never overwritten: its page gets a `skip-edited`, whether
- * the page changed or not, until `hepta record` saves the edit as feedback. Two safety rules keep a
+ * the page changed or not, until `hepta record` saves the edit as feedback. The edit check needs the whole list
+ * of the mirror tag, so `--mirror-cards` is required once a card is mapped, and a list that is a failed result or
+ * stops before its last page is refused. A card of the map that the list does not hold (taken out of the tag, or
+ * deleted) gets no action at all and a problem, so a half-read list never makes a write. Every action that writes
+ * to a card names the time the card had when it was planned (`cardUpdatedAt`): the skill checks the card again right
+ * before it writes. Two safety rules keep a
  * read error from looking like a deleted wiki: an unreadable `wiki/` folder stops the command, and a
  * plan that would retire most of the cards retires none.
  */
@@ -50,7 +55,7 @@ import {
   slugOfPath,
   type WikiPage,
 } from "./mirror-pages"
-import { type CardRef, parseListCards } from "./parse-mcp"
+import { type CardRef, failedStatus, parseListCards, parsePagingTrailer } from "./parse-mcp"
 
 export type { PropertyEdit }
 
@@ -79,8 +84,10 @@ export type DownAction =
       body: string
       contentHash: string
       properties: PropertyEdit[]
+      /** The `updatedAt` of the card in the list. Left out when the list has no times. */
+      cardUpdatedAt?: string
     }
-  | { op: "relink"; page: string; cardId: string; body: string; contentHash: string }
+  | { op: "relink"; page: string; cardId: string; body: string; contentHash: string; cardUpdatedAt?: string }
   | {
       op: "retire"
       page: string
@@ -89,9 +96,10 @@ export type DownAction =
       body: string
       contentHash: string
       properties: PropertyEdit[]
+      cardUpdatedAt?: string
     }
   | { op: "skip-edited"; page: string; cardId: string; cardUpdatedAt: string }
-  | { op: "place"; page: string; cardId: string; whiteboardId: string }
+  | { op: "place"; page: string; cardId: string; whiteboardId: string; cardUpdatedAt?: string }
 
 /** A page that cannot be planned, and what the user must do. */
 export interface PageProblem {
@@ -105,7 +113,9 @@ const OPTION_SPEC = {
   lists: ["mirror-cards"],
 } as const
 
-/** A card counts as edited when it changed this long after the last sync. */
+const NEEDS_MIRROR_LIST = "pass every page of list_cards for the mirror tag with --mirror-cards"
+
+/** A card counts as edited when it changed this long after the last write that the map recorded. */
 const EDIT_GRACE_MS = 60_000
 
 /** A plan that retires this many cards, and more than half of the active ones, is refused. */
@@ -135,7 +145,11 @@ export function planDown(args: string[]): CommandResult {
     problems.push(error instanceof Error ? error.message : String(error))
   }
   const now = parseNowOption(parsed.values.now, problems)
-  const cards = readMirrorCards(parsed.lists["mirror-cards"], problems)
+  const mirrorFiles = parsed.lists["mirror-cards"]
+  if (map && mirrorFiles.length === 0 && Object.values(map.pages).some((entry) => entry.status === "active")) {
+    problems.push(NEEDS_MIRROR_LIST)
+  }
+  const cards = readMirrorCards(mirrorFiles, problems)
   let options: OptionIndex | null = null
   if (parsed.values.database !== undefined) {
     const database = readDatabase(parsed.values.database, problems)
@@ -153,6 +167,7 @@ export function planDown(args: string[]): CommandResult {
     map,
     pages,
     cards,
+    listed: mirrorFiles.length > 0,
     options,
     properties: config.heptabase.properties,
     wikiId: config.wiki.id,
@@ -163,18 +178,35 @@ export function planDown(args: string[]): CommandResult {
 
 // --- inputs ------------------------------------------------------------
 
-/** The cards of the `list_cards` files, by id. A later file wins for a card that two files list. */
+/**
+ * The cards of the `list_cards` files, by id. A later file wins for a card that two files list. A file that is the
+ * result of a failed call, and a last file that still has a next page, are refused: both read like a shorter list.
+ */
 function readMirrorCards(paths: readonly string[], problems: string[]): Map<string, CardRef> {
   const cards = new Map<string, CardRef>()
+  let last: string | null = null
   for (const path of paths) {
     let text: string
     try {
       text = readFileSync(path, "utf8")
     } catch {
       problems.push(`cannot read --mirror-cards file: ${path}`)
+      last = null
+      continue
+    }
+    last = text
+    const status = failedStatus(text)
+    if (status !== null) {
+      problems.push(`--mirror-cards file ${path} is the result of a call that did not succeed (status: ${status})`)
       continue
     }
     for (const card of parseListCards(text)) cards.set(card.id, card)
+  }
+  const trailer = last === null ? null : parsePagingTrailer(last)
+  if (trailer) {
+    problems.push(
+      `the last --mirror-cards file has a next page (showing ${trailer.shown[0]}-${trailer.shown[1]} of ${trailer.total}); pass every page of the list`,
+    )
   }
   return cards
 }
@@ -218,6 +250,8 @@ interface PlanInput {
   pages: WikiPage[]
   /** The cards of the mirror tag, by id. Empty when the skill gave no list. */
   cards: Map<string, CardRef>
+  /** True when the skill gave a list. Without one, only a map without active cards is planned. */
+  listed: boolean
   /** Null when the skill gave no database. */
   options: OptionIndex | null
   properties: HeptabaseConfig["properties"]
@@ -370,9 +404,10 @@ function retire(input: PlanInput, path: string, entry: PageEntry, title: string)
 }
 
 /**
- * Applies the two checks that every plan of a page passes. A card that the user edited is not
- * overwritten: the page gets a `skip-edited` instead of its action, or alone when it has none.
- * And a select value must be an option of the database.
+ * Applies the checks that every plan of a page passes. The card must be in the list of the mirror tag, or the page gets
+ * no action: a card that is gone from the tag is not touched. A card that the user edited is not overwritten: the page
+ * gets a `skip-edited` instead of its action, or alone when it has none. And a select value must be an option of the
+ * database. An action that writes to the card gets the time the card has in the list.
  */
 function finish(
   input: PlanInput,
@@ -383,22 +418,35 @@ function finish(
 ): PagePlan {
   const entry = input.map.pages[path]
   let checked = main
-  // The edit of a retired card matters only when the page wants to write to it.
-  if (entry && (entry.status === "active" || main)) checked = editedCard(input, entry, path) ?? main
+  let planned = place
+  // The state of a retired card matters only when the page wants to write to it, and only when there is a list to look in.
+  if (entry && (entry.status === "active" || (main && input.listed))) {
+    const card = input.cards.get(entry.card_id)
+    if (!card) {
+      return { blockers: [`card ${entry.card_id} of ${path} is not in the mirror tag (removed from the tag or deleted?)`], notes: [] }
+    }
+    checked = editedCard(entry, path, card) ?? main
+    const stamp = card.updatedAt
+    if (stamp !== undefined) {
+      if (checked?.op === "update" || checked?.op === "relink" || checked?.op === "retire") checked = { ...checked, cardUpdatedAt: stamp }
+      if (planned?.op === "place") planned = { ...planned, cardUpdatedAt: stamp }
+    }
+  }
   const blockers = checked && "properties" in checked ? missingOptions(checked.properties, input.options) : []
-  return { main: checked, place, blockers, notes }
+  return { main: checked, place: planned, blockers, notes }
 }
 
 /**
- * A `skip-edited` action when the card changed more than 60 seconds after the last sync of the page,
- * and after the last edit that `hepta record` saved as feedback.
+ * A `skip-edited` action when the card changed more than 60 seconds after the last write that the map recorded
+ * (the card time of that write, which is on the clock of Heptabase), and after the last edit that `hepta record`
+ * saved as feedback. The sync time is on the clock of this machine and is used only when the map has no card time.
  */
-function editedCard(input: PlanInput, entry: PageEntry, path: string): DownAction | null {
-  const card = input.cards.get(entry.card_id)
-  if (!card?.updatedAt) return null
+function editedCard(entry: PageEntry, path: string, card: CardRef): DownAction | null {
+  if (!card.updatedAt) return null
   const changed = Date.parse(card.updatedAt)
-  const synced = Date.parse(entry.last_synced_at)
-  if (Number.isNaN(changed) || Number.isNaN(synced) || changed - synced <= EDIT_GRACE_MS) return null
+  const written = Date.parse(entry.card_updated_at ?? "")
+  const baseline = Number.isNaN(written) ? Date.parse(entry.last_synced_at) : written
+  if (Number.isNaN(changed) || Number.isNaN(baseline) || changed - baseline <= EDIT_GRACE_MS) return null
   const handled = entry.feedback_card_updated_at === undefined ? Number.NaN : Date.parse(entry.feedback_card_updated_at)
   if (changed <= handled) return null
   return { op: "skip-edited", page: path, cardId: entry.card_id, cardUpdatedAt: card.updatedAt }
