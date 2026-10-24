@@ -2,14 +2,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTempProject, readFileRaw, realFs, writeFileRaw, fileExists } from "@/test-helpers/fs-temp"
 import { materializeSampleWiki } from "@/test-helpers/sample-wiki"
 
-vi.mock("@/commands/fs", () => ({ ...realFs, writeFile: vi.fn(realFs.writeFile) }))
+vi.mock("@/commands/fs", () => ({
+  ...realFs,
+  writeFile: vi.fn(realFs.writeFile),
+  listDirectory: vi.fn(realFs.listDirectory),
+}))
 
-import { writeFile } from "@/commands/fs"
+import { listDirectory, writeFile } from "@/commands/fs"
 import { loadMechanismContext } from "./context"
 import type { MechanismContext } from "./context"
 import { buildScopedIndexText, listMechanismSlugs, rebuildDomainIndex, scanWikiPages } from "./domain-index"
 
 const mockWriteFile = vi.mocked(writeFile)
+const mockListDirectory = vi.mocked(listDirectory)
 
 function pageText(options: { type: string; title: string; domain?: string; extra?: string[] }): string {
   return [
@@ -31,6 +36,8 @@ describe("domain index files", () => {
 
   beforeEach(async () => {
     mockWriteFile.mockClear()
+    mockListDirectory.mockReset()
+    mockListDirectory.mockImplementation(realFs.listDirectory)
     tmp = await createTempProject("domain-index")
     project = `${tmp.path}/wiki-a`
     await materializeSampleWiki(project)
@@ -319,6 +326,68 @@ describe("domain index files", () => {
       // The work wiki's own pages fill the domain parts. The library's other pages do not.
       expect(text).toContain("- [[handshake]] — Handshake")
       expect(text).not.toContain("library-only-concept")
+    })
+
+    it("has an empty mechanism section when the library folder does not exist", async () => {
+      await addSamplePages()
+      const ctx = { ...(await load()), mechanismLibraryPath: `${tmp.path}/no-such-library` }
+
+      const text = await buildScopedIndexText(project, ctx, "ai/architecture")
+
+      expect(text).toContain("# Mechanisms\n\n# ai/architecture")
+      expect(text).toContain("- [Mechanisms](indexes/_mechanisms.md) — 0 pages")
+      // The pages of the project itself are still indexed.
+      expect(text).toContain("- [[spikes]] — Spikes")
+    })
+
+    it("has an empty mechanism section when listing the library folder fails", async () => {
+      await addSamplePages()
+      const library = `${tmp.path}/unreadable-library`
+      const ctx = { ...(await load()), mechanismLibraryPath: library }
+      // The app's list_directory fails for a folder that does not exist.
+      mockListDirectory.mockImplementation(async (path) => {
+        if (path.startsWith(library)) throw new Error(`Path does not exist: '${path}'`)
+        return realFs.listDirectory(path)
+      })
+
+      const text = await buildScopedIndexText(project, ctx, null)
+
+      expect(text).toContain("# Mechanisms\n")
+      expect(text).toContain("- [Mechanisms](indexes/_mechanisms.md) — 0 pages")
+    })
+
+    it("cuts the unassigned list at 200 lines in the prompt text, and only there", async () => {
+      for (let i = 0; i < 205; i += 1) {
+        const slug = `loose-${String(i).padStart(3, "0")}`
+        await addPage(`wiki/concepts/${slug}.md`, pageText({ type: "concept", title: slug }))
+      }
+      const ctx = await load()
+
+      const text = await buildScopedIndexText(project, ctx, null)
+
+      expect(text).toContain("- Unassigned — 205 pages")
+      expect(text.match(/^ {2}- \[\[loose-/gm)).toHaveLength(200)
+      expect(text).toContain("  - [[loose-199]]\n  - … 5 more unassigned pages\n")
+      expect(text).not.toContain("[[loose-200]]")
+
+      // The index file that is written stays complete: nothing is hidden.
+      await rebuildDomainIndex(project, ctx)
+      const root = await readFileRaw(`${project}/wiki/index.md`)
+      expect(root).toContain("- Unassigned — 205 pages")
+      expect(root.match(/^ {2}- \[\[loose-/gm)).toHaveLength(205)
+      expect(root).not.toContain("more unassigned")
+    })
+
+    it("adds no extra line when exactly 200 pages are unassigned", async () => {
+      for (let i = 0; i < 200; i += 1) {
+        const slug = `loose-${String(i).padStart(3, "0")}`
+        await addPage(`wiki/concepts/${slug}.md`, pageText({ type: "concept", title: slug }))
+      }
+
+      const text = await buildScopedIndexText(project, await load(), null)
+
+      expect(text.match(/^ {2}- \[\[loose-/gm)).toHaveLength(200)
+      expect(text).not.toContain("more unassigned")
     })
 
     it("has an empty mechanism index when a work wiki has no library path", async () => {

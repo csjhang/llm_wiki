@@ -119,6 +119,10 @@ function isAnalysis(call: Captured): boolean {
   return call.system.startsWith("You are an expert research analyst")
 }
 
+function isReviewStage(call: Captured): boolean {
+  return call.system.startsWith("You are identifying high-value follow-up research items")
+}
+
 describe("ingest prompts and the mechanism context", () => {
   let tmp: { path: string; cleanup: () => Promise<void> } | undefined
 
@@ -244,6 +248,16 @@ describe("ingest prompts and the mechanism context", () => {
       expect(call.system).not.toContain("Mechanism Wiki")
       expect(call.system).not.toContain("## Decisions")
     }
+  })
+
+  it("gives the review stage of a plain wiki the index file", async () => {
+    llm.generation = ["---REVIEW: suggestion | A gap---", "A gap in the wiki.", "OPTIONS: Create Page | Skip", "---END REVIEW---"].join("\n")
+    const project = await plainProject()
+    await ingest(project)
+
+    const review = capturedCalls().find(isReviewStage)
+    expect(review?.system).toContain(`## Current Wiki Index\n${INDEX}`)
+    expect(review?.system).not.toContain("# Wiki Index")
   })
 
   it("lists only the upstream types in a plain wiki", async () => {
@@ -495,6 +509,8 @@ describe("ingest prompts and the mechanism context", () => {
 
   it("carries the scoped index in the prompts of a mechanism wiki", async () => {
     const source = "---\ndomain: ai/architecture\n---\n\n# A note\n\nA network of spikes.\n"
+    // A REVIEW block in the generation makes ingest run the dedicated review stage too.
+    llm.generation = ["---REVIEW: suggestion | A gap---", "A gap in the wiki.", "OPTIONS: Create Page | Skip", "---END REVIEW---"].join("\n")
     const project = await mechanismProject(source)
     await writeFileRaw(
       `${project}/wiki/concepts/spikes.md`,
@@ -510,7 +526,14 @@ describe("ingest prompts and the mechanism context", () => {
     )
     await ingest(project)
 
-    for (const call of capturedCalls().filter((candidate) => isAnalysis(candidate) || isGeneration(candidate))) {
+    const calls = capturedCalls().filter((candidate) => isAnalysis(candidate) || isGeneration(candidate) || isReviewStage(candidate))
+    // The analysis, the generation, and the review stage each carry the index.
+    expect(calls.map((call) => (isAnalysis(call) ? "analysis" : isGeneration(call) ? "generation" : "review"))).toEqual([
+      "analysis",
+      "generation",
+      "review",
+    ])
+    for (const call of calls) {
       expect(call.system).toContain("# Wiki Index")
       expect(call.system).toContain("- [ai/architecture](indexes/ai--architecture.md) — 1 pages")
       expect(call.system).toContain("- [[event-driven-computing]] — Event-driven computing")

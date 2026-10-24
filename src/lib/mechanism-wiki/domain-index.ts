@@ -12,6 +12,7 @@ import type { FileNode } from "@/types/wiki"
 import { listMarkdownFiles } from "./context"
 import type { MechanismContext } from "./context"
 import {
+  compareText,
   domainIndexPath,
   indexedPageFromMarkdown,
   isDomainIndexPath,
@@ -27,7 +28,13 @@ import type { IndexedPage } from "./domain-index-render"
 export type { IndexedPage } from "./domain-index-render"
 
 /** Files of `wiki/` that are not pages: the app keeps them (`wiki/indexes/` is skipped as a folder). */
-const NON_PAGE_FILES: ReadonlySet<string> = new Set(["wiki/index.md", "wiki/log.md", "wiki/overview.md"])
+const NON_PAGE_FILES: ReadonlySet<string> = new Set([ROOT_INDEX_PATH, "wiki/log.md", "wiki/overview.md"])
+
+/**
+ * The prompt text lists at most this many unassigned pages, because the root index goes into
+ * every prompt. The index file that is written lists all of them.
+ */
+const MAX_UNASSIGNED_IN_PROMPT = 200
 
 /** How many pages are read at once. */
 const READ_BATCH_SIZE = 32
@@ -123,6 +130,8 @@ export async function rebuildDomainIndex(
  * domain. It is built from the pages as they are now, not from the files in `wiki/indexes/`.
  * In a reading wiki the library is the wiki itself. In a work wiki it is the reading wiki,
  * and the root index counts its mechanisms instead of the (missing) ones of the work wiki.
+ * The root index lists at most `MAX_UNASSIGNED_IN_PROMPT` unassigned pages here; the written
+ * `wiki/index.md` lists all of them.
  */
 export async function buildScopedIndexText(
   projectPath: string,
@@ -134,6 +143,7 @@ export async function buildScopedIndexText(
   const root = renderRootIndex(
     [...pages.filter((page) => page.type !== MECHANISM_TYPE), ...mechanisms],
     ctx.domains,
+    { maxUnassigned: MAX_UNASSIGNED_IN_PROMPT },
   )
   const parts = [root, renderMechanismIndex(mechanisms)]
   if (domain !== null) parts.push(renderDomainIndex(domain, pages))
@@ -165,8 +175,4 @@ export async function listMechanismSlugs(libraryPath: string | null): Promise<Se
 
 function trimTrailingSlashes(path: string): string {
   return normalizePath(path).replace(/\/+$/, "")
-}
-
-function compareText(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0
 }

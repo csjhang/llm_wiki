@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
 import {
+  compareText,
   domainIndexPath,
   indexedPageFromMarkdown,
   isDomainIndexPath,
@@ -232,6 +233,58 @@ describe("deterministic output", () => {
     expect(renderDomainIndex("ai/architecture", reversed)).toBe(renderDomainIndex("ai/architecture", pages))
     expect(renderMechanismIndex(reversed)).toBe(renderMechanismIndex(pages))
     expect(renderRootIndex(pages, DOMAINS)).toBe(renderRootIndex(pages, DOMAINS))
+  })
+})
+
+describe("order of titles", () => {
+  const d = "ai/architecture"
+
+  it("sorts by UTF-16 code units, lower case first, then the exact title, then the slug", () => {
+    const titles = ["事件驅動", "Zebra", "apple", "あ", "Apple", "事件", "Ärger", "banana", "Banana"]
+    const pages = titles.map((title, i) => page({ slug: `p${i}`, domain: d, title }))
+    const expected = ["Apple", "apple", "Banana", "banana", "Zebra", "Ärger", "あ", "事件", "事件驅動"]
+
+    const lines = (list: IndexedPage[]) =>
+      renderDomainIndex(d, list)
+        .split("\n")
+        .filter((line) => line.startsWith("- "))
+        .map((line) => line.slice(line.indexOf(" — ") + " — ".length))
+
+    expect(lines(pages)).toEqual(expected)
+    // The order does not depend on the order of the input.
+    expect(lines([...pages].reverse())).toEqual(expected)
+    expect(renderDomainIndex(d, [...pages].reverse())).toBe(renderDomainIndex(d, pages))
+  })
+
+  it("compares text by code units, not by locale", () => {
+    expect(compareText("Z", "a")).toBeLessThan(0)
+    expect(compareText("a", "ä")).toBeLessThan(0)
+    expect(compareText("z", "あ")).toBeLessThan(0)
+    expect(compareText("a", "a")).toBe(0)
+  })
+})
+
+describe("renderRootIndex with a limit on the unassigned list", () => {
+  const pages = ["a", "b", "c", "d", "e"].map((slug) => page({ slug }))
+
+  it("lists all unassigned pages when there is no limit", () => {
+    const text = renderRootIndex(pages, DOMAINS)
+
+    expect(text).toContain("- Unassigned — 5 pages")
+    for (const slug of ["a", "b", "c", "d", "e"]) expect(text).toContain(`  - [[${slug}]]`)
+    expect(text).not.toContain("more unassigned")
+  })
+
+  it("cuts the list at the limit and says how many pages it left out", () => {
+    const text = renderRootIndex(pages, DOMAINS, { maxUnassigned: 3 })
+
+    // The count stays complete. Only the lines are cut.
+    expect(text).toContain("- Unassigned — 5 pages\n  - [[a]]\n  - [[b]]\n  - [[c]]\n  - … 2 more unassigned pages\n")
+    expect(text).not.toContain("[[d]]")
+  })
+
+  it("adds no extra line when the list fits the limit", () => {
+    expect(renderRootIndex(pages, DOMAINS, { maxUnassigned: 5 })).toBe(renderRootIndex(pages, DOMAINS))
   })
 })
 

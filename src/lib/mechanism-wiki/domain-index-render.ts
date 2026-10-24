@@ -104,11 +104,19 @@ function oneLine(text: string): string {
 
 // --- rendering ---------------------------------------------------------
 
+export interface RootIndexOptions {
+  /**
+   * Show at most this many unassigned pages. The line `- Unassigned — N pages` still counts all
+   * of them, and one more line says how many are left out. Without it, every page is listed.
+   */
+  maxUnassigned?: number
+}
+
 /**
  * `wiki/index.md`: a line for each domain of `domains.yaml` (sorted by path) with its
  * page count, then the mechanisms, then the pages that no listed domain holds.
  */
-export function renderRootIndex(pages: IndexedPage[], domains: DomainsConfig): string {
+export function renderRootIndex(pages: IndexedPage[], domains: DomainsConfig, options: RootIndexOptions = {}): string {
   const listed = Object.keys(domains.domains).sort(compareText)
   const counts = new Map<string, number>(listed.map((domain) => [domain, 0]))
   const unassigned: IndexedPage[] = []
@@ -124,13 +132,18 @@ export function renderRootIndex(pages: IndexedPage[], domains: DomainsConfig): s
     }
   }
 
+  const sortedUnassigned = [...unassigned].sort(compareBySlug)
+  const shown = options.maxUnassigned === undefined ? sortedUnassigned : sortedUnassigned.slice(0, options.maxUnassigned)
+  const hidden = sortedUnassigned.length - shown.length
+
   return [
     "# Wiki Index",
     "",
     ...listed.map((domain) => `- [${domain}](indexes/${domainIndexFileName(domain)}) — ${counts.get(domain)} pages`),
     `- [Mechanisms](indexes/${MECHANISM_INDEX_FILE}) — ${mechanisms} pages`,
     `- Unassigned — ${unassigned.length} pages`,
-    ...[...unassigned].sort(compareBySlug).map((page) => `  - [[${page.slug}]]${typeNote(page)}`),
+    ...shown.map((page) => `  - [[${page.slug}]]${typeNote(page)}`),
+    ...(hidden > 0 ? [`  - … ${hidden} more unassigned pages`] : []),
     "",
   ].join("\n")
 }
@@ -175,7 +188,7 @@ function typeNote(page: IndexedPage): string {
 // --- order -------------------------------------------------------------
 
 /** UTF-16 code unit order. Unlike `localeCompare`, it gives the same result on every machine. */
-function compareText(a: string, b: string): number {
+export function compareText(a: string, b: string): number {
   return a < b ? -1 : a > b ? 1 : 0
 }
 

@@ -1293,7 +1293,7 @@ async function autoIngestImpl(
             role: "system",
             content: buildReviewSuggestionPrompt(
               purpose,
-              index,
+              promptIndex,
               sourceIdentity,
               analysis,
               sourceContext,
