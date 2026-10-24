@@ -52,28 +52,39 @@ const CARD_LINK = new RegExp(
 
 /** `[title](heptabase://card/<id>)`. Backslashes and brackets in the title are escaped so it cannot end the link text early. */
 export function cardLink(target: LinkTarget): string {
-  const title = target.title.replace(/\s+/g, " ").replace(/[\\[\]]/g, "\\$&")
+  const title = target.title.replace(/\s+/g, " ").trim().replace(/[\\[\]]/g, "\\$&")
   return `[${title}](heptabase://card/${target.cardId})`
 }
 
+/**
+ * A wiki page as the content of a Heptabase note card.
+ *
+ * A wikilink is resolved by its slug without the `#anchor`. A resolved link keeps its
+ * label as the link text, or the card title without one; an unresolved link is the label
+ * or the page title followed by the unsynced marker. A fence the page never closes is
+ * closed before the footer, so the footer is not part of the code block.
+ */
 export function wikiPageToCard(markdown: string, opts: WikiPageToCardOptions): string {
   const text = markdown.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n")
   const body = dropLeadingTitle(stripFrontmatter(text))
 
   const code = maskCode(body)
   const converted = code.restore(
-    code.masked.replace(WIKILINK, (match, _embed: string, rawSlug: string, rawLabel: string | undefined) => {
+    code.masked.replace(WIKILINK, (match, _embed: string, rawTarget: string, rawLabel: string | undefined) => {
+      const [rawSlug, ...anchorParts] = rawTarget.split("#")
       const slug = rawSlug.trim()
-      if (slug === "") return match
-      const target = opts.resolveLink(slug)
-      if (target) return cardLink(target)
+      const anchor = anchorParts.join("#").replace(/^\^/, "").trim()
       const label = rawLabel?.trim()
+      // `[[#heading]]` points into the same page: it has no card, so it is plain text.
+      if (slug === "") return anchor === "" && !label ? match : label || anchor
+      const target = opts.resolveLink(slug)
+      if (target) return cardLink(label ? { cardId: target.cardId, title: label } : target)
       return `${label ? label : opts.titleForSlug(slug)}${UNSYNCED_MARKER}`
     }),
   )
 
   const title = `# ${opts.title.replace(/\s+/g, " ").trim()}`
-  const content = converted.replace(/\s+$/, "")
+  const content = [converted.replace(/\s+$/, ""), code.unclosedFence].filter((part) => part !== undefined).join("\n")
   const sources = opts.sourceCards.length > 0 ? opts.sourceCards.map(cardLink).join(", ") : FOOTER_NO_SOURCES
   const footer = `---\n來源：${sources}\n${FOOTER_NOTICE}`
   return [title, content, footer].filter((part) => part !== "").join("\n\n")
@@ -108,6 +119,8 @@ interface MaskedCode {
   masked: string
   /** Puts the code regions back. */
   restore(text: string): string
+  /** When a fence is never closed: the line that closes it. The unclosed fence runs to the end of the text. */
+  unclosedFence?: string
 }
 
 /** The placeholder of region `n`. A NUL cannot be in the text: callers replace it first. */
@@ -128,19 +141,21 @@ function maskCode(input: string): MaskedCode {
   }
 
   const text = input.replace(/\u0000/g, "\uFFFD")
-  const withoutFences = maskFences(text, keep)
-  const masked = maskInlineCode(withoutFences, keep)
+  const fences = maskFences(text, keep)
+  const masked = maskInlineCode(fences.text, keep)
   return {
     masked,
     restore: (value) => value.replace(/\u0000(\d+)\u0000/g, (_match, n: string) => regions[Number(n)] ?? ""),
+    unclosedFence: fences.unclosedFence,
   }
 }
 
 const FENCE_OPEN = /^[ \t>]*(`{3,}|~{3,})(.*)$/
 
-function maskFences(text: string, keep: (code: string) => string): string {
+function maskFences(text: string, keep: (code: string) => string): { text: string; unclosedFence?: string } {
   const lines = text.split("\n")
   const out: string[] = []
+  let unclosedFence: string | undefined
   let i = 0
   while (i < lines.length) {
     const open = FENCE_OPEN.exec(lines[i])
@@ -153,11 +168,12 @@ function maskFences(text: string, keep: (code: string) => string): string {
     const close = new RegExp(`^[ \\t>]*${marker[0] === "`" ? "`" : "~"}{${marker.length},}[ \\t]*$`)
     let end = i + 1
     while (end < lines.length && !close.test(lines[end])) end++
+    if (end >= lines.length) unclosedFence = `${lines[i].slice(0, lines[i].indexOf(marker))}${marker}`
     const last = Math.min(end, lines.length - 1)
     out.push(keep(lines.slice(i, last + 1).join("\n")))
     i = last + 1
   }
-  return out.join("\n")
+  return { text: out.join("\n"), unclosedFence }
 }
 
 const PARAGRAPH_BREAK = /\n[ \t]*\n/g

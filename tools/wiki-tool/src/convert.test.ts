@@ -35,6 +35,10 @@ describe("cardLink", () => {
     expect(cardLink(CARD_A)).toBe(`[Card A](heptabase://card/${id(1)})`)
   })
 
+  it("trims the title after collapsing whitespace", () => {
+    expect(cardLink({ cardId: id(3), title: "  Card \n  A  " })).toBe(`[Card A](heptabase://card/${id(3)})`)
+  })
+
   it("escapes brackets and backslashes in the title", () => {
     expect(cardLink({ cardId: id(3), title: "Draft [v2] notes" })).toBe(
       `[Draft \\[v2\\] notes](heptabase://card/${id(3)})`,
@@ -87,8 +91,18 @@ describe("wikiPageToCard", () => {
     expect(card).toContain(`See [Card A](heptabase://card/${id(1)}) for more.`)
   })
 
-  it("resolves a wikilink with a label to the card link", () => {
+  it("keeps the label as the link text of a resolved wikilink", () => {
     const card = wikiPageToCard("See [[alpha|the first card]].\n", options())
+    expect(card).toContain(`See [the first card](heptabase://card/${id(1)}).`)
+  })
+
+  it("escapes a label like a title", () => {
+    const card = wikiPageToCard("See [[alpha|ends with slash\\]].\n", options())
+    expect(card).toContain(`See [ends with slash\\\\](heptabase://card/${id(1)}).`)
+  })
+
+  it("uses the card title for a resolved wikilink with an empty label", () => {
+    const card = wikiPageToCard("See [[alpha| ]].\n", options())
     expect(card).toContain(`See [Card A](heptabase://card/${id(1)}).`)
   })
 
@@ -122,6 +136,45 @@ describe("wikiPageToCard", () => {
   it("trims spaces inside a wikilink", () => {
     const card = wikiPageToCard("[[ alpha ]]\n", options())
     expect(card).toContain(`[Card A](heptabase://card/${id(1)})`)
+  })
+
+  it("resolves an anchored wikilink by the slug without the anchor", () => {
+    const resolved: string[] = []
+    const titled: string[] = []
+    const card = wikiPageToCard(
+      "[[alpha#Some heading]] [[alpha#^block|the label]] [[ alpha #h ]] [[beta#Heading]] [[beta#Heading|the label]]\n",
+      options({
+        resolveLink: (slug) => {
+          resolved.push(slug)
+          return slug === "alpha" ? CARD_A : null
+        },
+        titleForSlug: (slug) => {
+          titled.push(slug)
+          return `Title of ${slug}`
+        },
+      }),
+    )
+    expect(card).toContain(
+      `[Card A](heptabase://card/${id(1)}) [the label](heptabase://card/${id(1)}) [Card A](heptabase://card/${id(1)}) ` +
+        `Title of beta${UNSYNCED} the label${UNSYNCED}`,
+    )
+    expect(resolved).toEqual(["alpha", "alpha", "alpha", "beta", "beta"])
+    expect(titled).toEqual(["beta"])
+  })
+
+  it("writes a same-page anchor as plain text", () => {
+    const calls: string[] = []
+    const card = wikiPageToCard(
+      "See [[#Some heading]] and [[#Some heading|this part]].\n",
+      options({
+        resolveLink: (slug) => {
+          calls.push(slug)
+          return null
+        },
+      }),
+    )
+    expect(card).toContain("See Some heading and this part.")
+    expect(calls).toEqual([])
   })
 
   it("passes the slug to resolveLink and titleForSlug", () => {
@@ -205,10 +258,19 @@ describe("wikiPageToCard", () => {
     expect(card).toContain(`- item [Card A](heptabase://card/${id(1)})\n  \`\`\`js\n  [[alpha]]\n  \`\`\`\n\n> \`\`\`\n> [[alpha]]\n> \`\`\``)
   })
 
-  it("keeps an unclosed fence as code to the end", () => {
-    const card = wikiPageToCard("```\n[[alpha]]\n", options())
-    expect(card).toContain("```\n[[alpha]]")
-    expect(card).not.toContain("heptabase://card")
+  it("keeps an unclosed fence as code and closes it before the footer", () => {
+    const card = wikiPageToCard("Intro.\n\n```\n[[alpha]]\n", options())
+    expect(card).toBe(`# Page Title\n\nIntro.\n\n\`\`\`\n[[alpha]]\n\`\`\`\n\n---\n來源：無\n${FOOTER_TAIL}`)
+  })
+
+  it("closes an unclosed fence with the same marker and indent", () => {
+    const card = wikiPageToCard("- item\n  ~~~~js\n  code\n\n", options())
+    expect(card).toBe(`# Page Title\n\n- item\n  ~~~~js\n  code\n  ~~~~\n\n---\n來源：無\n${FOOTER_TAIL}`)
+  })
+
+  it("does not add a closing fence when the fence is closed", () => {
+    const card = wikiPageToCard("```\ncode\n```\n", options())
+    expect(card).toBe(`# Page Title\n\n\`\`\`\ncode\n\`\`\`\n\n---\n來源：無\n${FOOTER_TAIL}`)
   })
 
   it("treats a lone backtick as text", () => {
