@@ -46,7 +46,9 @@ import type { MultimodalConfig } from "@/stores/wiki-store"
 import { BASE_GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { loadMechanismContext } from "@/lib/mechanism-wiki/context"
 import { listMechanismSlugsStub, parseAnalysisDecisions } from "@/lib/mechanism-wiki/decisions"
+import { enforceMechanismRules } from "@/lib/mechanism-wiki/enforce"
 import { appendPromptSection, prepareMechanismPrompts } from "@/lib/mechanism-wiki/prompts"
+import type { AnalysisDecisions } from "@/lib/mechanism-wiki/types"
 import { computeContextBudget } from "@/lib/context-budget"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
 import { persistParsedMarkdown } from "@/lib/parsed-source-output"
@@ -409,8 +411,8 @@ export interface ParseFileBlocksResult {
 // extra interior whitespace (`--- END FILE ---`), and anchored to the
 // whole trimmed line so a stray `---END FILE---` inside prose or a list
 // item (`- ---END FILE---`) won't register.
-const OPENER_LINE = /^---\s*FILE:\s*(.+?)\s*---\s*$/i
-const CLOSER_LINE = /^---\s*END\s+FILE\s*---\s*$/i
+export const OPENER_LINE = /^---\s*FILE:\s*(.+?)\s*---\s*$/i
+export const CLOSER_LINE = /^---\s*END\s+FILE\s*---\s*$/i
 
 /**
  * Reject FILE block paths that try to escape the project's `wiki/`
@@ -1147,6 +1149,7 @@ async function autoIngestImpl(
   // In a mechanism wiki, the Decisions section of the analysis (single pass, or
   // the head of the final digest of a long source) sets the generation rules.
   let mechanismGeneration: string | undefined
+  let mechanismDecisions: AnalysisDecisions | undefined
   if (mechanism && mechanismCtx) {
     const existingMechanisms = await listMechanismSlugsStub(mechanismCtx.mechanismLibraryPath)
     const decisions = parseAnalysisDecisions(analysis, mechanismCtx, mechanism.hint, existingMechanisms)
@@ -1154,6 +1157,7 @@ async function autoIngestImpl(
       console.warn(`[ingest:mechanism] decision problems for "${fileName}":`, decisions.problems)
     }
     mechanismGeneration = mechanism.generation(decisions)
+    mechanismDecisions = decisions
   }
   let generation = ""
   let generationError: string | null = null
@@ -1293,6 +1297,16 @@ async function autoIngestImpl(
   throwIfIngestAborted(signal, activityId)
   activity.updateItem(activityId, { detail: "Writing files..." })
   await migrateLegacySourceSummaryIfSafe(pp, sourceIdentity, sourceSummaryPath, onFileWritten)
+  // Mechanism wiki: fix domains and mechanism pages in the generated text before it is written.
+  const mechanismReviews: Omit<ReviewItem, "id" | "resolved" | "createdAt">[] = []
+  const enforceMechanism = (text: string): string => {
+    if (!mechanismCtx || !mechanismDecisions) return text
+    const enforced = enforceMechanismRules(text, mechanismCtx, mechanismDecisions, sp)
+    mechanismReviews.push(...enforced.reviews)
+    for (const note of enforced.notes) console.log(`[ingest:mechanism] ${note}`)
+    return enforced.text
+  }
+  generation = enforceMechanism(generation)
   const writeResult = await writeFileBlocks(
     pp,
     generation,
@@ -1374,7 +1388,7 @@ async function autoIngestImpl(
         writeWarnings.push(...filteredRepair.warnings)
         const repairResult = await writeFileBlocks(
           pp,
-          filteredRepair.text,
+          enforceMechanism(filteredRepair.text),
           llmConfig,
           sourceIdentity,
           sourceSummaryPath,
@@ -1567,6 +1581,7 @@ async function autoIngestImpl(
   const reviewItems = [
     ...parseReviewBlocks(generation, sp),
     ...parseReviewBlocks(reviewSuggestionOutput, sp),
+    ...mechanismReviews,
   ]
   if (reviewItems.length > 0) {
     useReviewStore.getState().addItems(reviewItems)
@@ -2364,7 +2379,7 @@ function isOwnedOnlyBySource(content: string, sourceIdentity: string): boolean {
   )
 }
 
-const REVIEW_BLOCK_REGEX = /---REVIEW:\s*(\w[\w-]*)\s*\|\s*(.+?)\s*---\n([\s\S]*?)---END REVIEW---/g
+export const REVIEW_BLOCK_REGEX = /---REVIEW:\s*(\w[\w-]*)\s*\|\s*(.+?)\s*---\n([\s\S]*?)---END REVIEW---/g
 
 function parseReviewBlocks(
   text: string,

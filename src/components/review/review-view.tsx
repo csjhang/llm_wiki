@@ -4,9 +4,13 @@ import {
   AlertTriangle,
   Copy,
   FileQuestion,
+  FileSearch,
+  Files,
   CheckCircle2,
   Lightbulb,
+  ListTree,
   MessageSquare,
+  Network,
   X,
   Check,
   Trash2,
@@ -33,6 +37,10 @@ const typeConfig: Record<ReviewItem["type"], { icon: typeof AlertTriangle; color
   "missing-page": { icon: FileQuestion, color: "text-purple-500" },
   confirm: { icon: MessageSquare, color: "text-foreground" },
   suggestion: { icon: Lightbulb, color: "text-emerald-500" },
+  "new-domain": { icon: ListTree, color: "text-cyan-500" },
+  "new-mechanism": { icon: Network, color: "text-indigo-500" },
+  "duplicate-source": { icon: Files, color: "text-sky-500" },
+  "research-result": { icon: FileSearch, color: "text-teal-500" },
 }
 
 export function ReviewView() {

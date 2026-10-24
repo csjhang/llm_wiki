@@ -3,7 +3,9 @@
  *
  * A project with `domains.yaml` is a mechanism wiki and gets the domain and
  * mechanism sections in its analysis, chunk analysis, and generation prompts.
- * A project without it must see the same prompts as upstream.
+ * A project without it must see the same prompts as upstream. The same file
+ * checks what ingest writes from the generation: a mechanism wiki gets its
+ * rules enforced on the pages, and a plain wiki gets its blocks unchanged.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import fs from "node:fs/promises"
@@ -16,10 +18,13 @@ import { useWikiStore } from "@/stores/wiki-store"
 
 vi.mock("@/commands/fs", () => realFs)
 
-/** What the mocked model answers for the analysis and for the digest of a chunk. Tests change it. */
+/**
+ * What the mocked model answers for the analysis, for the digest of a chunk, and in the generation
+ * after the source summary (`generation`) and in a repair of a truncated block (`repair`). Tests change it.
+ */
 const DEFAULT_ANALYSIS = "## Analysis\nA short analysis."
 const DEFAULT_DIGEST = "A digest."
-const llm = vi.hoisted(() => ({ analysis: "", digest: "" }))
+const llm = vi.hoisted(() => ({ analysis: "", digest: "", generation: "", repair: "" }))
 
 vi.mock("./llm-client", () => ({
   streamChat: vi.fn(async (_cfg, messages, cb) => {
@@ -28,6 +33,12 @@ vi.mock("./llm-client", () => ({
     if (systemPrompt.startsWith("You are analyzing a long source document")) {
       cb.onToken(`## Chunk Analysis\nA chunk.\n\n## Updated Global Digest\n${llm.digest}`)
       cb.onDone()
+      return
+    }
+
+    if (systemPrompt.startsWith("You are repairing truncated wiki FILE blocks")) {
+      cb.onToken(llm.repair)
+      cb.onDone({ finishReason: "stop", truncated: false })
       return
     }
 
@@ -46,6 +57,7 @@ vi.mock("./llm-client", () => ({
       "",
       "# Source",
       "---END FILE---",
+      ...(llm.generation === "" ? [] : [llm.generation]),
     ].join("\n"))
     cb.onDone({ finishReason: "stop", truncated: false })
   }),
@@ -113,6 +125,8 @@ describe("ingest prompts and the mechanism context", () => {
     vi.spyOn(console, "warn").mockImplementation(() => {})
     llm.analysis = DEFAULT_ANALYSIS
     llm.digest = DEFAULT_DIGEST
+    llm.generation = ""
+    llm.repair = ""
     tmp = await createTempProject("mechanism-prompts")
     useReviewStore.setState({ items: [] })
     useActivityStore.setState({ items: [] })
@@ -445,5 +459,129 @@ describe("ingest prompts and the mechanism context", () => {
     await ingest(project, { maxContextSize })
 
     expect(capturedCalls().filter(isChunk).length).toBeGreaterThan(1)
+  })
+
+  // --- what ingest writes from the generation -----------------------------
+
+  /** A concept page the way a model writes it when it forgets the domain. */
+  const CONCEPT_WITHOUT_DOMAIN = [
+    "---FILE: wiki/concepts/attention.md---",
+    "---",
+    "type: concept",
+    "title: Attention",
+    "tags: []",
+    'sources: ["note.md"]',
+    "---",
+    "# Attention",
+    "",
+    "Attention weighs the parts of an input.",
+    "---END FILE---",
+  ].join("\n")
+
+  const MECHANISM_PAGE = [
+    "---FILE: wiki/mechanisms/backpressure.md---",
+    "---",
+    "type: mechanism",
+    "title: Backpressure",
+    "domain: ai/architecture",
+    "tags: []",
+    "---",
+    "# Backpressure",
+    "",
+    "A slow consumer slows the producer.",
+    "---END FILE---",
+  ].join("\n")
+
+  const NEW_MECHANISM_REVIEW = [
+    "---REVIEW: new-mechanism | Flow control---",
+    "A receiver limits how fast a sender may send.",
+    "PAGES: wiki/concepts/attention.md",
+    "---END REVIEW---",
+  ].join("\n")
+
+  const WORK_YAML = "version: 1\nid: work\nrole: work\nmechanism_library: ../reading\n"
+
+  function reviewSummary(): Array<[string, string]> {
+    return useReviewStore.getState().items.map((item) => [item.type, item.title])
+  }
+
+  it("writes a generated concept page with the decided domain", async () => {
+    llm.analysis = "## Decisions\nDOMAIN: ai/architecture\n"
+    llm.generation = CONCEPT_WITHOUT_DOMAIN
+    const project = await mechanismProject()
+    await ingest(project)
+
+    const page = await fs.readFile(`${project}/wiki/concepts/attention.md`, "utf8")
+    expect(page).toMatch(/^domain: ai\/architecture$/m)
+    expect(page).toContain("Attention weighs the parts of an input.")
+  })
+
+  it("writes the proposed domain on the pages and queues a new-domain review", async () => {
+    llm.analysis = "## Decisions\nNEW-DOMAIN: cognition/attention | ai | How attention works\n"
+    llm.generation = CONCEPT_WITHOUT_DOMAIN
+    const project = await mechanismProject()
+    await ingest(project)
+
+    const page = await fs.readFile(`${project}/wiki/concepts/attention.md`, "utf8")
+    expect(page).toMatch(/^domain: cognition\/attention$/m)
+    expect(reviewSummary()).toEqual([["new-domain", "New domain: cognition/attention"]])
+    const [review] = useReviewStore.getState().items
+    expect(review.options.map((option) => option.action)).toEqual(["mech:approve-domain", "Skip"])
+    expect(review.description).toContain("PROPOSAL: cognition/attention | ai | How attention works")
+  })
+
+  it("keeps a mechanism page of a reading wiki without domain and with lenses", async () => {
+    llm.analysis = "## Decisions\nDOMAIN: ai/architecture\n"
+    llm.generation = MECHANISM_PAGE
+    const project = await mechanismProject()
+    await ingest(project)
+
+    const page = await fs.readFile(`${project}/wiki/mechanisms/backpressure.md`, "utf8")
+    expect(page).not.toMatch(/^domain:/m)
+    expect(page).toMatch(/^lenses: \[ai\]$/m)
+    expect(page).toMatch(/^instances: \[\]$/m)
+  })
+
+  it("sends the mechanism pages of a work wiki to review instead of writing them", async () => {
+    llm.analysis = "## Decisions\nDOMAIN: ai/architecture\n"
+    llm.generation = [CONCEPT_WITHOUT_DOMAIN, MECHANISM_PAGE, NEW_MECHANISM_REVIEW].join("\n\n")
+    const project = await mechanismProject(SOURCE_TEXT, WORK_YAML)
+    await ingest(project)
+
+    await expect(fs.access(`${project}/wiki/mechanisms/backpressure.md`)).rejects.toThrow()
+    expect(await fs.readFile(`${project}/wiki/concepts/attention.md`, "utf8")).toMatch(/^domain: ai\/architecture$/m)
+    expect(reviewSummary().sort()).toEqual([
+      ["new-mechanism", "Backpressure"],
+      ["new-mechanism", "Flow control"],
+    ])
+    for (const review of useReviewStore.getState().items) {
+      expect(review.options.map((option) => option.action)).toEqual(["mech:propose-mechanism", "Skip"])
+    }
+  })
+
+  it("applies the rules to a page that the truncation repair writes", async () => {
+    llm.analysis = "## Decisions\nDOMAIN: ai/architecture\n"
+    llm.generation = CONCEPT_WITHOUT_DOMAIN.replace("\n---END FILE---", "")
+    llm.repair = CONCEPT_WITHOUT_DOMAIN
+    const project = await mechanismProject()
+    await ingest(project)
+
+    expect(mockStreamChat.mock.calls.some(([, messages]) =>
+      String(messages?.[0]?.content ?? "").startsWith("You are repairing truncated wiki FILE blocks"),
+    )).toBe(true)
+    const page = await fs.readFile(`${project}/wiki/concepts/attention.md`, "utf8")
+    expect(page).toMatch(/^domain: ai\/architecture$/m)
+  })
+
+  it("writes the FILE blocks of a plain wiki unchanged", async () => {
+    llm.generation = [CONCEPT_WITHOUT_DOMAIN, MECHANISM_PAGE, NEW_MECHANISM_REVIEW].join("\n\n")
+    const project = await plainProject()
+    await ingest(project)
+
+    expect(await fs.readFile(`${project}/wiki/concepts/attention.md`, "utf8")).not.toMatch(/^domain:/m)
+    // Upstream writes a page under wiki/mechanisms/ like any other, with its own domain line.
+    expect(await fs.readFile(`${project}/wiki/mechanisms/backpressure.md`, "utf8")).toMatch(/^domain: ai\/architecture$/m)
+    // Upstream reads a REVIEW block of an unknown type as a confirm item.
+    expect(reviewSummary()).toEqual([["confirm", "Flow control"]])
   })
 })

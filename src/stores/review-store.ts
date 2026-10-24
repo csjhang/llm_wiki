@@ -8,7 +8,17 @@ export interface ReviewOption {
 
 export interface ReviewItem {
   id: string
-  type: "contradiction" | "duplicate" | "missing-page" | "confirm" | "suggestion"
+  type:
+    | "contradiction"
+    | "duplicate"
+    | "missing-page"
+    | "confirm"
+    | "suggestion"
+    // Mechanism wiki items. Their option actions start with `mech:`.
+    | "new-domain"
+    | "new-mechanism"
+    | "duplicate-source"
+    | "research-result"
   title: string
   description: string
   sourcePath?: string
