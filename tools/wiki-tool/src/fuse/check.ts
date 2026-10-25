@@ -15,8 +15,9 @@
  * - Role mapping: it has a table and at least one `[[link]]`. The one-line hypothesis needs no link.
  * - What to verify: it has a table, and the last column (How to refute) is not empty in any row. A cell with no
  *   letter or digit (`-`, `<br>`) is empty. The rows by `status` (rulings R16, R18):
- *   `draft` may have no row; `testing` needs a row that links a page in `wiki/queries/`; `supported` and `refuted` need
- *   at least one row, and each row links at least one page of this wiki as evidence. A hypothesis page (a page in
+ *   `draft` may have no row; `testing` needs a row that links a page in `wiki/queries/`; `supported` needs at least
+ *   one row, and each row links at least one page of this wiki as evidence; `refuted` needs at least one row that
+ *   links such a page, and its other rows may have no link (ruling S15). A hypothesis page (a page in
  *   `wiki/hypotheses/`, this one included) is not evidence.
  * - `relation: stack` (ruling R17): `from_domain` is the base layer and `to_domain` is the upper layer. Which of two
  *   domains is the lower one is not in the page, so the check only refuses a stack of a domain on itself.
@@ -250,10 +251,17 @@ function checkVerify(project: string, section: string, status: string | null): s
     const linksQuery = table.rows.some((row) => pages.find(wikiLinkTargets(row.join(" | "))).some(isQueryPage))
     if (!linksQuery) problems.push(`status testing needs a row under What to verify that links a page in ${QUERIES_FOLDER}`)
   } else {
+    // `supported`: every row needs evidence. `refuted` (ruling S15): one row with evidence is enough, so the rows
+    // without evidence are problems only when no row has it.
+    const lacking: string[] = []
+    let evidenced = 0
     table.rows.forEach((row, index) => {
       const resolved = wikiLinkTargets(row.join(" | ")).map((target) => ({ target, found: pages.find([target]) }))
       // A hypothesis page (this one, or another) holds no evidence: it is a claim that is still to be tested.
-      if (resolved.some(({ found }) => found.some((page) => !isHypothesisPage(page)))) return
+      if (resolved.some(({ found }) => found.some((page) => !isHypothesisPage(page)))) {
+        evidenced += 1
+        return
+      }
       const missing = resolved.filter(({ found }) => found.length === 0).map(({ target }) => `[[${target}]]`)
       const claims = resolved.filter(({ found }) => found.length > 0).map(({ target }) => `[[${target}]]`)
       const notes = [
@@ -261,8 +269,10 @@ function checkVerify(project: string, section: string, status: string | null): s
         claims.length > 0 ? `${claims.join(", ")} ${claims.length > 1 ? "are hypothesis pages" : "is a hypothesis page"}, and a hypothesis page is not evidence` : "",
       ].filter((note) => note !== "")
       const why = notes.length > 0 ? `; ${notes.join("; ")}` : ""
-      problems.push(`What to verify ${rowName(row, index)}: status ${status} needs a link to a wiki page as evidence${why}`)
+      const need = status === "supported" ? "a link to a wiki page as evidence" : "at least one row with a link to a wiki page as evidence"
+      lacking.push(`What to verify ${rowName(row, index)}: status ${status} needs ${need}${why}`)
     })
+    if (status === "supported" || evidenced === 0) problems.push(...lacking)
   }
   problems.push(...pages.problems)
   return problems

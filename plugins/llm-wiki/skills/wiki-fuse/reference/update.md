@@ -25,7 +25,7 @@ The new evidence is in the query pages of `wiki/queries/`. The goal is to re-eva
 11. Update the mapping rows that the new evidence changes. A "Fits?" value changes only when a cited page supports the new value. Update "Gaps and impact" to match.
 12. Add a new row under "What to verify" for each new claim that has no page. Keep the "How to refute" cell filled.
 13. Set `status` by the Do list of `schema/page-types/hypothesis.md`. Use the results of step 9 and the ranks of step 8.
-14. `fuse check` asks every row to link a page as evidence when `status` is `supported` or `refuted`. If a row has no page, do not link an unrelated page to pass the check. Keep the status `testing`. Tell the user which row is refuted or resolved, and which row blocks the status.
+14. `fuse check` follows the rule file. `refuted` needs one row that links an evidence page, and the other rows can have no link. `supported` needs a link in every row. If a row of a `supported` page has no page, do not link an unrelated page to pass the check. Keep the status `testing`. Tell the user which row blocks the status.
 15. Do not change `strength` because of evidence. Change it only when the role mapping itself changed. Then follow the Strength rules again, as Step 6 of `directed.md` says.
 16. Set `updated` to today.
 17. Run `fuse check` until the page passes.

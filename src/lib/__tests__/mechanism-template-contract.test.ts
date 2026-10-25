@@ -1101,6 +1101,11 @@ describe("mechanism template: final review fixes", () => {
     )
     expect(rules).toContain('`supported` also needs at least one row under "What to verify".')
     expect(rules).toContain("A page with zero rows stays `draft`.")
+    // Ruling S15: `fuse check` asks every row of a supported page for an evidence link, and one row of a refuted page.
+    expect(rules).toContain('Link the page that holds the evidence in the "Evidence needed" cell of every row.')
+    expect(rules).toContain(
+      'Link the page that holds this evidence in the "Evidence needed" cell of that row. The other rows can have no link.',
+    )
   })
 
   it("A11: the unknown rule covers parts, flows, and constraints; the one-line exemption is repeated", () => {

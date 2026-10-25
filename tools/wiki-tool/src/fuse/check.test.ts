@@ -402,6 +402,14 @@ describe("fuse check: what to verify", () => {
       await expectFails({ fields: { status: "supported" }, sections: { verify: verifyTable(rows) } }, /row 3.*A claim with no page.*evidence/s)
     })
 
+    it("supported with one row without evidence still fails", async () => {
+      const rows = [
+        ["An evidenced claim", `Records in ${link(EVIDENCE_PAGE)}`, "A result that disproves it"],
+        ["An open claim", "Some records", "Another result"],
+      ]
+      await expectFails({ fields: { status: "supported" }, sections: { verify: verifyTable(rows) } }, /row 2.*An open claim.*evidence/s)
+    })
+
     it("supported fails for a row that links a page that does not exist", async () => {
       const rows = [["A claim", `Records in ${link("no-such-page")}`, "A result that disproves it"]]
       await expectFails({ fields: { status: "supported" }, sections: { verify: verifyTable(rows) } }, /row 1.*no-such-page/s)
@@ -446,8 +454,46 @@ describe("fuse check: what to verify", () => {
       await expectPasses({ fields: { status: "refuted" }, sections: { verify: verifyTable(rows) } })
     })
 
-    it("refuted fails for a row that links no page", async () => {
+    it("refuted fails for a row that links no page, when no row links a page", async () => {
       await expectFails({ fields: { status: "refuted" } }, /row 1.*evidence/s)
+    })
+
+    it("refuted with one evidenced row passes", async () => {
+      const rows = [
+        ["A refuted claim", `Records in ${link(EVIDENCE_PAGE)}`, "A result that disproves it"],
+        ["An open claim", "Some records", "Another result"],
+        ["A second open claim", "More records", "A third result"],
+      ]
+      await expectPasses({ fields: { status: "refuted" }, sections: { verify: verifyTable(rows) } })
+    })
+
+    it("refuted with no evidenced row fails and names each row", async () => {
+      const rows = [
+        ["First open claim", "Some records", "A result that disproves it"],
+        ["Second open claim", "More records", "Another result"],
+      ]
+      const { output } = await checkPage({ fields: { status: "refuted" }, sections: { verify: verifyTable(rows) } })
+      expect(output.ok).toBe(false)
+      const problems = output.problems ?? []
+      expect(problems.some((text) => /row 1.*First open claim.*refuted needs at least one row.*evidence/s.test(text))).toBe(true)
+      expect(problems.some((text) => /row 2.*Second open claim/s.test(text))).toBe(true)
+    })
+
+    it("a hypothesis page is not the evidenced row of a refuted page", async () => {
+      const project = makeWiki({ "wiki/hypotheses/other-idea.md": hypothesisPage() })
+      const hypothesisOnly = ["A claim", `Records in ${link("other-idea")}`, "A result that disproves it"]
+      const open = ["An open claim", "Some records", "Another result"]
+      await expectFails({ fields: { status: "refuted" }, sections: { verify: verifyTable([hypothesisOnly, open]) } }, /row 1.*other-idea.*hypothesis page/s, project)
+      const evidenced = ["A refuted claim", `Records in ${link(EVIDENCE_PAGE)}`, "Another result"]
+      await expectPasses({ fields: { status: "refuted" }, sections: { verify: verifyTable([hypothesisOnly, evidenced]) } }, project)
+    })
+
+    it("a refuted page still needs a How to refute cell in every row", async () => {
+      const rows = [
+        ["A refuted claim", `Records in ${link(EVIDENCE_PAGE)}`, "A result that disproves it"],
+        ["An open claim", "Some records", ""],
+      ]
+      await expectFails({ fields: { status: "refuted" }, sections: { verify: verifyTable(rows) } }, /row 2.*How to refute/s)
     })
 
     it("refuted with zero verify rows fails", async () => {

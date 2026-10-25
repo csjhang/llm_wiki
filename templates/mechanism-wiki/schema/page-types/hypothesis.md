@@ -70,9 +70,9 @@ Pick the headings by the meaning of the output language, as `schema.md` says.
 - Write `status: draft` when you create the page. `draft` means you wrote the page and have not tested it.
 - Change `draft` to `testing` when at least one row under "What to verify" links a query page that holds evidence.
 - Set `status: supported` only when evidence from the top two ranks resolves every row under "What to verify". The ranks are in the Evidence standard of the lens of `to_domain`.
-- `supported` also needs at least one row under "What to verify". A page with zero rows stays `draft`.
+- `supported` also needs at least one row under "What to verify". A page with zero rows stays `draft`. Link the page that holds the evidence in the "Evidence needed" cell of every row.
 - A row that rests only on lower ranks stays open. Then the status stays `testing` at most.
-- Set `status: refuted` only when evidence from the top two ranks refutes one row under "What to verify".
+- Set `status: refuted` only when evidence from the top two ranks refutes one row under "What to verify". Link the page that holds this evidence in the "Evidence needed" cell of that row. The other rows can have no link.
 - A later fusion update changes the status after it reads new evidence.
 - Write only in the target wiki.
 
@@ -170,7 +170,7 @@ updated: 2026-01-15
 - [ ] Do `from_domain` and `to_domain` each hold one path from `domains.yaml`?
 - [ ] For a stack, is `from_domain` the base layer and `to_domain` the upper layer?
 - [ ] Are `relation`, `strength`, and `status` values from the allowed lists?
-- [ ] Does `status` follow the Rules: `testing` needs a linked query page, and `supported` needs at least one row?
+- [ ] Does `status` follow the Rules? `testing` needs a linked query page. `supported` needs a linked evidence page in every row. `refuted` needs one.
 - [ ] Did you set `strength` from the Strength rules, and `status` from the evidence ranks, in the lens of `to_domain`?
 - [ ] Did you read the lens of `to_domain` and the lens of `from_domain`?
 - [ ] Are the six sections present, in order, with headings in the output language?
