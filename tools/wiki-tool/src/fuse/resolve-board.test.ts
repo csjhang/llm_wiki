@@ -161,6 +161,18 @@ describe("fuse resolve-board", () => {
     expect(output.cards?.map((card) => card.cardId)).toEqual([id(6), id(7), id(21), id(22)])
   })
 
+  it("names a mind map without a title by its id in the warning", async () => {
+    const project = makeProject()
+    writeProjectFile(
+      project,
+      "board.txt",
+      [`whiteboard "Board" [${id(1)}]`, `section "Target" [${id(18)}]`, `  mindMap [${id(20)}] 7 nodes`].join("\n"),
+    )
+    const { exitCode, output } = await resolveBoard(["--project", project, "--structure", join(project, "board.txt")])
+    expect(exitCode).toBe(0)
+    expect(output.warnings).toEqual([`mind map [${id(20)}] has no --mindmap file; its cards are not listed`])
+  })
+
   it("refuses a mind map file of another mind map", async () => {
     const project = makeProject()
     writeProjectFile(

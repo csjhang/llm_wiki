@@ -16,10 +16,11 @@ const UUID = "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-
 
 /**
  * `<indent><keyword> "<title>" [<uuid>]<rest>` - the lazy title ends at the first `" [<uuid>]`.
+ * The title is optional: read_whiteboard writes a mind map line as `mindMap [<uuid>] 7 nodes`, with no title.
  * A line is text up to a line feed, so the captures are `[^\n]`, not `.`: a dot does not match
  * U+2028, U+2029, or a carriage return, and a line with one of them would be skipped.
  */
-const OBJECT_LINE = new RegExp(`^(\\s*)([A-Za-z][A-Za-z0-9_]*) "([^\\n]*?)" \\[(${UUID})\\]([^\\n]*)$`)
+const OBJECT_LINE = new RegExp(`^(\\s*)([A-Za-z][A-Za-z0-9_]*) (?:"([^\\n]*?)" )?\\[(${UUID})\\]([^\\n]*)$`)
 
 /** One `<title> [<uuid>]` item of a comma-separated list. A title may hold commas. */
 const LISTED_ITEM = new RegExp(`(?:^|, )([^\\n]+?) \\[(${UUID})\\](?=, |$)`, "g")
@@ -133,10 +134,12 @@ interface ObjectLine {
 function parseObjectLine(line: string): ObjectLine | null {
   const match = OBJECT_LINE.exec(line)
   if (!match) return null
+  // Only a mind map line may lack its title. A card, section, or whiteboard line without one is skipped, as before.
+  if (match[3] === undefined && match[2] !== "mindMap") return null
   return {
     indent: match[1].replace(/\t/g, "  ").length,
     keyword: match[2],
-    title: unescapeTitle(match[3]),
+    title: match[3] === undefined ? "" : unescapeTitle(match[3]),
     id: match[4],
     rest: match[5],
   }

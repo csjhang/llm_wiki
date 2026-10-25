@@ -290,7 +290,7 @@ describe("parseWhiteboardStructure", () => {
 
   it("says which section holds each mind map", () => {
     const structure = parseWhiteboardStructure(fixture("read_whiteboard_structure.txt"))
-    expect(structure.mindMaps).toEqual([{ id: id(20), title: "Topic one", sectionId: id(26) }])
+    expect(structure.mindMaps).toEqual([{ id: id(20), title: "", sectionId: id(26) }])
     const text = [
       `whiteboard "Board" [${id(1)}]`,
       `section "S" [${id(2)}]`,
@@ -304,6 +304,34 @@ describe("parseWhiteboardStructure", () => {
       { id: id(4), title: "Not indented", sectionId: null },
       { id: id(5), title: "Loose", sectionId: null },
     ])
+  })
+
+  it("reads a mind map line without a title, as read_whiteboard writes it", () => {
+    const text = [
+      `whiteboard "Board" [${id(1)}]`,
+      `section "S" [${id(2)}]`,
+      `  mindMap [${id(3)}] 2 nodes`,
+      `mindMap [${id(4)}] 2 nodes`,
+    ].join("\n")
+    const structure = parseWhiteboardStructure(text)
+    expect(structure.mindMaps).toEqual([
+      { id: id(3), title: "", sectionId: id(2) },
+      { id: id(4), title: "", sectionId: null },
+    ])
+    expect(structure.mindMapIds).toEqual([id(3), id(4)])
+  })
+
+  it("still skips a card, section, or whiteboard line without a title", () => {
+    const text = [
+      `whiteboard "Board" [${id(1)}]`,
+      `section [${id(2)}]`,
+      `  card [${id(3)}]`,
+      `section "S" [${id(5)}]`,
+      `  card "Titled" [${id(6)}]`,
+    ].join("\n")
+    const structure = parseWhiteboardStructure(text)
+    expect(structure.sections).toEqual([{ id: id(5), title: "S", cards: [{ id: id(6), title: "Titled", type: "card" }] }])
+    expect(structure.unsectioned).toEqual([])
   })
 
   it("accepts the JSON envelope and the raw text alike", () => {
@@ -425,6 +453,13 @@ describe("parseMindMapHeader", () => {
   it("reads the header of a mind map result", () => {
     expect(parseMindMapHeader(fixture("read_object_mindmap.txt"))).toEqual({ id: id(20), title: "Topic one" })
     expect(parseMindMapHeader(fixtureContent("read_object_mindmap.txt"))).toEqual({ id: id(20), title: "Topic one" })
+  })
+
+  it("reads a header without a title as an empty title", () => {
+    expect(parseMindMapHeader(`mindMap [${id(20)}] 7 nodes\n1\tcard "Topic one" cardId: [${id(9)}], nodeId: [${id(27)}]`)).toEqual({
+      id: id(20),
+      title: "",
+    })
   })
 
   it("is null for the result of a card or for other text", () => {

@@ -115,7 +115,10 @@ export function resolveBoard(args: string[]): CommandResult {
 
   const warnings = structure.mindMaps
     .filter((mindMap) => !mindMapCards.has(mindMap.id.toLowerCase()))
-    .map((mindMap) => `mind map "${mindMap.title}" [${mindMap.id}] has no --mindmap file; its cards are not listed`)
+    .map((mindMap) => {
+      const name = mindMap.title === "" ? `mind map [${mindMap.id}]` : `mind map "${mindMap.title}" [${mindMap.id}]`
+      return `${name} has no --mindmap file; its cards are not listed`
+    })
   const placed = placeCards(structure, mindMapCards)
   const cards = resolveCards(placed, wikis, problems)
   if (!cards) return { ok: false, problems }
