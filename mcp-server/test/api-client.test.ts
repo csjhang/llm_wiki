@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { LlmWikiApiClient, normalizeBaseUrl } from "../src/api-client.js"
+import { LlmWikiApiClient, LlmWikiApiUnreachableError, normalizeBaseUrl } from "../src/api-client.js"
 
 test("normalizeBaseUrl trims trailing slashes and falls back to localhost", () => {
   assert.equal(normalizeBaseUrl("http://127.0.0.1:19828///"), "http://127.0.0.1:19828")
@@ -348,4 +348,74 @@ test("API errors include status and server message", async () => {
 
   const client = new LlmWikiApiClient({ fetchImpl })
   await assert.rejects(() => client.projects(), /LLM Wiki API 401: Unauthorized/)
+})
+
+test("network failures raise a typed error that callers can tell from API errors", async () => {
+  const fetchImpl = async (): Promise<Response> => {
+    throw new Error("ECONNREFUSED")
+  }
+
+  const client = new LlmWikiApiClient({ fetchImpl })
+  await assert.rejects(() => client.projects(), (error: unknown) => {
+    assert.ok(error instanceof LlmWikiApiUnreachableError)
+    assert.equal(error.cause instanceof Error ? error.cause.message : "", "ECONNREFUSED")
+    return true
+  })
+})
+
+test("addReview posts the item to the reviews route and returns the id", async () => {
+  const calls: Array<{ url: string; method?: string; body: unknown; authorization?: string }> = []
+  const fetchImpl = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    calls.push({
+      url: String(url),
+      method: init?.method,
+      body: JSON.parse(String(init?.body)),
+      authorization: (init?.headers as Record<string, string>).Authorization,
+    })
+    return new Response(JSON.stringify({ ok: true, projectId: "p1", id: "review-1a2b3c4d" }), { status: 200 })
+  }
+
+  const client = new LlmWikiApiClient({ baseUrl: "http://localhost:19828", token: "secret", fetchImpl })
+  const result = await client.addReview("p1", {
+    type: "mirror-edited",
+    title: "Mirror card edited: wiki/a.md",
+    description: "Edited.",
+    affectedPages: ["wiki/a.md"],
+  })
+
+  assert.deepEqual(result, { id: "review-1a2b3c4d" })
+  assert.equal(calls[0]?.url, "http://localhost:19828/api/v1/projects/p1/reviews")
+  assert.equal(calls[0]?.method, "POST")
+  assert.equal(calls[0]?.authorization, "Bearer secret")
+  assert.deepEqual(calls[0]?.body, {
+    type: "mirror-edited",
+    title: "Mirror card edited: wiki/a.md",
+    description: "Edited.",
+    affectedPages: ["wiki/a.md"],
+  })
+})
+
+test("addReview fails when the answer has no id", async () => {
+  const fetchImpl = async (): Promise<Response> => new Response(JSON.stringify({ ok: true }), { status: 200 })
+  const client = new LlmWikiApiClient({ fetchImpl })
+  await assert.rejects(
+    () => client.addReview("current", { type: "confirm", title: "T", description: "D" }),
+    /review id: expected non-empty string/,
+  )
+})
+
+test("resolveReview sends a PATCH with resolved true and the action", async () => {
+  const calls: Array<{ url: string; method?: string; body: unknown }> = []
+  const fetchImpl = async (url: string | URL | Request, init?: RequestInit): Promise<Response> => {
+    calls.push({ url: String(url), method: init?.method, body: JSON.parse(String(init?.body)) })
+    return new Response(JSON.stringify({ ok: true, reviewId: "review-1", resolved: true }), { status: 200 })
+  }
+
+  const client = new LlmWikiApiClient({ baseUrl: "http://localhost:19828", fetchImpl })
+  const result = await client.resolveReview("current", "review 1", "Dismiss")
+
+  assert.deepEqual(result, { ok: true })
+  assert.equal(calls[0]?.url, "http://localhost:19828/api/v1/projects/current/reviews/review%201")
+  assert.equal(calls[0]?.method, "PATCH")
+  assert.deepEqual(calls[0]?.body, { resolved: true, action: "Dismiss" })
 })

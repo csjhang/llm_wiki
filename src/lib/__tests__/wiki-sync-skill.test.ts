@@ -80,6 +80,33 @@ describe("wiki-sync skill", () => {
     expect(feedback).toContain("`note`")
   })
 
+  it("adds a mirror-edited review item after the feedback note, and only when the app runs", () => {
+    const feedback = skill.slice(skill.indexOf("### skip-edited"), skill.indexOf("### place"))
+    expect(feedback.indexOf("--content")).toBeGreaterThan(-1)
+    expect(feedback.indexOf("llm_wiki_add_review")).toBeGreaterThan(feedback.indexOf("--content"))
+    expect(feedback).toContain("`mirror-edited`")
+    expect(feedback).toContain("`project_id` set to the project folder")
+    expect(feedback).toContain("`llm_wiki_status` said that the app runs")
+    expect(feedback).toContain("If the app does not run, or the call fails, skip step 7")
+    expect(feedback).toContain("The note is the record.")
+    expect(skill).toMatch(/Say if a review item was added, or why it was not\./)
+    const call = steps.slice(steps.indexOf("## llm_wiki_add_review"))
+    expect(call).toContain('"type": "mirror-edited"')
+    expect(call).toContain('"title": "Mirror card edited: <page path>"')
+    expect(call).toContain('"affectedPages": ["<page path>"]')
+    expect(call).toContain("The changes are in <note path>.")
+    expect(call).toContain("`<note path>` is the `note` of the `record` result.")
+  })
+
+  it("passes project_id, the project folder, in every call to a project tool of the llm_wiki MCP", () => {
+    const names = ["llm_wiki_rescan_sources", "llm_wiki_add_review", "llm_wiki_resolve_review"]
+    const sections = steps.split(/^## /m).filter((section) => names.some((name) => section.startsWith(`${name}\n`)))
+    expect(sections.length).toBeGreaterThanOrEqual(2)
+    for (const section of sections) {
+      expect(section, section.split("\n")[0]).toContain('"project_id": "<project folder>"')
+    }
+  })
+
   it("lists whiteboards with depth 10, and rescans after the snapshots", () => {
     expect(steps).toMatch(/"offset": 0, "depth": 10/)
     expect(skill).toContain("`depth` 10")

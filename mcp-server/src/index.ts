@@ -19,6 +19,12 @@ import {
 } from "./api-client.js"
 import { VERSION } from "./version.js"
 import { McpProjectBinding, withActiveProject } from "./project-binding.js"
+import {
+  REVIEW_TYPES,
+  addReviewTool,
+  resolveReviewTool,
+  type ReviewToolContext,
+} from "./review-tools.js"
 
 const DEFAULT_PROJECT_ID = "current"
 const MAX_TEXT_BYTES = 120_000
@@ -26,6 +32,8 @@ const MAX_WRITE_PAGE_BYTES = 2 * 1024 * 1024
 
 const client = new LlmWikiApiClient()
 const projectBinding = new McpProjectBinding()
+
+const reviewToolContext: ReviewToolContext = { client, assertMcpEnabled, resolveProjectScope }
 
 const server = new Server(
   { name: "llm-wiki", version: VERSION },
@@ -102,6 +110,50 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           type: { type: "string", description: "Optional Review item type filter, for example missing-page, duplicate, contradiction, confirm, or suggestion." },
           limit: { type: "number", description: "Maximum review items returned. The local API clamps to its configured maximum." },
         },
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "llm_wiki_add_review",
+      description: "Add one item to the Review tab of a project. The item gets a stable id from its type and title, so adding the same item again merges into it. Returns { id }. The desktop app must be running.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_id: { type: "string", description: "Project UUID, project path, or 'current'. Defaults to current." },
+          type: { type: "string", enum: [...REVIEW_TYPES], description: "Review item type." },
+          title: { type: "string", description: "Short title of the item. Together with the type it makes the id." },
+          description: { type: "string", description: "What the user must know or decide." },
+          options: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                label: { type: "string", description: "Text of the button." },
+                action: { type: "string", description: "Action id that the Review tab runs when the user clicks the button." },
+              },
+              required: ["label", "action"],
+              additionalProperties: false,
+            },
+            description: "Buttons of the card. Defaults to one Dismiss button.",
+          },
+          affectedPages: { type: "array", items: { type: "string" }, description: "Wiki pages the item is about, for example wiki/mechanisms/attention.md." },
+          searchQueries: { type: "array", items: { type: "string" }, description: "Search queries that Deep Research can use for the item." },
+        },
+        required: ["type", "title", "description"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "llm_wiki_resolve_review",
+      description: "Mark one Review tab item as resolved. Use an id from llm_wiki_reviews or from llm_wiki_add_review. Returns { ok }. The desktop app must be running.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          project_id: { type: "string", description: "Project UUID, project path, or 'current'. Defaults to current." },
+          id: { type: "string", description: "Review item id." },
+          action: { type: "string", description: "Label that the card shows as the way it was resolved, for example Dismiss." },
+        },
+        required: ["id", "action"],
         additionalProperties: false,
       },
     },
@@ -258,6 +310,10 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         })
         return textResult(withActiveProject(formatReviews(reviews), scope.project, scope.id))
       }
+      case "llm_wiki_add_review":
+        return textResult(await addReviewTool(reviewToolContext, args))
+      case "llm_wiki_resolve_review":
+        return textResult(await resolveReviewTool(reviewToolContext, args))
       case "llm_wiki_search": {
         await assertMcpEnabled()
         const query = stringArg(args.query, "query")

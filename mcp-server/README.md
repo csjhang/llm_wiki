@@ -58,6 +58,8 @@ When API unauthenticated mode is enabled, omit `LLM_WIKI_API_TOKEN`. If MCP acce
 - `llm_wiki_files`: list project files. `project_id` can be a project UUID, a project filesystem path, or `current`.
 - `llm_wiki_read_file`: read an allowed text file such as `wiki/index.md`.
 - `llm_wiki_reviews`: list Review tab items. Defaults to unresolved items and supports `status`, `type`, and `limit` filters.
+- `llm_wiki_add_review`: add one item to the Review tab (`type`, `title`, `description`, optional `options`, `affectedPages`, `searchQueries`). `type` is one of the app's review types or `mirror-edited`. Returns `{ id }`; the same type and title give the same id and merge into one item. Needs the desktop app to run.
+- `llm_wiki_resolve_review`: mark one Review item as resolved (`id`, `action`, the label the card shows). Returns `{ ok }`. Needs the desktop app to run.
 - `llm_wiki_search`: search with the app's shared keyword/vector backend.
 - `llm_wiki_chat`: ask the backend Agent chat endpoint and receive answer text, references, usage, and tool events. `mode: deep` broadens backend evidence collection; full Deep Research workflows still live in the desktop app.
 - `llm_wiki_graph`: query the app's knowledge graph endpoint.

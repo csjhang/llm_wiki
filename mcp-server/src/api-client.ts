@@ -139,6 +139,16 @@ export interface ApiReviewItem {
   createdAt: number
 }
 
+/** What `POST /projects/{id}/reviews` takes. The app stores a default option when `options` is left out. */
+export interface ApiAddReviewInput {
+  type: string
+  title: string
+  description: string
+  options?: ApiReviewOption[]
+  affectedPages?: string[]
+  searchQueries?: string[]
+}
+
 export interface ApiReviewsResponse {
   projectId?: string
   status: ApiReviewStatus
@@ -166,6 +176,14 @@ export interface ApiHealth {
 export function normalizeBaseUrl(value?: string): string {
   const raw = (value ?? DEFAULT_API_BASE_URL).trim() || DEFAULT_API_BASE_URL
   return raw.replace(/\/+$/, "")
+}
+
+/** The request did not reach the app: it is not running, or its local API is off or on another port. */
+export class LlmWikiApiUnreachableError extends Error {
+  constructor(cause: unknown) {
+    super(`LLM Wiki API request failed. Is the desktop app running? ${cause instanceof Error ? cause.message : String(cause)}`, { cause })
+    this.name = "LlmWikiApiUnreachableError"
+  }
 }
 
 function apiPath(path: string): string {
@@ -254,6 +272,22 @@ export class LlmWikiApiClient {
       count: numberOrUndefined(json.count) ?? reviews.length,
       reviews,
     }
+  }
+
+  async addReview(projectId = "current", input: ApiAddReviewInput): Promise<{ id: string }> {
+    const json = await this.request(`/projects/${encodeURIComponent(projectId)}/reviews`, {
+      method: "POST",
+      body: input,
+    })
+    return { id: requireString(json.id, "review id") }
+  }
+
+  async resolveReview(projectId = "current", reviewId: string, action: string): Promise<{ ok: true }> {
+    await this.request(`/projects/${encodeURIComponent(projectId)}/reviews/${encodeURIComponent(reviewId)}`, {
+      method: "PATCH",
+      body: { resolved: true, action },
+    })
+    return { ok: true }
   }
 
   async search(projectId = "current", query: string, options: { topK?: number; includeContent?: boolean } = {}): Promise<ApiSearchResponse> {
@@ -383,7 +417,7 @@ export class LlmWikiApiClient {
     }
   }
 
-  private async request(path: string, options: { method?: "GET" | "POST"; body?: unknown; auth?: boolean } = {}): Promise<Record<string, unknown>> {
+  private async request(path: string, options: { method?: "GET" | "POST" | "PATCH"; body?: unknown; auth?: boolean } = {}): Promise<Record<string, unknown>> {
     const url = `${this.baseUrl}${apiPath(path)}`
     const headers: Record<string, string> = { Accept: "application/json" }
     if (options.auth !== false && this.token?.trim()) {
@@ -399,7 +433,7 @@ export class LlmWikiApiClient {
         body: options.body === undefined ? undefined : JSON.stringify(options.body),
       })
     } catch (err) {
-      throw new Error(`LLM Wiki API request failed. Is the desktop app running? ${err instanceof Error ? err.message : String(err)}`)
+      throw new LlmWikiApiUnreachableError(err)
     }
 
     const text = await response.text()

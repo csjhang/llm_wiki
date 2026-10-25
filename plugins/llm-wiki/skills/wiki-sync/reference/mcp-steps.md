@@ -331,17 +331,21 @@ Use it at the end of Up, when `llm_wiki_status` said that the app runs. It belon
 
 ## llm_wiki_add_review
 
-Use it for a `skip-edited` action when the tool saved a note. This tool belongs to the `llm_wiki` MCP.
-It may not exist yet. Look at the tool list first. If the tool is not there, skip this call. Do not fail.
+Use it for a `skip-edited` action when `note` is a path and `llm_wiki_status` said that the app runs. This tool belongs to the `llm_wiki` MCP.
 
 ```json
 {
+  "project_id": "<project folder>",
   "type": "mirror-edited",
-  "title": "<card title> was edited in Heptabase",
-  "description": "The user edited this mirror card. The changes are saved as a note in raw/sources/heptabase/.",
-  "affectedPages": ["<page>"]
+  "title": "Mirror card edited: <page path>",
+  "description": "The user edited the mirror card of this page in Heptabase. The skill did not overwrite it. The changes are in <note path>.",
+  "affectedPages": ["<page path>"]
 }
 ```
 
+- Use the full path of this project folder. The app can have another project open.
+- `<page path>` is the `page` of the action, for example `wiki/mechanisms/attention.md`.
+- `<note path>` is the `note` of the `record` result.
 - Save as `llm_wiki_add_review-<card id>.json`.
-- If the call fails, go on. Name the card in the report.
+- The result holds the `id` of the item. The same title gives the same id, so a second edit of the same page adds no second item.
+- If the call fails, or the app does not run, go on. Name the card in the report. The note is the record.

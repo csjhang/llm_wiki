@@ -23,7 +23,7 @@ Every step follows the same pattern: plan, run, record.
 - Node 20 or later.
 - The Heptabase plugin. It gives the Heptabase MCP tools.
 - A project folder that has `wiki.yaml`.
-- The `llm_wiki` MCP is optional. The skill uses its tools `llm_wiki_status` and `llm_wiki_rescan_sources` when they are there.
+- The `llm_wiki` MCP is optional. The skill uses its tools `llm_wiki_status`, `llm_wiki_rescan_sources`, and `llm_wiki_add_review` when they are there.
 
 ## Paths
 
@@ -304,8 +304,9 @@ node "<plugin dir>/scripts/wiki-tool.mjs" hepta record --project "<project>" --e
 4. Read the JSON. The tool compares the card with the text the wiki sent.
 5. If `note` is a path, the tool saved the lines that the user added and removed as a note in `raw/sources/heptabase/`. The app ingests it as a view of the user.
 6. If `note` is `null`, the card is the same as the text the wiki sent. Nothing is saved. Add the card to the report as checked.
-7. Check if the `llm_wiki` MCP has a tool named `llm_wiki_add_review`. If it has, and `note` is a path, call it to add a review item of type `mirror-edited` for the page. If it has not, go on. Do not fail.
-8. Add the card to the list of edited cards for the report.
+7. If `note` is a path and `llm_wiki_status` said that the app runs, call `llm_wiki_add_review` with `project_id` set to the project folder. Use the arguments in `reference/mcp-steps.md`. It adds a review item of type `mirror-edited` for the page. A second edit of the same page does not add a second item.
+8. If the app does not run, or the call fails, skip step 7. Do not fail. Say so in the report. The note is the record.
+9. Add the card to the list of edited cards for the report.
 
 ### place
 
@@ -338,7 +339,7 @@ At the end, give the user a short report.
 - The counts in `skipped` of Up.
 - The problems and warnings, as the tool printed them. Include a missing option, and the name of the property.
 - The cards that failed in this run: the title, the card id, and the page of each.
-- The edited cards: the title, the card id, and the wiki page of each. Say that the skill did not overwrite them. Say if a note was saved or the card was the same as the text the wiki sent.
+- The edited cards: the title, the card id, and the wiki page of each. Say that the skill did not overwrite them. Say if a note was saved or the card was the same as the text the wiki sent. Say if a review item was added, or why it was not.
 - The retired cards: the title and the card id of each. Tell the user to delete these cards by hand.
 - The new snapshot files. Say that ingest waits until the app runs, and that the source watch of the app must be on.
 - The PDF cards that the user must save by hand.
