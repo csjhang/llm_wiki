@@ -5594,7 +5594,8 @@ function findSection(markdown, section) {
 * `schema/page-types/hypothesis.md`.
 *
 * `--project P --file wiki/hypotheses/<slug>.md` gives `{ ok, problems }`; `problems` lists every rule the page
-* breaks. The page is only read. `fuse commit` runs the same check on each hypothesis it commits.
+* breaks. When the page has a warning, the answer also has `warnings` (a list of texts); a warning never makes the
+* check fail. The page is only read. `fuse commit` runs the same check on each hypothesis it commits.
 *
 * Rules:
 * - Frontmatter: `type: hypothesis`; `mechanism`, `from_domain`, `to_domain`, `relation` (`analogy` or `stack`),
@@ -5610,6 +5611,10 @@ function findSection(markdown, section) {
 *   one row, and each row links at least one page of this wiki as evidence; `refuted` needs at least one row that
 *   links such a page, and its other rows may have no link (ruling S15). A hypothesis page (a page in
 *   `wiki/hypotheses/`, this one included) is not evidence.
+* - Links across wikis (spec 8.4), in a work wiki (`role: work` in `wiki.yaml`): no `[[link]]` in the page may name the
+*   `reading:` mechanism of the page, and none may name a page that is in the mechanism library and not in this
+*   wiki. A work page writes such a name as plain text. In every wiki, a Role mapping or Gaps and impact link to no
+*   page of this wiki is a warning: the link would dangle, or it would point into another wiki.
 * - `relation: stack` (ruling R17): `from_domain` is the base layer and `to_domain` is the upper layer. Which of two
 *   domains is the lower one is not in the page, so the check only refuses a stack of a domain on itself.
 *
@@ -5656,10 +5661,11 @@ function fuseCheck(args) {
 			problems: [error instanceof Error ? error.message : String(error)]
 		};
 	}
-	const found = checkHypothesisFile(project, path);
+	const found = inspectHypothesisFile(project, path);
 	return {
-		ok: found.length === 0,
-		problems: found
+		ok: found.problems.length === 0,
+		problems: found.problems,
+		...found.warnings.length > 0 ? { warnings: found.warnings } : {}
 	};
 }
 /**
@@ -5679,14 +5685,25 @@ function isHypothesisPath(path) {
 * passes.
 */
 function checkHypothesisFile(project, path) {
-	if (!isHypothesisPath(path)) return [`a hypothesis page is written in ${HYPOTHESES_FOLDER}: ${path}`];
+	return inspectHypothesisFile(project, path).problems;
+}
+/** The problems of a hypothesis page, and its warnings. A warning does not fail the page. */
+function inspectHypothesisFile(project, path) {
+	if (!isHypothesisPath(path)) return {
+		problems: [`a hypothesis page is written in ${HYPOTHESES_FOLDER}: ${path}`],
+		warnings: []
+	};
 	let text;
 	try {
 		text = readFileSync(resolveInProject(project, path), "utf8").replace(/^\uFEFF/, "");
 	} catch {
-		return [`cannot read ${path}`];
+		return {
+			problems: [`cannot read ${path}`],
+			warnings: []
+		};
 	}
 	const problems = [];
+	const warnings = [];
 	const { frontmatter, body } = parseFrontmatter(text);
 	if (frontmatter === null) problems.push("the page has no frontmatter");
 	const field = (key) => {
@@ -5706,9 +5723,14 @@ function checkHypothesisFile(project, path) {
 		if (parseTable(mapping) === null) problems.push("Role mapping has no table");
 		if (wikiLinkTargets(mapping).length === 0) problems.push("Role mapping has no [[link]] to a wiki page");
 	}
+	const pages = new PageLookup(project);
+	checkWikiLinks(project, field("mechanism"), body, sections, pages, problems, warnings);
 	const verify = sections.get("verify");
-	if (verify !== void 0) problems.push(...checkVerify(project, verify, status));
-	return [...new Set(problems)];
+	if (verify !== void 0) problems.push(...checkVerify(pages, verify, status));
+	return {
+		problems: [...new Set(problems)],
+		warnings: [...new Set(warnings)]
+	};
 }
 /** Check the fields that do not need the wiki. Returns the `status` when it is valid, else null. */
 function checkFields(field, problems) {
@@ -5792,7 +5814,42 @@ function checkDomains(project, field, problems) {
 		problems.push(`${key} ${JSON.stringify(field(key))} is not in ${domains.where}${why}`);
 	}
 }
-function checkVerify(project, section, status) {
+/** The sections whose links should name pages of this wiki. A link to no page there is a warning. */
+const LINK_WARNING_SECTIONS = ["mapping", "gaps"];
+/**
+* Spec 8.4: a work wiki page links no page of the reading wiki. In a work wiki, a link to the `reading:` mechanism is a
+* problem, and so is a link to a page that only the mechanism library has. The reading mechanism is named in the
+* `mechanism` field, so its slug is a problem even when this wiki has a page with the same name. In every wiki, a link
+* in Role mapping or Gaps and impact that names no page of this wiki is a warning.
+*/
+function checkWikiLinks(project, mechanism, body, sections, pages, problems, warnings) {
+	const identity = readWikiIdentity(project, []);
+	const refused = /* @__PURE__ */ new Set();
+	if (identity?.role === "work") {
+		const library = identity.mechanism_library === null ? null : new PageLookup(resolve(project, identity.mechanism_library.replace(/\\/g, "/")));
+		const readingSlug = mechanism.startsWith(READING_PREFIX) ? mechanism.slice(8).trim().toLowerCase() : null;
+		for (const target of new Set(wikiLinkTargets(body))) {
+			const slug = target.replace(/\\/g, "/").replace(/\.md$/i, "").split("/").pop()?.toLowerCase() ?? "";
+			if (readingSlug !== null && slug === readingSlug) {
+				refused.add(target);
+				problems.push(`[[${target}]] links the mechanism page of the reading wiki (mechanism: ${mechanism}); a work wiki page never links a page of the reading wiki. Write the mechanism name as plain text`);
+			} else if (library !== null && pages.find([target]).length === 0 && library.find([target]).length > 0) {
+				refused.add(target);
+				problems.push(`[[${target}]] is a page of the mechanism library and not of this wiki; a work wiki page never links a page of the reading wiki. Write the name as plain text`);
+			}
+		}
+	}
+	for (const key of LINK_WARNING_SECTIONS) {
+		const section = sections.get(key);
+		if (section === void 0) continue;
+		const name = HYPOTHESIS_SECTIONS.find((candidate) => candidate.key === key)?.en ?? key;
+		for (const target of new Set(wikiLinkTargets(section))) {
+			if (refused.has(target) || pages.find([target]).length > 0) continue;
+			warnings.push(`${name}: [[${target}]] is no page of this wiki`);
+		}
+	}
+}
+function checkVerify(pages, section, status) {
 	const problems = [];
 	const table = parseTable(section);
 	if (table === null) return ["What to verify has no table"];
@@ -5805,7 +5862,6 @@ function checkVerify(project, section, status) {
 		problems.push(`status ${status} needs at least one row under What to verify`);
 		return problems;
 	}
-	const pages = new PageLookup(project);
 	if (status === "testing") {
 		if (!table.rows.some((row) => pages.find(wikiLinkTargets(row.join(" | "))).some(isQueryPage))) problems.push(`status testing needs a row under What to verify that links a page in ${QUERIES_FOLDER}`);
 	} else {
@@ -6526,6 +6582,9 @@ function listedPaths(project, files, problems) {
 * the target side. A mind map joins the section that holds it, so its cards get that section and side. `pairing` lists
 * the card ids of each side, and exists only when both sides have a card; otherwise it is null and the skill asks.
 *
+* A relative `--structure`, `--mindmap`, or `--wiki` path starts at `--project`, as in `fuse check`, and not at the
+* current folder. An absolute path stays as it is.
+*
 * The other wikis are only read: nothing is written in any wiki.
 */
 const OPTION_SPEC = {
@@ -6546,10 +6605,9 @@ function resolveBoard(args) {
 	const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC);
 	const problems = [...optionProblems];
 	const project = parsed.values.project;
-	const structurePath = parsed.values.structure;
 	if (project === void 0) problems.push("missing option: --project");
-	if (structurePath === void 0) problems.push("missing option: --structure");
-	if (problems.length > 0 || project === void 0 || structurePath === void 0) return {
+	if (parsed.values.structure === void 0) problems.push("missing option: --structure");
+	if (problems.length > 0 || project === void 0 || parsed.values.structure === void 0) return {
 		ok: false,
 		problems
 	};
@@ -6557,12 +6615,17 @@ function resolveBoard(args) {
 		ok: false,
 		problems: [`project folder not found: ${project}`]
 	};
-	const wikis = readWikis(project, parsed.lists.wiki, problems);
+	const fromProject = (path) => resolve(project, path);
+	const structurePath = fromProject(parsed.values.structure);
+	const wikis = readWikis(project, parsed.lists.wiki.map(fromProject), problems);
 	const structureText = readResultFile(structurePath, "--structure", problems);
-	const mindMapTexts = parsed.lists.mindmap.map((path) => ({
-		path,
-		text: readResultFile(path, "--mindmap", problems)
-	}));
+	const mindMapTexts = parsed.lists.mindmap.map((option) => {
+		const path = fromProject(option);
+		return {
+			path,
+			text: readResultFile(path, "--mindmap", problems)
+		};
+	});
 	if (problems.length > 0 || !wikis || structureText === null) return {
 		ok: false,
 		problems

@@ -23,6 +23,9 @@
  * the target side. A mind map joins the section that holds it, so its cards get that section and side. `pairing` lists
  * the card ids of each side, and exists only when both sides have a card; otherwise it is null and the skill asks.
  *
+ * A relative `--structure`, `--mindmap`, or `--wiki` path starts at `--project`, as in `fuse check`, and not at the
+ * current folder. An absolute path stays as it is.
+ *
  * The other wikis are only read: nothing is written in any wiki.
  */
 import { readFileSync } from "node:fs"
@@ -85,15 +88,19 @@ export function resolveBoard(args: string[]): CommandResult {
   const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC)
   const problems = [...optionProblems]
   const project = parsed.values.project
-  const structurePath = parsed.values.structure
   if (project === undefined) problems.push("missing option: --project")
-  if (structurePath === undefined) problems.push("missing option: --structure")
-  if (problems.length > 0 || project === undefined || structurePath === undefined) return { ok: false, problems }
+  if (parsed.values.structure === undefined) problems.push("missing option: --structure")
+  if (problems.length > 0 || project === undefined || parsed.values.structure === undefined) return { ok: false, problems }
   if (!isDirectory(project)) return { ok: false, problems: [`project folder not found: ${project}`] }
 
-  const wikis = readWikis(project, parsed.lists.wiki, problems)
+  const fromProject = (path: string): string => resolve(project, path)
+  const structurePath = fromProject(parsed.values.structure)
+  const wikis = readWikis(project, parsed.lists.wiki.map(fromProject), problems)
   const structureText = readResultFile(structurePath, "--structure", problems)
-  const mindMapTexts = parsed.lists.mindmap.map((path) => ({ path, text: readResultFile(path, "--mindmap", problems) }))
+  const mindMapTexts = parsed.lists.mindmap.map((option) => {
+    const path = fromProject(option)
+    return { path, text: readResultFile(path, "--mindmap", problems) }
+  })
   if (problems.length > 0 || !wikis || structureText === null) return { ok: false, problems }
 
   let structure: WhiteboardStructure

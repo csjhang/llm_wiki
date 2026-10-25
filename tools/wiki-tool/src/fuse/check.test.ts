@@ -31,6 +31,7 @@ afterEach(removeProjects)
 interface CheckOutput {
   ok: boolean
   problems?: string[]
+  warnings?: string[]
 }
 
 async function checkFile(project: string, file: string = FILE) {
@@ -272,6 +273,112 @@ describe("fuse check: domains", () => {
       await expectFails({ fields: { from_domain: "physics/thermal" } }, /physics\/thermal.*library.*not valid/s, workWiki(library))
     })
 
+  })
+})
+
+describe("fuse check: links across the wikis (spec 8.4)", () => {
+  const READING_SLUG = "event-driven"
+  const LIBRARY_ONLY = "queue-theory"
+  const SHARED = "shared-term"
+
+  /** A reading wiki with a mechanism page, a concept page, and a page that the work wiki has too. */
+  function readingWiki(): string {
+    return makeWiki({
+      [`wiki/mechanisms/${READING_SLUG}.md`]: `---\ntype: mechanism\ntitle: Event-driven\n---\n# Event-driven\n`,
+      [`wiki/concepts/${LIBRARY_ONLY}.md`]: `---\ntype: concept\ntitle: Queue theory\n---\n# Queue theory\n`,
+      [`wiki/concepts/${SHARED}.md`]: `---\ntype: concept\ntitle: Shared term\n---\n# Shared term\n`,
+    })
+  }
+
+  /** A work wiki that has the evidence page and the shared page, with the reading wiki as its library. */
+  function workWiki(): string {
+    const work = makeWiki({ [`wiki/concepts/${SHARED}.md`]: `---\ntype: concept\ntitle: Shared term\n---\n# Shared term\n` })
+    makeWorkWiki(work, readingWiki())
+    return work
+  }
+
+  const mappingWith = (cell: string): string =>
+    mappingTable([
+      ["Event", "Stock below the threshold", "fits", `[[${EVIDENCE_PAGE}]] uses the threshold. ${cell}`],
+    ])
+
+  const readingMechanism = { mechanism: `reading:${READING_SLUG}` }
+
+  it("a work wiki page that links the reading mechanism slug fails", async () => {
+    const { output, exitCode } = await checkPage({ fields: readingMechanism, sections: { mapping: mappingWith(`See ${link(READING_SLUG)}.`) } }, workWiki())
+    expect(output.ok).toBe(false)
+    expect(exitCode).toBe(2)
+    expect(output.problems?.join("\n")).toMatch(/\[\[event-driven\]\].*mechanism page of the reading wiki/s)
+  })
+
+  it("the reading slug fails with a label, an anchor, and in any section", async () => {
+    const work = workWiki()
+    for (const text of [`[[${READING_SLUG}|the mechanism]]`, `[[${READING_SLUG}#parts]]`, `[[Event-Driven]]`]) {
+      const { output } = await checkPage({ fields: readingMechanism, sections: { related: `- [[${EVIDENCE_PAGE}]]\n- ${text}` } }, work)
+      expect(output.ok, text).toBe(false)
+      expect(output.problems?.join("\n"), text).toMatch(/mechanism page of the reading wiki/)
+    }
+  })
+
+  it("the reading slug fails even when the library cannot be read", async () => {
+    const work = makeWiki()
+    makeWorkWiki(work, "../no-such-library-folder")
+    const { output } = await checkPage({ fields: readingMechanism, sections: { gaps: `- Delay. ${link(EVIDENCE_PAGE)} ${link(READING_SLUG)}` } }, work)
+    expect(output.ok).toBe(false)
+    expect(output.problems?.join("\n")).toMatch(/mechanism page of the reading wiki/)
+  })
+
+  it("a slug that is only a page of the mechanism library fails", async () => {
+    const { output } = await checkPage({ sections: { mapping: mappingWith(`Also ${link(LIBRARY_ONLY)}.`) } }, workWiki())
+    expect(output.ok).toBe(false)
+    expect(output.problems?.join("\n")).toMatch(/\[\[queue-theory\]\].*mechanism library.*not.*this wiki/s)
+  })
+
+  it("a slug that is a page of this wiki passes, also when the library has the same slug", async () => {
+    await expectPasses({ sections: { mapping: mappingWith(`Also ${link(SHARED)}.`) } }, workWiki())
+  })
+
+  it("a work wiki page that links only its own pages passes with no warning", async () => {
+    const { output } = await checkPage({ fields: readingMechanism }, workWiki())
+    expect(output).toEqual({ ok: true, problems: [] })
+  })
+
+  it("the same links in a reading wiki are not refused", async () => {
+    // A reading wiki has no library. The slug of its own mechanism page is a page of this wiki.
+    const reading = readingWiki()
+    const mapping = mappingTable([["Event", "Stock", "fits", `[[${EVIDENCE_PAGE}]] and ${link(READING_SLUG)}`]])
+    const { output } = await checkPage({ sections: { mapping } }, reading)
+    expect(output.ok).toBe(true)
+  })
+
+  it("a mapping link to no page of this wiki is a warning, not a problem", async () => {
+    const { output, exitCode } = await checkPage({ sections: { mapping: mappingWith(`Missing ${link("no-such-page")}.`) } })
+    expect(output.ok).toBe(true)
+    expect(exitCode).toBe(0)
+    expect(output.problems).toEqual([])
+    expect(output.warnings).toHaveLength(1)
+    expect(output.warnings?.[0]).toMatch(/Role mapping.*\[\[no-such-page\]\].*no page of this wiki/s)
+  })
+
+  it("a gaps link to no page of this wiki is a warning, and each link is named once", async () => {
+    const gaps = `- Delay. ${link("no-such-page")} ${link("no-such-page")}\n- Cost. ${link("other-missing")}`
+    const { output } = await checkPage({ sections: { gaps } })
+    expect(output.ok).toBe(true)
+    expect(output.warnings).toHaveLength(2)
+    expect(output.warnings?.join("\n")).toMatch(/Gaps and impact.*\[\[no-such-page\]\]/s)
+    expect(output.warnings?.join("\n")).toMatch(/\[\[other-missing\]\]/)
+  })
+
+  it("a page of the library that the work page links is a problem and not also a warning", async () => {
+    const { output } = await checkPage({ sections: { gaps: `- Delay. ${link(EVIDENCE_PAGE)} ${link(LIBRARY_ONLY)}` } }, workWiki())
+    expect(output.ok).toBe(false)
+    expect(output.warnings).toBeUndefined()
+  })
+
+  it("a reading wiki page that links a page of another wiki gets the same warning", async () => {
+    const { output } = await checkPage({ sections: { gaps: `- Delay. ${link("work-wiki-page")}` } }, readingWiki())
+    expect(output.ok).toBe(true)
+    expect(output.warnings?.join("\n")).toMatch(/\[\[work-wiki-page\]\].*no page of this wiki/s)
   })
 })
 

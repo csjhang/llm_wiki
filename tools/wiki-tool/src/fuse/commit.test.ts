@@ -13,7 +13,7 @@ import { runCli } from "../cli"
 import { commitPathsLocked } from "../git"
 import { GIT_LOCK_BUSY_MESSAGE } from "../git-lock"
 import { removeProjects, writeProjectFile } from "../test-project"
-import { hypothesisPage, makeWiki, verifyTable } from "./hypothesis-fixture"
+import { hypothesisPage, makeWiki, makeWorkWiki, verifyTable } from "./hypothesis-fixture"
 
 // The real helper, except in the one test that makes the lock busy: waiting for a real lock takes 30 s.
 vi.mock("../git", async (importOriginal) => {
@@ -113,6 +113,38 @@ describe("fuse commit", () => {
 
     expect(output.ok).toBe(true)
     expect(headFiles(project)).toEqual(["wiki/concepts/plain.md"])
+  })
+
+  it("does not commit a work wiki page that links the reading mechanism", async () => {
+    const library = makeWiki({ "wiki/mechanisms/event-driven.md": "---\ntype: mechanism\n---\n# Event driven\n" })
+    const project = makeRepo()
+    makeWorkWiki(project, library)
+    const before = commitCount(project)
+    writeProjectFile(
+      project,
+      FILE,
+      hypothesisPage({
+        fields: { mechanism: "reading:event-driven" },
+        sections: { gaps: "- Delay. [[restock-policy]] and [[event-driven]]" },
+      }),
+    )
+
+    const { exitCode, output } = await commit(project, [FILE])
+
+    expect(exitCode).toBe(2)
+    expect(output.ok).toBe(false)
+    expect(output.problems?.join("\n")).toMatch(new RegExp(`${FILE}: .*\\[\\[event-driven\\]\\].*reading wiki`, "s"))
+    expect(commitCount(project)).toBe(before)
+  })
+
+  it("commits a page whose check has only warnings", async () => {
+    const project = makeRepo()
+    writeProjectFile(project, FILE, hypothesisPage({ sections: { gaps: "- Delay. [[no-such-page]]" } }))
+
+    const { exitCode, output } = await commit(project, [FILE])
+
+    expect(exitCode).toBe(0)
+    expect(output).toEqual({ ok: true, sha: head(project) })
   })
 
   it("lists a file once however it is written", async () => {

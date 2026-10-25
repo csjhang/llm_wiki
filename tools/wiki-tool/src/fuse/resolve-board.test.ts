@@ -10,7 +10,7 @@
  * The mind map is the fixture read_object_mindmap.txt: cards 9, 10, 34, 35, 36, 37, 38.
  */
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs"
-import { join } from "node:path"
+import { join, relative } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it } from "vitest"
 import { type CardMap, saveCardMap } from "../card-map"
@@ -184,6 +184,37 @@ describe("fuse resolve-board", () => {
     expect(cardOf(output, id(6))).toMatchObject({ status: "mirror", wiki: "work", pages: ["wiki/mechanisms/own.md"] })
     expect(cardOf(output, id(21))).toMatchObject({ status: "mirror", wiki: "reading", pages: ["wiki/mechanisms/event-driven.md"] })
     expect(cardOf(output, id(7))).toMatchObject({ status: "not-ingested", wiki: null, pages: [] })
+  })
+
+  it("resolves --structure, --mindmap, and --wiki paths from the project folder, not from the current folder", async () => {
+    const project = makeProject({}, { wikiId: "work" })
+    const reading = makeProject({}, { wikiId: "reading" })
+    writeMap(reading, { "wiki/mechanisms/event-driven.md": id(21) })
+    writeProjectFile(project, ".llm-wiki/hepta/structure.txt", readFileSync(STRUCTURE, "utf8"))
+    writeProjectFile(project, ".llm-wiki/hepta/mind-map.txt", readFileSync(MIND_MAP, "utf8"))
+    // The test process runs in another folder, so these paths work only when they start at the project.
+    expect(process.cwd()).not.toBe(project)
+
+    const { exitCode, output } = await resolveBoard([
+      "--project", project,
+      "--structure", ".llm-wiki/hepta/structure.txt",
+      "--mindmap", ".llm-wiki/hepta/mind-map.txt",
+      "--wiki", relative(project, reading),
+    ])
+
+    expect(output.problems).toBeUndefined()
+    expect(exitCode).toBe(0)
+    expect(output.cards?.map((card) => card.cardId)).toEqual([id(6), id(7), id(21), ...MIND_MAP_CARDS, id(22)])
+    expect(cardOf(output, id(21))).toMatchObject({ status: "mirror", wiki: "reading", pages: ["wiki/mechanisms/event-driven.md"] })
+  })
+
+  it("keeps an absolute path as it is", async () => {
+    const project = makeProject({}, { wikiId: "work" })
+    const reading = makeProject({}, { wikiId: "reading" })
+    writeMap(reading, { "wiki/mechanisms/event-driven.md": id(21) })
+    const { exitCode, output } = await resolveFixtureBoard(project, [reading])
+    expect(exitCode).toBe(0)
+    expect(cardOf(output, id(21)).wiki).toBe("reading")
   })
 
   it("lists the pages of a mirror card sorted", async () => {

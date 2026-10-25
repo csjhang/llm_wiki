@@ -3,7 +3,8 @@
  * `schema/page-types/hypothesis.md`.
  *
  * `--project P --file wiki/hypotheses/<slug>.md` gives `{ ok, problems }`; `problems` lists every rule the page
- * breaks. The page is only read. `fuse commit` runs the same check on each hypothesis it commits.
+ * breaks. When the page has a warning, the answer also has `warnings` (a list of texts); a warning never makes the
+ * check fail. The page is only read. `fuse commit` runs the same check on each hypothesis it commits.
  *
  * Rules:
  * - Frontmatter: `type: hypothesis`; `mechanism`, `from_domain`, `to_domain`, `relation` (`analogy` or `stack`),
@@ -19,6 +20,10 @@
  *   one row, and each row links at least one page of this wiki as evidence; `refuted` needs at least one row that
  *   links such a page, and its other rows may have no link (ruling S15). A hypothesis page (a page in
  *   `wiki/hypotheses/`, this one included) is not evidence.
+ * - Links across wikis (spec 8.4), in a work wiki (`role: work` in `wiki.yaml`): no `[[link]]` in the page may name the
+ *   `reading:` mechanism of the page, and none may name a page that is in the mechanism library and not in this
+ *   wiki. A work page writes such a name as plain text. In every wiki, a Role mapping or Gaps and impact link to no
+ *   page of this wiki is a warning: the link would dangle, or it would point into another wiki.
  * - `relation: stack` (ruling R17): `from_domain` is the base layer and `to_domain` is the upper layer. Which of two
  *   domains is the lower one is not in the page, so the check only refuses a stack of a domain on itself.
  *
@@ -62,8 +67,13 @@ export function fuseCheck(args: string[]): CommandResult {
   } catch (error) {
     return { ok: false, problems: [error instanceof Error ? error.message : String(error)] }
   }
-  const found = checkHypothesisFile(project, path)
-  return { ok: found.length === 0, problems: found }
+  const found = inspectHypothesisFile(project, path)
+  return {
+    ok: found.problems.length === 0,
+    problems: found.problems,
+    // The key is there only when there is a warning, so a page without one gives the same answer as before.
+    ...(found.warnings.length > 0 ? { warnings: found.warnings } : {}),
+  }
 }
 
 /**
@@ -85,15 +95,21 @@ export function isHypothesisPath(path: string): boolean {
  * passes.
  */
 export function checkHypothesisFile(project: string, path: string): string[] {
-  if (!isHypothesisPath(path)) return [`a hypothesis page is written in ${HYPOTHESES_FOLDER}: ${path}`]
+  return inspectHypothesisFile(project, path).problems
+}
+
+/** The problems of a hypothesis page, and its warnings. A warning does not fail the page. */
+export function inspectHypothesisFile(project: string, path: string): { problems: string[]; warnings: string[] } {
+  if (!isHypothesisPath(path)) return { problems: [`a hypothesis page is written in ${HYPOTHESES_FOLDER}: ${path}`], warnings: [] }
   let text: string
   try {
     text = readFileSync(resolveInProject(project, path), "utf8").replace(/^\uFEFF/, "")
   } catch {
-    return [`cannot read ${path}`]
+    return { problems: [`cannot read ${path}`], warnings: [] }
   }
 
   const problems: string[] = []
+  const warnings: string[] = []
   const { frontmatter, body } = parseFrontmatter(text)
   if (frontmatter === null) problems.push("the page has no frontmatter")
   const field = (key: string): string => {
@@ -115,10 +131,12 @@ export function checkHypothesisFile(project: string, path: string): string[] {
     if (parseTable(mapping) === null) problems.push("Role mapping has no table")
     if (wikiLinkTargets(mapping).length === 0) problems.push("Role mapping has no [[link]] to a wiki page")
   }
+  const pages = new PageLookup(project)
+  checkWikiLinks(project, field("mechanism"), body, sections, pages, problems, warnings)
   const verify = sections.get("verify")
-  if (verify !== undefined) problems.push(...checkVerify(project, verify, status))
+  if (verify !== undefined) problems.push(...checkVerify(pages, verify, status))
 
-  return [...new Set(problems)]
+  return { problems: [...new Set(problems)], warnings: [...new Set(warnings)] }
 }
 
 // --- frontmatter -----------------------------------------------------------
@@ -226,9 +244,64 @@ function checkDomains(project: string, field: (key: string) => string, problems:
   }
 }
 
+// --- links across wikis ----------------------------------------------------
+
+/** The sections whose links should name pages of this wiki. A link to no page there is a warning. */
+const LINK_WARNING_SECTIONS = ["mapping", "gaps"] as const
+
+/**
+ * Spec 8.4: a work wiki page links no page of the reading wiki. In a work wiki, a link to the `reading:` mechanism is a
+ * problem, and so is a link to a page that only the mechanism library has. The reading mechanism is named in the
+ * `mechanism` field, so its slug is a problem even when this wiki has a page with the same name. In every wiki, a link
+ * in Role mapping or Gaps and impact that names no page of this wiki is a warning.
+ */
+function checkWikiLinks(
+  project: string,
+  mechanism: string,
+  body: string,
+  sections: ReadonlyMap<string, string>,
+  pages: PageLookup,
+  problems: string[],
+  warnings: string[],
+): void {
+  const identity = readWikiIdentity(project, [])
+  const refused = new Set<string>()
+
+  if (identity?.role === "work") {
+    const library = identity.mechanism_library === null
+      ? null
+      : new PageLookup(resolve(project, identity.mechanism_library.replace(/\\/g, "/")))
+    const readingSlug = mechanism.startsWith(READING_PREFIX) ? mechanism.slice(READING_PREFIX.length).trim().toLowerCase() : null
+    for (const target of new Set(wikiLinkTargets(body))) {
+      const slug = target.replace(/\\/g, "/").replace(/\.md$/i, "").split("/").pop()?.toLowerCase() ?? ""
+      if (readingSlug !== null && slug === readingSlug) {
+        refused.add(target)
+        problems.push(
+          `[[${target}]] links the mechanism page of the reading wiki (mechanism: ${mechanism}); a work wiki page never links a page of the reading wiki. Write the mechanism name as plain text`,
+        )
+      } else if (library !== null && pages.find([target]).length === 0 && library.find([target]).length > 0) {
+        refused.add(target)
+        problems.push(
+          `[[${target}]] is a page of the mechanism library and not of this wiki; a work wiki page never links a page of the reading wiki. Write the name as plain text`,
+        )
+      }
+    }
+  }
+
+  for (const key of LINK_WARNING_SECTIONS) {
+    const section = sections.get(key)
+    if (section === undefined) continue
+    const name = HYPOTHESIS_SECTIONS.find((candidate) => candidate.key === key)?.en ?? key
+    for (const target of new Set(wikiLinkTargets(section))) {
+      if (refused.has(target) || pages.find([target]).length > 0) continue
+      warnings.push(`${name}: [[${target}]] is no page of this wiki`)
+    }
+  }
+}
+
 // --- what to verify --------------------------------------------------------
 
-function checkVerify(project: string, section: string, status: string | null): string[] {
+function checkVerify(pages: PageLookup, section: string, status: string | null): string[] {
   const problems: string[] = []
   const table = parseTable(section)
   if (table === null) return ["What to verify has no table"]
@@ -246,7 +319,6 @@ function checkVerify(project: string, section: string, status: string | null): s
     return problems
   }
 
-  const pages = new PageLookup(project)
   if (status === "testing") {
     const linksQuery = table.rows.some((row) => pages.find(wikiLinkTargets(row.join(" | "))).some(isQueryPage))
     if (!linksQuery) problems.push(`status testing needs a row under What to verify that links a page in ${QUERIES_FOLDER}`)
