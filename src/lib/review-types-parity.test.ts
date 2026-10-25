@@ -48,6 +48,10 @@ describe("review item types", () => {
     expect(expected).toContain("mirror-edited")
   })
 
+  it("include the fusion-candidate type of the fusion flow", () => {
+    expect(expected).toContain("fusion-candidate")
+  })
+
   it("are the same in the icon table of the review view", () => {
     expect([...viewTypes()].sort()).toEqual(expected)
   })

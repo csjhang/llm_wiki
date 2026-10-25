@@ -30,6 +30,7 @@ export const REVIEW_TYPES = [
   "duplicate-source",
   "research-result",
   "mirror-edited",
+  "fusion-candidate",
 ] as const
 
 /** What a tool needs from `index.ts`. */

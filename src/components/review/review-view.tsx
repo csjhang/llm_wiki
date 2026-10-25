@@ -14,6 +14,7 @@ import {
   PencilLine,
   X,
   Check,
+  Combine,
   Trash2,
   RotateCcw,
 } from "lucide-react"
@@ -45,6 +46,7 @@ const typeConfig: Record<ReviewItem["type"], { icon: typeof AlertTriangle; color
   "duplicate-source": { icon: Files, color: "text-sky-500" },
   "research-result": { icon: FileSearch, color: "text-teal-500" },
   "mirror-edited": { icon: PencilLine, color: "text-orange-500" },
+  "fusion-candidate": { icon: Combine, color: "text-fuchsia-500" },
 }
 
 export function ReviewView() {
@@ -115,6 +117,8 @@ export function ReviewView() {
           reingest: async (sourcePath) => {
             await enqueueSourceIngest(project, [`${pp}/${sourcePath}`], useWikiStore.getState().llmConfig)
           },
+          // `mech:start-fusion` puts the command of the wiki-fuse skill on the clipboard.
+          copyText: (text) => navigator.clipboard.writeText(text),
         })
         if (handled) return
       } catch (err) {

@@ -26,16 +26,25 @@ vi.mock("@/commands/fs", () => realFs)
  * `mergeAnswer` replaces the answer to a page merge when a test sets it.
  */
 const seen = vi.hoisted(() => ({
-  calls: [] as Array<{ kind: "analysis" | "generation" | "merge" | "other"; subject: string; system: string; user: string }>,
+  calls: [] as Array<{ kind: "analysis" | "generation" | "merge" | "fusion" | "other"; subject: string; system: string; user: string }>,
   mergeAnswer: null as string | null,
+  /** What the model answers when a new mechanism page asks for fusion candidates. Empty: no candidate. */
+  fusionAnswer: "",
 }))
 
 vi.mock("@/lib/llm-client", () => ({
   streamChat: vi.fn(async (_cfg, messages, cb) => {
     const system = String(messages?.[0]?.content ?? "")
     const user = String(messages?.[1]?.content ?? "")
-    const record = (kind: "analysis" | "generation" | "merge" | "other", subject: string): void => {
+    const record = (kind: "analysis" | "generation" | "merge" | "fusion" | "other", subject: string): void => {
       seen.calls.push({ kind, subject, system, user })
+    }
+
+    if (system.startsWith("You find domains where a mechanism may also work")) {
+      record("fusion", MERGED_MECHANISM_PAGE_SLUG)
+      cb.onToken(seen.fusionAnswer)
+      cb.onDone()
+      return
     }
 
     if (system.startsWith("You are merging source-backed material")) {
@@ -340,6 +349,7 @@ describe("mechanism ingest, end to end", () => {
     mockStreamChat.mockClear()
     seen.calls.length = 0
     seen.mergeAnswer = null
+    seen.fusionAnswer = ""
     vi.spyOn(console, "warn").mockImplementation(() => {})
     tmp = await createTempProject("mechanism-e2e")
     project = tmp.path
@@ -409,6 +419,10 @@ describe("mechanism ingest, end to end", () => {
 
   it("ingests two sources of two domains into one mechanism, with the domain index", async () => {
     // --- source 1: hardware/async-circuits, a new mechanism
+    seen.fusionAnswer = [
+      "CANDIDATE: hardware/async-circuits | structural | The domain of the source has an instance already.",
+      "CANDIDATE: business/franchising | surface | A franchisee acts only when the brand sends a request.",
+    ].join("\n")
     const first = await ingest(HANDSHAKE)
 
     expect(first).toEqual(expect.arrayContaining([
@@ -417,7 +431,10 @@ describe("mechanism ingest, end to end", () => {
       MECHANISM_PATH,
       "wiki/index.md",
     ]))
-    expect(seen.calls.map((call) => call.kind)).toEqual(["analysis", "generation"])
+    // The new mechanism page asks the model for fusion candidates, after the files are written.
+    expect(seen.calls.map((call) => call.kind)).toEqual(["analysis", "generation", "fusion"])
+    expect(seen.calls[2].user).toBe("List the fusion candidates now.")
+    expect(seen.calls[2].system).toContain("A part does work only when an event reaches it.")
     // The prompts carry the mechanism sections.
     expect(seen.calls[0].system).toContain("## Decisions")
     expect(seen.calls[1].system).toContain(
@@ -487,12 +504,20 @@ describe("mechanism ingest, end to end", () => {
     const mechanisms = await page("wiki/indexes/_mechanisms.md")
     expect(mechanisms).toContain("- [[event-driven-computation]] — Event-driven computation")
 
-    // --- two sources, two fingerprints; nothing went to review
+    // --- two sources, two fingerprints; only the new mechanism went to review, with one fusion item.
+    // The second source added an instance to a mechanism that existed, so it asked for no candidate.
+    const fusion = useReviewStore.getState().items
+    expect(fusion.map((item) => [item.type, item.title, item.affectedPages])).toEqual([
+      ["fusion-candidate", "Fusion candidates: Event-driven computation", [MECHANISM_PATH]],
+    ])
+    expect(fusion[0].description.split("\n")).toEqual([
+      "Domains where Event-driven computation may also work:",
+      "CANDIDATE: business/franchising | surface | A franchisee acts only when the brand sends a request.",
+    ])
     expect((await storedFingerprints()).map((f) => f.sourcePath)).toEqual([
       `raw/sources/${HANDSHAKE}.md`,
       `raw/sources/${SPIKING}.md`,
     ])
-    expect(useReviewStore.getState().items).toEqual([])
     expect(seen.calls.filter((call) => call.kind === "other")).toEqual([])
     // No decision problem, no rejected merge, no failed write.
     expect(console.warn).not.toHaveBeenCalled()

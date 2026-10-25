@@ -2,13 +2,15 @@
  * Review actions of a mechanism wiki.
  *
  * The review view calls `handleMechanismReviewAction` first for every option click. It handles the
- * four `mech:` actions and returns false for any other action, so the upstream handling goes on.
+ * `mech:` actions below and returns false for any other action, so the upstream handling goes on.
  * An action that fails throws an error with a message for the user; the view shows it on the card.
  *
  * - `mech:approve-domain`: add the proposed domain to `domains.yaml`.
  * - `mech:propose-mechanism`: write a proposed mechanism page into the mechanism library as a note.
  * - `mech:replace-source`: copy the newer text of a duplicate source over the older raw source.
  * - `mech:accept-research`: move a staged deep research result to `wiki/queries/`.
+ * - `mech:start-fusion`: copy the command that starts a fusion for a candidate. The item stays open.
+ * - `mech:dismiss-fusion`: record the candidates of the item as skipped, so they are never proposed again.
  *
  * `stageResearchResult` is the other end of the last action: deep research calls it to hold a result
  * back for approval.
@@ -25,6 +27,7 @@ import { hasOwn } from "@/lib/wiki-config/yaml-util"
 import type { ReviewItem } from "@/stores/review-store"
 import { listMarkdownFiles, loadMechanismContext } from "./context"
 import { SLUG_MAX_LENGTH, SLUG_WORD, slugProblem } from "./decisions"
+import { DISMISS_FUSION_ACTION, readCandidateLines, recordDismissedPairs, START_FUSION_ACTION } from "./fusion-candidates"
 
 /** The option actions of the mechanism review items start with this. */
 export const MECHANISM_ACTION_PREFIX = "mech:"
@@ -47,6 +50,11 @@ export interface ReviewActionContext {
    * the file itself, so something has to ask for the ingest. Left out, nothing is queued.
    */
   reingest?(sourcePath: string): Promise<void>
+  /**
+   * Put text on the clipboard. `mech:start-fusion` calls it with the command of the `wiki-fuse` skill.
+   * Left out, or when it fails, the action throws an error that names the command, so the user can type it.
+   */
+  copyText?(text: string): Promise<void>
 }
 
 type ReviewDraft = Omit<ReviewItem, "id" | "resolved" | "createdAt">
@@ -72,6 +80,12 @@ export async function handleMechanismReviewAction(
       return true
     case ACCEPT_RESEARCH:
       await acceptResearch(requireItem(item, action), ctx)
+      return true
+    case START_FUSION_ACTION:
+      await startFusion(requireItem(item, action), ctx)
+      return true
+    case DISMISS_FUSION_ACTION:
+      await dismissFusion(requireItem(item, action), ctx)
       return true
     default:
       return false
@@ -561,4 +575,40 @@ async function availableName(directory: string, name: string): Promise<string> {
     if (!(await fileExists(`${directory}/${candidate}`))) return candidate
   }
   throw new Error(`There are too many files named "${name}" in ${directory}.`)
+}
+
+// --- fusion candidates --------------------------------------------------
+
+/**
+ * Copy `/wiki-fuse --candidate <review id>`. The item stays open: starting is not an answer. The skill
+ * resolves the item when the fusion is done.
+ */
+async function startFusion(item: ReviewItem, ctx: ReviewActionContext): Promise<void> {
+  const command = `/wiki-fuse --candidate ${item.id}`
+  if (ctx.copyText === undefined) {
+    throw new Error(`This screen cannot copy to the clipboard. Type this command in Claude Code: ${command}`)
+  }
+  try {
+    await ctx.copyText(command)
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err)
+    throw new Error(`Could not copy the command to the clipboard (${reason}). Type it in Claude Code: ${command}`)
+  }
+}
+
+/**
+ * Record every `CANDIDATE:` line of the item as a skipped pair of the mechanism page (`affectedPages[0]`) and
+ * the domain. The item resolves after the file is written, so a failed write leaves it open.
+ */
+async function dismissFusion(item: ReviewItem, ctx: ReviewActionContext): Promise<void> {
+  const mechanism = (item.affectedPages?.[0] ?? "").trim()
+  if (mechanism === "") {
+    throw new Error("The review item does not name its mechanism page, so its candidates cannot be skipped.")
+  }
+  const domains = [...new Set(readCandidateLines(item.description).map((line) => line.domain).filter((domain) => domain !== ""))]
+  if (domains.length === 0) {
+    throw new Error('The review item has no CANDIDATE line. Each must read "CANDIDATE: <domain> | <strength> | <reason>".')
+  }
+  await recordDismissedPairs(ctx.projectPath, domains.map((targetDomain) => ({ mechanism, targetDomain })))
+  ctx.resolveItem(item.id, "Skipped")
 }

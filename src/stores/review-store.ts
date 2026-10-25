@@ -21,6 +21,8 @@ export interface ReviewItem {
     | "research-result"
     // Sync items. `mirror-edited`: the user edited a mirror card in Heptabase and wiki-sync did not overwrite it.
     | "mirror-edited"
+    // Fusion items. `fusion-candidate`: domains where a new mechanism may also work (`mech:start-fusion`, `mech:dismiss-fusion`).
+    | "fusion-candidate"
   title: string
   description: string
   sourcePath?: string

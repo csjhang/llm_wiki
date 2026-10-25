@@ -45,11 +45,13 @@ import {
 import type { MultimodalConfig } from "@/stores/wiki-store"
 import { BASE_GENERATION_WIKI_TYPES } from "@/lib/wiki-page-types"
 import { canWriteMechanismPages, loadMechanismContext } from "@/lib/mechanism-wiki/context"
+import type { MechanismContext } from "@/lib/mechanism-wiki/context"
 import { checkDuplicateSource, noteOtherEntryPoint, recordFingerprint } from "@/lib/mechanism-wiki/source-fingerprint"
 import { parseAnalysisDecisions } from "@/lib/mechanism-wiki/decisions"
 import { buildScopedIndexText, listMechanismSlugs, rebuildDomainIndex, scanWikiPages } from "@/lib/mechanism-wiki/domain-index"
 import { isDomainIndexPath } from "@/lib/mechanism-wiki/domain-index-render"
 import { enforceMechanismRules, proposedDomainReview } from "@/lib/mechanism-wiki/enforce"
+import { proposeFusionCandidates } from "@/lib/mechanism-wiki/fusion-candidates"
 import { appendPromptSection, prepareMechanismPrompts } from "@/lib/mechanism-wiki/prompts"
 import { emptyDecisions } from "@/lib/mechanism-wiki/types"
 import type { AnalysisDecisions } from "@/lib/mechanism-wiki/types"
@@ -1339,7 +1341,9 @@ async function autoIngestImpl(
   }
 
   // ── Step 3: Write files ───────────────────────────────────────
-  return runCommit(async () => {
+  // The mechanism pages that this ingest writes for the first time (set in the commit, used after it).
+  const newMechanismPages: string[] = []
+  const committedPaths = await runCommit(async () => {
   throwIfIngestAborted(signal, activityId)
   activity.updateItem(activityId, { detail: "Writing files..." })
   await migrateLegacySourceSummaryIfSafe(pp, sourceIdentity, sourceSummaryPath, onFileWritten)
@@ -1721,8 +1725,63 @@ async function autoIngestImpl(
     filesWritten: writtenPaths,
   })
 
+  // Fusion candidates are for a mechanism that is new. A page that existed before this ingest gets only
+  // a new instance, and a wiki that cannot write mechanism pages has none.
+  if (mechanismCtx && existingPages && canWriteMechanismPages(mechanismCtx)) {
+    for (const path of writtenPaths) {
+      const page = normalizePath(path)
+      if (isMechanismPagePath(page) && !existingPages.has(page) && !newMechanismPages.includes(page)) {
+        newMechanismPages.push(page)
+      }
+    }
+  }
+
   return writtenPaths
   })
+
+  // The files are written and the commit is over. The candidates are an extra: they run after the commit
+  // so a slow model does not hold the project, and nothing in them can change what the ingest returns.
+  if (mechanismCtx && newMechanismPages.length > 0) {
+    await proposeFusionCandidatesForNewPages(
+      pp,
+      mechanismCtx,
+      newMechanismPages,
+      llmConfig,
+      mechanismDecisions?.domain ?? null,
+      signal,
+    )
+  }
+  return committedPaths
+}
+
+/** True for a page directly in `wiki/mechanisms/`. */
+function isMechanismPagePath(relativePath: string): boolean {
+  return /^wiki\/mechanisms\/[^/]+\.md$/i.test(relativePath)
+}
+
+/**
+ * Ask for the fusion candidates of each new mechanism page. A failure is logged and goes no further: a
+ * wiki that cannot get candidates is still a wiki that was ingested.
+ */
+async function proposeFusionCandidatesForNewPages(
+  projectPath: string,
+  ctx: MechanismContext,
+  pages: readonly string[],
+  llmConfig: LlmConfig,
+  sourceDomain: string | null,
+  signal?: AbortSignal,
+): Promise<void> {
+  for (const page of pages) {
+    if (signal?.aborted) return
+    try {
+      await proposeFusionCandidates(projectPath, ctx, page, llmConfig, { sourceDomain, signal })
+    } catch (err) {
+      console.warn(
+        `[ingest:mechanism] Could not propose fusion candidates for ${page}:`,
+        err instanceof Error ? err.message : err,
+      )
+    }
+  }
 }
 
 /**

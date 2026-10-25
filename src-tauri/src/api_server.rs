@@ -1880,6 +1880,7 @@ const REVIEW_TYPES: &[&str] = &[
     "duplicate-source",
     "research-result",
     "mirror-edited",
+    "fusion-candidate",
 ];
 
 /// The option of an item that the caller gave no options for. The item can then be dismissed.
@@ -4657,6 +4658,7 @@ mod tests {
             "duplicate-source",
             "research-result",
             "mirror-edited",
+            "fusion-candidate",
         ] {
             let mut body = mirror_edited_request();
             body["type"] = json!(item_type);

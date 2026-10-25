@@ -1161,3 +1161,167 @@ describe("research staging", () => {
     expect(resolveItem).not.toHaveBeenCalled()
   })
 })
+
+describe("fusion candidates", () => {
+  const MECHANISM = "wiki/mechanisms/example-loop.md"
+  const DISMISSED = ".llm-wiki/fusion-dismissed.json"
+
+  const DESCRIPTION = [
+    "Domains where Example loop may also work:",
+    "CANDIDATE: example/gamma | structural | Same trigger and same reaction.",
+    "CANDIDATE: example/delta | surface | Both wait for a request | and then answer.",
+  ].join("\n")
+
+  function candidateItem(patch: Partial<ReviewItem> = {}): ReviewItem {
+    return makeReview({
+      id: "review-1a2b3c4d",
+      type: "fusion-candidate",
+      title: "Fusion candidates: Example loop",
+      description: DESCRIPTION,
+      affectedPages: [MECHANISM],
+      ...patch,
+    })
+  }
+
+  async function dismissed(): Promise<unknown> {
+    return JSON.parse(await readFileRaw(`${reading}/${DISMISSED}`))
+  }
+
+  describe("mech:start-fusion", () => {
+    it("start-fusion copies the command and keeps the item open", async () => {
+      await setUpReading()
+      const copyText = vi.fn(async (_text: string) => {})
+      const { ctx, resolveItem, refresh } = makeCtx(reading, { copyText })
+
+      expect(await handleMechanismReviewAction(candidateItem(), "mech:start-fusion", ctx)).toBe(true)
+
+      expect(copyText).toHaveBeenCalledTimes(1)
+      expect(copyText).toHaveBeenCalledWith("/wiki-fuse --candidate review-1a2b3c4d")
+      expect(resolveItem).not.toHaveBeenCalled()
+      expect(refresh).not.toHaveBeenCalled()
+      // Nothing is skipped by starting.
+      expect(await fileExists(`${reading}/${DISMISSED}`)).toBe(false)
+    })
+
+    it("names the command in the error when the copy fails, and keeps the item open", async () => {
+      await setUpReading()
+      const copyText = vi.fn(async (_text: string) => {
+        throw new Error("clipboard is blocked")
+      })
+      const { ctx, resolveItem } = makeCtx(reading, { copyText })
+
+      await expect(handleMechanismReviewAction(candidateItem(), "mech:start-fusion", ctx)).rejects.toThrow(
+        /\/wiki-fuse --candidate review-1a2b3c4d/,
+      )
+      expect(resolveItem).not.toHaveBeenCalled()
+    })
+
+    it("names the command in the error when the caller cannot copy", async () => {
+      await setUpReading()
+      const { ctx, resolveItem } = makeCtx(reading)
+
+      await expect(handleMechanismReviewAction(candidateItem(), "mech:start-fusion", ctx)).rejects.toThrow(
+        /\/wiki-fuse --candidate review-1a2b3c4d/,
+      )
+      expect(resolveItem).not.toHaveBeenCalled()
+    })
+  })
+
+  describe("mech:dismiss-fusion", () => {
+    it("dismiss-fusion records the pair and resolves", async () => {
+      await setUpReading()
+      const { ctx, resolveItem } = makeCtx(reading)
+
+      expect(await handleMechanismReviewAction(candidateItem(), "mech:dismiss-fusion", ctx)).toBe(true)
+
+      expect(await dismissed()).toEqual([
+        { mechanism: MECHANISM, targetDomain: "example/gamma" },
+        { mechanism: MECHANISM, targetDomain: "example/delta" },
+      ])
+      expect(resolveItem).toHaveBeenCalledTimes(1)
+      expect(resolveItem).toHaveBeenCalledWith("review-1a2b3c4d", "Skipped")
+    })
+
+    it("keeps the pairs that are in the file and adds no pair twice", async () => {
+      await setUpReading()
+      await writeFileRaw(
+        `${reading}/${DISMISSED}`,
+        JSON.stringify([
+          { mechanism: "wiki/mechanisms/other.md", targetDomain: "example/gamma" },
+          { mechanism: MECHANISM, targetDomain: "example/delta" },
+          "an entry that is not a pair",
+        ]),
+      )
+      const { ctx } = makeCtx(reading)
+
+      await handleMechanismReviewAction(candidateItem(), "mech:dismiss-fusion", ctx)
+      await handleMechanismReviewAction(candidateItem(), "mech:dismiss-fusion", ctx)
+
+      expect(await dismissed()).toEqual([
+        { mechanism: "wiki/mechanisms/other.md", targetDomain: "example/gamma" },
+        { mechanism: MECHANISM, targetDomain: "example/delta" },
+        "an entry that is not a pair",
+        { mechanism: MECHANISM, targetDomain: "example/gamma" },
+      ])
+    })
+
+    it("starts a new file when the old one is not a JSON array", async () => {
+      await setUpReading()
+      await writeFileRaw(`${reading}/${DISMISSED}`, "{ broken")
+      const { ctx, resolveItem } = makeCtx(reading)
+
+      await handleMechanismReviewAction(candidateItem(), "mech:dismiss-fusion", ctx)
+
+      expect(await dismissed()).toEqual([
+        { mechanism: MECHANISM, targetDomain: "example/gamma" },
+        { mechanism: MECHANISM, targetDomain: "example/delta" },
+      ])
+      expect(resolveItem).toHaveBeenCalledTimes(1)
+    })
+
+    it("does not lose a pair when two dismissals run together", async () => {
+      await setUpReading()
+      const { ctx } = makeCtx(reading)
+      const first = candidateItem({
+        description: "Domains where A may also work:\nCANDIDATE: example/gamma | structural | One.",
+        affectedPages: ["wiki/mechanisms/a.md"],
+      })
+      const second = candidateItem({
+        id: "review-5e6f7a8b",
+        description: "Domains where B may also work:\nCANDIDATE: example/delta | surface | Two.",
+        affectedPages: ["wiki/mechanisms/b.md"],
+      })
+
+      await Promise.all([
+        handleMechanismReviewAction(first, "mech:dismiss-fusion", ctx),
+        handleMechanismReviewAction(second, "mech:dismiss-fusion", ctx),
+      ])
+
+      expect(await dismissed()).toEqual(
+        expect.arrayContaining([
+          { mechanism: "wiki/mechanisms/a.md", targetDomain: "example/gamma" },
+          { mechanism: "wiki/mechanisms/b.md", targetDomain: "example/delta" },
+        ]),
+      )
+      expect(await dismissed()).toHaveLength(2)
+    })
+
+    it("throws, writes nothing, and keeps the item open when the item has no usable data", async () => {
+      await setUpReading()
+      const { ctx, resolveItem } = makeCtx(reading)
+
+      await expect(
+        handleMechanismReviewAction(candidateItem({ description: "Domains where it may also work:" }), "mech:dismiss-fusion", ctx),
+      ).rejects.toThrow(/CANDIDATE/)
+      await expect(
+        handleMechanismReviewAction(candidateItem({ affectedPages: undefined }), "mech:dismiss-fusion", ctx),
+      ).rejects.toThrow(/mechanism page/)
+      await expect(
+        handleMechanismReviewAction(candidateItem({ affectedPages: ["  "] }), "mech:dismiss-fusion", ctx),
+      ).rejects.toThrow(/mechanism page/)
+
+      expect(await fileExists(`${reading}/${DISMISSED}`)).toBe(false)
+      expect(resolveItem).not.toHaveBeenCalled()
+    })
+  })
+})
