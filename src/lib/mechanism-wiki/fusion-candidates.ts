@@ -22,6 +22,7 @@ import { findSection, MECHANISM_SECTIONS } from "@/lib/wiki-config/section-headi
 import { hasOwn } from "@/lib/wiki-config/yaml-util"
 import { reviewIdFor, useReviewStore } from "@/stores/review-store"
 import type { ReviewItem } from "@/stores/review-store"
+import { useWikiStore } from "@/stores/wiki-store"
 import type { LlmConfig } from "@/stores/wiki-store"
 import { canWriteMechanismPages } from "./context"
 import type { MechanismContext } from "./context"
@@ -363,9 +364,10 @@ export interface ProposeOptions {
 /**
  * Ask the model for fusion candidates of the mechanism page at `mechanismPath` (project-relative) and send
  * them to review as one `fusion-candidate` item. Returns the number of review items added: 1, or 0 when the
- * wiki cannot hold mechanism pages, no domain is left to try, the model names no usable candidate, or the
- * mechanism has its item already. Writes no file. Throws when the page cannot be read or the model call
- * fails; the ingest catches that, because candidates are an extra.
+ * wiki cannot hold mechanism pages, no domain is left to try, the signal aborted or another project was
+ * opened meanwhile, the model names no usable candidate, or the mechanism has its item already. Writes no
+ * file. Throws when the page cannot be read or the model call fails; the ingest catches that, because
+ * candidates are an extra.
  */
 export async function proposeFusionCandidates(
   projectPath: string,
@@ -385,14 +387,19 @@ export async function proposeFusionCandidates(
   const skipped = new Set([...instanceDomains, ...dismissedHere])
   // Nothing to ask: every domain has an instance or was skipped.
   if (Object.keys(ctx.domains.domains).every((domain) => skipped.has(domain))) return 0
-  if (options.signal?.aborted) return 0
+  // The step runs on its own, after the ingest. It may find that it was cut off, or that the user opened
+  // another project, which owns the review store now. Then it stops and adds nothing.
+  const stopped = (): boolean => options.signal?.aborted === true || !isOpenProject(root)
+  if (stopped()) return 0
 
-  const prompt = buildCandidatePrompt(text, ctx, await readRecentBoards(root), {
+  const boards = await readRecentBoards(root)
+  if (stopped()) return 0
+  const prompt = buildCandidatePrompt(text, ctx, boards, {
     dismissedDomains: dismissedHere,
     skipDomains: options.sourceDomain ? [options.sourceDomain.trim()] : [],
   })
   const output = await askModel(llm, prompt, options.signal)
-  if (options.signal?.aborted) return 0
+  if (stopped()) return 0
 
   const candidates = parseCandidates(output, ctx, dismissed, instanceDomains, page)
   if (candidates.length === 0) return 0
@@ -418,6 +425,12 @@ export async function proposeFusionCandidates(
   const known = store.items.some((existing) => existing.id === reviewIdFor(item))
   store.addItems([item])
   return known ? 0 : 1
+}
+
+/** True when `root` is the project that is open now. */
+function isOpenProject(root: string): boolean {
+  const open = useWikiStore.getState().project?.path
+  return open !== undefined && projectRoot(open) === root
 }
 
 /** The `title` of the page, else its file stem. One line. */

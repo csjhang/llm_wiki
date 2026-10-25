@@ -358,6 +358,36 @@ describe("ingest and fusion candidates", () => {
     expectIngestIntact(await ingest(FIRST))
   })
 
+  it("adds no item to the next project when the user switches project while the model thinks", async () => {
+    model.fusionAnswer = candidateLine("business/franchising", "surface", "A franchisee acts on a request.")
+    model.onFusion = async () => {
+      useWikiStore.setState({ project: { id: "q", name: "q", path: "/somewhere/else" } })
+    }
+
+    const written = await ingest(FIRST)
+
+    expect(written).toContain(MECHANISM_PATH)
+    expect(fusionCalls()).toHaveLength(1)
+    expect(useReviewStore.getState().items).toEqual([])
+  })
+
+  it("the wait for the candidate steps never rejects, also when logging an error fails", async () => {
+    model.fusionAnswer = new Error("provider down")
+    // The log call of the error path throws, as a broken console of a host could.
+    vi.mocked(console.warn).mockImplementation((message?: unknown) => {
+      if (String(message).includes("Could not propose")) throw new Error("the log failed")
+    })
+
+    await ingestOnly(FIRST)
+
+    await expect(Promise.all(pendingFusionProposals())).resolves.toBeDefined()
+    expect(console.warn).toHaveBeenCalledWith(
+      expect.stringContaining("[ingest:mechanism] Fusion candidate step failed"),
+      expect.anything(),
+    )
+    expect(pendingFusionProposals()).toEqual([])
+  })
+
   it("sends no candidate for a new instance of a mechanism that already has its page", async () => {
     model.fusionAnswer = candidateLine("business/franchising", "surface", "A franchisee acts on a request.")
     await ingest(FIRST)

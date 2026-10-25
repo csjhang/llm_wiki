@@ -12,13 +12,24 @@ import { useWikiStore } from "@/stores/wiki-store"
 import type { MechanismContext } from "./context"
 import { loadMechanismContext } from "./context"
 
-vi.mock("@/commands/fs", () => realFs)
+/** A test can look at each file read: `readRecentBoards` reads the card map first. */
+const reads = vi.hoisted(() => ({ onRead: null as null | ((path: string) => void) }))
+
+vi.mock("@/commands/fs", () => ({
+  ...realFs,
+  readFile: (path: string) => {
+    reads.onRead?.(path)
+    return realFs.readFile(path)
+  },
+}))
 
 /** What the fake model saw and what it answers. An `Error` makes the call fail. */
 const model = vi.hoisted(() => ({
   answer: "" as string | Error,
   /** A call that never answers and never reports an error, as a stuck connection does. */
   hang: false,
+  /** When set, a call waits for this promise before it answers. */
+  gate: null as Promise<void> | null,
   calls: [] as Array<{ system: string; user: string; maxTokens: unknown }>,
 }))
 
@@ -30,6 +41,7 @@ vi.mock("@/lib/llm-client", () => ({
       maxTokens: overrides?.max_tokens,
     })
     if (model.hang) await new Promise<never>(() => {})
+    if (model.gate !== null) await model.gate
     if (model.answer instanceof Error) {
       callbacks.onError(model.answer)
       return
@@ -479,8 +491,12 @@ describe("proposeFusionCandidates", () => {
     project = tmp.path
     model.answer = ""
     model.hang = false
+    model.gate = null
+    reads.onRead = null
     model.calls.length = 0
     useReviewStore.setState({ items: [] })
+    // The project of the test is the open project, as it is while an ingest runs.
+    useWikiStore.setState({ project: { id: "p", name: "p", path: project } })
     vi.spyOn(console, "warn").mockImplementation(() => {})
   })
 
@@ -689,6 +705,74 @@ describe("proposeFusionCandidates", () => {
 
     expect(await propose(ctx, { signal: controller.signal })).toBe(0)
     expect(model.calls).toEqual([])
+  })
+
+  describe("when the project changes", () => {
+    const OTHER_PROJECT = { id: "q", name: "q", path: "/somewhere/else" }
+
+    it("stops after a model call that was pending when the project changed, and adds nothing", async () => {
+      const ctx = await setUp()
+      model.answer = line("example/gamma", "structural", "Same trigger.")
+      let open!: () => void
+      model.gate = new Promise<void>((resolve) => {
+        open = resolve
+      })
+
+      const result = propose(ctx)
+      await vi.waitFor(() => expect(model.calls).toHaveLength(1))
+      // The user opens another project while the model thinks.
+      useWikiStore.setState({ project: OTHER_PROJECT })
+      open()
+
+      expect(await result).toBe(0)
+      expect(useReviewStore.getState().items).toEqual([])
+      // Nothing is written: no skipped-pairs file, no folder for one, and the page is as it was.
+      expect(await fileExists(`${project}/.llm-wiki`)).toBe(false)
+      expect(await readFileRaw(`${project}/${PAGE_PATH}`)).toBe(PAGE)
+    })
+
+    it("does not ask the model when the project changed while the boards were read", async () => {
+      const ctx = await setUp()
+      model.answer = line("example/gamma", "structural", "Same trigger.")
+      reads.onRead = (path) => {
+        if (path.endsWith("/heptabase-map.json")) useWikiStore.setState({ project: OTHER_PROJECT })
+      }
+
+      expect(await propose(ctx)).toBe(0)
+      expect(model.calls).toEqual([])
+      expect(useReviewStore.getState().items).toEqual([])
+    })
+
+    it("does not ask the model when no project is open", async () => {
+      const ctx = await setUp()
+      model.answer = line("example/gamma", "structural", "Same trigger.")
+      useWikiStore.setState({ project: null })
+
+      expect(await propose(ctx)).toBe(0)
+      expect(model.calls).toEqual([])
+      expect(useReviewStore.getState().items).toEqual([])
+    })
+
+    it("takes the same folder written with another separator or a trailing slash as the same project", async () => {
+      const ctx = await setUp()
+      model.answer = line("example/gamma", "structural", "Same trigger.")
+      useWikiStore.setState({ project: { id: "p", name: "p", path: `${project.replace(/\//g, "\\")}/` } })
+
+      expect(await propose(ctx)).toBe(1)
+    })
+  })
+
+  it("does not ask the model when the signal aborted while the boards were read", async () => {
+    const ctx = await setUp()
+    model.answer = line("example/gamma", "structural", "Same trigger.")
+    const controller = new AbortController()
+    reads.onRead = (path) => {
+      if (path.endsWith("/heptabase-map.json")) controller.abort()
+    }
+
+    expect(await propose(ctx, { signal: controller.signal })).toBe(0)
+    expect(model.calls).toEqual([])
+    expect(useReviewStore.getState().items).toEqual([])
   })
 
   it("throws when the page cannot be read", async () => {

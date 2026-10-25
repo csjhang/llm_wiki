@@ -1807,10 +1807,19 @@ function startFusionProposals(
         `[ingest:mechanism] Fusion candidates for ${pages.join(", ")} timed out after ${FUSION_STEP_TIMEOUT_MS / 1000} s`,
       )
     }
-  })().finally(() => {
-    clearTimeout(timer)
-    fusionSteps.delete(step)
-  })
+  })()
+    // Whatever goes wrong, the promise of the step resolves: a caller that waits for it never gets a rejection.
+    .catch((err: unknown) => {
+      try {
+        console.warn("[ingest:mechanism] Fusion candidate step failed:", err instanceof Error ? err.message : err)
+      } catch {
+        // The log is broken too. There is nothing more to do, and the promise must still resolve.
+      }
+    })
+    .finally(() => {
+      clearTimeout(timer)
+      fusionSteps.delete(step)
+    })
   fusionSteps.add(step)
 }
 
