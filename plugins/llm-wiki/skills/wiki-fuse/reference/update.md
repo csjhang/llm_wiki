@@ -13,7 +13,7 @@ The new evidence is in the query pages of `wiki/queries/`. The goal is to re-eva
    - The hypothesis page links it.
    - It links the hypothesis page.
    - Its `updated` date, or its `created` date, is later than `updated` of the hypothesis page.
-5. Use `grep -l '\[\[<slug>\]\]' wiki/queries/*.md` to find the query pages that link the hypothesis. Read the dates in the frontmatter. Do not use the date of the file.
+5. Use `grep -l '\[\[<slug>[]|#\]' wiki/queries/*.md` to find the query pages that link the hypothesis. The pattern also finds a link with a label or an anchor. Read the dates in the frontmatter. Do not use the date of the file.
 6. If no query page matters, tell the user. Stop. Offer to run Step 9 of `directed.md` for rows that have no review item.
 7. Read each query page that matters. Note which row it speaks to, what it found, and which sources it cites.
 8. Rank the evidence of each query page with the Evidence standard of the lens. Read the sources that it cites.
@@ -31,11 +31,12 @@ The new evidence is in the query pages of `wiki/queries/`. The goal is to re-eva
 17. Run `fuse check` until the page passes.
 18. Run `fuse commit` with the title `update <title>`. Give `--file` for the hypothesis page. The subject is `fuse: update <title> (1 pages)`.
 19. Run the Down steps of `wiki-sync` for the page, as Step 8 of `directed.md` says. Run the actions that the plan gives for the page. Normally this is one `update` action.
-20. Update the review items, if the app runs. For each row that is now resolved or refuted, find its open `Verify:` item with `llm_wiki_reviews` (type `suggestion`). The page is in `affectedPages`. Resolve the item with `llm_wiki_resolve_review`.
+20. Update the review items, if the app runs. Call `llm_wiki_reviews` with `"type": "suggestion"` and `"status": "unresolved"`. The title of the item of a row is `Verify (<hypothesis slug>): ` and the start of the claim of the row. Match a row to its item by this title.
+21. For each row that is now resolved or refuted, resolve its item with `llm_wiki_resolve_review`.
 
 ```json
-{ "project_id": "<project folder>", "id": "<review id>", "action": "Verified" }
+{ "project_id": "<project folder>", "id": "<review id>", "action": "Evaluated" }
 ```
 
-21. For each row that is still open and has no review item, add one as Step 9 of `directed.md` says. Adding an item that exists is safe.
-22. Report as `SKILL.md` says. Name the rows that changed, the old `status`, and the new `status`.
+22. For each row that is still open and has no item, add one as Step 9 of `directed.md` says. Adding an item that exists is safe.
+23. Report as `SKILL.md` says. Name the rows that changed, the old `status`, and the new `status`.

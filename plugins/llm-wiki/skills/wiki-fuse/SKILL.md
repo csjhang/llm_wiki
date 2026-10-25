@@ -46,7 +46,8 @@ The plugin directory, `<plugin dir>`, is two folders above the base directory.
 The tool is `<plugin dir>/scripts/wiki-tool.mjs`.
 From the base directory, the path is `<base>/../../scripts/wiki-tool.mjs`.
 The skill `wiki-sync` is the folder `<base>/../wiki-sync/`. Its `SKILL.md` and `reference/mcp-steps.md` hold the MCP rules that this skill points to.
-The target wiki is the wiki that receives the hypothesis page. A project folder means the folder of the target wiki, unless a step says otherwise.
+The target wiki is the wiki that receives the hypothesis page.
+The project folder is the folder that "Before you start" finds. A step can change it. Then the folder of the target wiki is the project folder from then on.
 
 ## Command lines
 
@@ -64,8 +65,7 @@ node "<plugin dir>/scripts/wiki-tool.mjs" fuse <command> --project "<project>" .
 - Put a path in double quotes. Put a title in single quotes. A single quote inside the title is written `'\''`.
 - A list option is given once for each file. Example: `--file "<file 1>" --file "<file 2>"`.
 - A path of a page is relative to the project folder, for example `wiki/hypotheses/<slug>.md`.
-- Never edit `heptabase-map.json` or `heptabase.yaml` by hand.
-- Never discard, revert, or reset `heptabase-map.json`. It maps wiki pages to Heptabase cards, and nothing can rebuild it.
+- Obey the last two rules of the section "Command lines" of `<base>/../wiki-sync/SKILL.md`. They protect `heptabase-map.json` and `heptabase.yaml`.
 
 The two commands that every mode uses:
 
@@ -88,8 +88,7 @@ node "<plugin dir>/scripts/wiki-tool.mjs" fuse commit --project "<project>" --ti
 3. Read `wiki.yaml`. Note the `id` and the `role` of the wiki. In a work wiki, note `mechanism_library`. It is the path to the reading wiki.
 4. Call `llm_wiki_status` of the `llm_wiki` MCP. Save it as `llm_wiki_status.json`. A missing tool or a failed call means that the app is not running.
 5. If the app is not running, tell the user to open it. Go on without review items. The page and the card are the record.
-6. Read `CLAUDE.md` of the project folder. Follow its read order. This is Rule 1.
-7. Read the mode from the command of the user. Read the file that the table in "Modes" names.
+6. Read the mode from the command of the user. Read the file that the table in "Modes" names.
 
 ## MCP rules
 
@@ -106,11 +105,11 @@ node "<plugin dir>/scripts/wiki-tool.mjs" fuse commit --project "<project>" --ti
 2. Read the mechanism page. Read the lens of `to_domain`, the lens of `from_domain`, and `schema/page-types/hypothesis.md`.
 3. Write the page as `schema/page-types/hypothesis.md` says. That file is the one source for the frontmatter, the six sections, the table columns, and the checklist.
 4. Cite a wiki page for every claim. Put every claim that has no page under "What to verify".
-5. Set `strength` from the Strength rules in the lens of `to_domain`. Evidence never sets `strength`. Evidence sets the "Fits?" column and `status`.
+5. Set `strength` by the Strength rules in the lens of `to_domain`. The rule file says what the evidence decides.
 6. Write the page in the output language of the wiki. Read it from the line `Output language:` in `purpose.md`. Use the section headings that the table in the rule file lists for that language.
 7. Run `fuse check` until the page passes. Fix the page, never the check. If the same problem stays after three fixes, stop. Show the problems to the user.
 8. Commit with `fuse commit`. Never use `git commit` for a hypothesis page.
-9. After the commit, run the Down steps of `wiki-sync` for the new page only. `reference/directed.md`, Step 8, says how.
+9. After the commit, run the Down steps of `wiki-sync` for the pages that the commit wrote. `reference/directed.md`, Step 8, says how.
 10. For each row under "What to verify", add one `suggestion` review item. `reference/directed.md`, Step 9, says how. The user can then start deep research in the app.
 11. Write only in the target wiki. A work wiki hypothesis never links to a page of the reading wiki and never edits one. It may read the mechanism pages of the reading wiki.
 12. A reading wiki hypothesis may also change the mechanism page. `reference/directed.md`, Step 7, says how.
@@ -126,6 +125,7 @@ At the end, give the user a short report.
 - `relation`, `strength`, and `status`. Name the rule of the lens that gave the `strength`.
 - The counts of "fits", "partly fits", "does not fit", and "unknown" rows.
 - The rows under "What to verify". Say how many review items were added. If none was added, say why.
+- The cards of the whiteboard that were left out, and why.
 - The card: created, placed on the whiteboard, or not made. Say why when it is not made.
 - The number of other `wiki-sync` actions that wait for `/wiki-sync`.
 - The review item that was resolved, if any.
