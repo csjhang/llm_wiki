@@ -49,8 +49,16 @@ function cardOf(output: Output, cardId: string) {
   return card
 }
 
-/** Write a card map with the given mirror pages (page path to card id) and sources (card id to snapshot path). */
-function writeMap(project: string, pages: Record<string, string> = {}, sources: Record<string, string> = {}): void {
+/**
+ * Write a card map with the given mirror pages (page path to card id) and sources (card id to snapshot path).
+ * The pages in `retired` (paths) are retired pages.
+ */
+function writeMap(
+  project: string,
+  pages: Record<string, string> = {},
+  sources: Record<string, string> = {},
+  retired: readonly string[] = [],
+): void {
   const map: CardMap = { version: 1, pages: {}, sources: {}, whiteboards_cache: { updated_at: "", items: [] } }
   for (const [path, cardId] of Object.entries(pages)) {
     map.pages[path] = {
@@ -59,7 +67,7 @@ function writeMap(project: string, pages: Record<string, string> = {}, sources: 
       last_synced_at: "2026-10-01T00:00:00.000Z",
       card_updated_at: "2026-10-01T00:00:00.000Z",
       placements: [],
-      status: "active",
+      status: retired.includes(path) ? "retired" : "active",
     }
   }
   for (const [cardId, rawPath] of Object.entries(sources)) {
@@ -178,6 +186,34 @@ describe("fuse resolve-board", () => {
     expect(cardOf(output, id(7))).toMatchObject({ status: "not-ingested", wiki: null, pages: [] })
   })
 
+  it("lists the pages of a mirror card sorted", async () => {
+    const project = makeProject()
+    writeMap(project, { "wiki/mechanisms/b.md": id(21), "wiki/mechanisms/a.md": id(21) })
+    const { output } = await resolveFixtureBoard(project)
+    expect(cardOf(output, id(21))).toMatchObject({ status: "mirror", pages: ["wiki/mechanisms/a.md", "wiki/mechanisms/b.md"] })
+  })
+
+  it("marks a card whose page is retired", async () => {
+    const project = makeProject({}, { wikiId: "work" })
+    const reading = makeProject({}, { wikiId: "reading" })
+    writeMap(project, { "wiki/mechanisms/gone.md": id(6), "wiki/mechanisms/live.md": id(7) }, {}, ["wiki/mechanisms/gone.md"])
+    writeMap(reading, { "wiki/mechanisms/gone-too.md": id(21) }, {}, ["wiki/mechanisms/gone-too.md"])
+    const { exitCode, output } = await resolveFixtureBoard(project, [reading])
+    expect(exitCode).toBe(0)
+    expect(cardOf(output, id(6))).toMatchObject({ status: "retired", wiki: "work", pages: ["wiki/mechanisms/gone.md"] })
+    expect(cardOf(output, id(21))).toMatchObject({ status: "retired", wiki: "reading", pages: ["wiki/mechanisms/gone-too.md"] })
+    expect(cardOf(output, id(7))).toMatchObject({ status: "mirror", wiki: "work", pages: ["wiki/mechanisms/live.md"] })
+  })
+
+  it("prefers an active page of a card over a retired one", async () => {
+    const project = makeProject({}, { wikiId: "work" })
+    const reading = makeProject({}, { wikiId: "reading" })
+    writeMap(project, { "wiki/mechanisms/old.md": id(6) }, {}, ["wiki/mechanisms/old.md"])
+    writeMap(reading, { "wiki/mechanisms/new.md": id(6) })
+    const { output } = await resolveFixtureBoard(project, [reading])
+    expect(cardOf(output, id(6))).toMatchObject({ status: "mirror", wiki: "reading", pages: ["wiki/mechanisms/new.md"] })
+  })
+
   it("resolves ingested cards to pages", async () => {
     const project = makeProject(
       {
@@ -200,6 +236,35 @@ describe("fuse resolve-board", () => {
     expect(cardOf(output, id(6))).toMatchObject({ status: "ingested", wiki: "reading", pages: ["wiki/concepts/delta.md"] })
     // gamma.md cites a snapshot the map does not know, so the card is not ingested.
     expect(cardOf(output, id(22))).toMatchObject({ status: "not-ingested", wiki: null, pages: [] })
+  })
+
+  it("reports the wiki whose pages cite a card that several wikis ingested", async () => {
+    const snapshot = `raw/sources/heptabase/${id(7)}.md`
+    const project = makeProject({}, { wikiId: "work" })
+    const reading = makeProject(
+      { "wiki/concepts/delta.md": pageText({ title: "Delta", type: "concept", sources: [`${id(7)}.md`] }) },
+      { wikiId: "reading" },
+    )
+    const third = makeProject(
+      { "wiki/concepts/epsilon.md": pageText({ title: "Epsilon", type: "concept", sources: [`${id(7)}.md`] }) },
+      { wikiId: "third" },
+    )
+    writeMap(project, {}, { [id(7)]: snapshot })
+    writeMap(reading, {}, { [id(7)]: snapshot })
+    writeMap(third, {}, { [id(7)]: snapshot })
+    const { output } = await resolveFixtureBoard(project, [reading, third])
+    // The project ingested the card too, but no page of it cites the snapshot; the first wiki with a citing page answers.
+    expect(cardOf(output, id(7))).toMatchObject({ status: "ingested", wiki: "reading", pages: ["wiki/concepts/delta.md"] })
+  })
+
+  it("reports the first wiki when no page cites a card that several wikis ingested", async () => {
+    const snapshot = `raw/sources/heptabase/${id(7)}.md`
+    const project = makeProject({}, { wikiId: "work" })
+    const reading = makeProject({}, { wikiId: "reading" })
+    writeMap(project, {}, { [id(7)]: snapshot })
+    writeMap(reading, {}, { [id(7)]: snapshot })
+    const { output } = await resolveFixtureBoard(project, [reading])
+    expect(cardOf(output, id(7))).toMatchObject({ status: "ingested", wiki: "work", pages: [] })
   })
 
   it("reports an ingested card that no page cites yet", async () => {

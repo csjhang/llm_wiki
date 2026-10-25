@@ -8,13 +8,16 @@
  *
  * - `mirror`: the card is the mirror card of a wiki page (the card id is in `pages` of a card map); `pages` is that
  *   page path.
+ * - `retired`: the card was the mirror card of a page that is gone (the entry of the card map is retired); `pages` is
+ *   the old page path. The card is not a source for fusion. An active page of the card in any wiki wins over this.
  * - `ingested`: the card was snapshotted into a wiki (the card id is in `sources`); `pages` are the pages of that wiki
  *   whose frontmatter `sources` names the snapshot file (`<card-id>.md`). There can be none yet.
  * - `not-ingested`: no wiki knows the card.
  *
  * `wiki` is the `id` of `wiki.yaml` of the wiki that answered, and `pages` are paths inside that wiki. When more than
- * one wiki knows a card, a mirror card wins over a snapshot, and the first wiki wins (this project, then the `--wiki`
- * options in order).
+ * one wiki knows a card, `mirror` wins over `retired`, and `retired` over `ingested`. Among wikis the first wins (this
+ * project, then the `--wiki` options in order); for a card that several wikis ingested, the first wiki that has a page
+ * citing the snapshot wins, else the first wiki.
  *
  * A section whose title starts with `來源`, `Source`, or `source` is the source side; `目標`, `Target`, or `target` is
  * the target side. A mind map joins the section that holds it, so its cards get that section and side. `pairing` lists
@@ -24,11 +27,10 @@
  */
 import { readFileSync } from "node:fs"
 import { posix, resolve } from "node:path"
-import { parseWikiYaml } from "@/lib/wiki-config/wiki-identity"
 import { parseArgs } from "../args"
 import { type CardMap, loadCardMap } from "../card-map"
-import { type CommandResult, isDirectory, resolveInProject } from "../io"
-import { compareText, readWikiPages } from "../mirror-pages"
+import { type CommandResult, isDirectory } from "../io"
+import { compareText, readWikiIdentity, readWikiPages } from "../mirror-pages"
 import {
   failedStatus,
   parseMindMap,
@@ -43,7 +45,7 @@ export interface BoardCard {
   /** The title of the section that holds the card (or its mind map); null for a card outside every section. */
   section: string | null
   side: "source" | "target" | null
-  status: "mirror" | "ingested" | "not-ingested"
+  status: "mirror" | "retired" | "ingested" | "not-ingested"
   /** The `id` of `wiki.yaml` of the wiki that knows the card; null when `status` is `not-ingested`. */
   wiki: string | null
   /** Page paths inside that wiki. */
@@ -165,23 +167,15 @@ function readWiki(path: string, problems: string[]): Wiki | null {
     problems.push(`wiki folder not found: ${path}`)
     return null
   }
-  const yamlPath = resolveInProject(path, "wiki.yaml")
-  let text: string
-  try {
-    text = readFileSync(yamlPath, "utf8").replace(/^﻿/, "")
-  } catch {
-    problems.push(`cannot read wiki.yaml: ${yamlPath}`)
-    return null
-  }
-  const identity = parseWikiYaml(text)
-  if (!identity.ok) {
-    for (const issue of identity.issues) {
-      problems.push(`invalid wiki.yaml (${yamlPath}): ${issue.path === "" ? "" : `${issue.path}: `}${issue.message}`)
-    }
+  const identityProblems: string[] = []
+  const identity = readWikiIdentity(path, identityProblems)
+  if (!identity) {
+    // The problems of the reader do not always say which wiki.
+    for (const problem of identityProblems) problems.push(`wiki ${path}: ${problem}`)
     return null
   }
   try {
-    return { id: identity.value.id, path, map: loadCardMap(path) }
+    return { id: identity.id, path, map: loadCardMap(path) }
   } catch (error) {
     problems.push(`wiki ${path}: ${error instanceof Error ? error.message : String(error)}`)
     return null
@@ -265,10 +259,11 @@ function placeCards(structure: WhiteboardStructure, mindMapCards: ReadonlyMap<st
 
 // --- the wikis -----------------------------------------------------------
 
-/** A card is the mirror card of pages of one wiki, or the snapshot `fileName` of one wiki. */
-interface MirrorHit {
+/** A page of a card map that is the card, in the wiki that has the map. */
+interface MirrorEntry {
   wiki: Wiki
-  pages: string[]
+  path: string
+  retired: boolean
 }
 
 interface SourceHit {
@@ -278,17 +273,16 @@ interface SourceHit {
 
 /** Resolve each card against the wikis. Null, with the problems, when the pages of a wiki cannot be read. */
 function resolveCards(placed: readonly PlacedCard[], wikis: readonly Wiki[], problems: string[]): BoardCard[] | null {
-  const mirrors = new Map<string, MirrorHit>()
-  const sources = new Map<string, SourceHit>()
+  const mirrors = new Map<string, MirrorEntry[]>()
+  const sources = new Map<string, SourceHit[]>()
   for (const wiki of wikis) {
-    for (const [pagePath, entry] of Object.entries(wiki.map.pages)) {
+    for (const [path, entry] of Object.entries(wiki.map.pages)) {
       const key = entry.card_id.toLowerCase()
-      const hit = mirrors.get(key) ?? { wiki, pages: [] }
-      mirrors.set(key, hit)
-      if (hit.wiki === wiki) hit.pages.push(pagePath)
+      mirrors.set(key, [...(mirrors.get(key) ?? []), { wiki, path, retired: entry.status === "retired" }])
     }
     for (const [cardId, entry] of Object.entries(wiki.map.sources)) {
-      if (!sources.has(cardId.toLowerCase())) sources.set(cardId.toLowerCase(), { wiki, fileName: posix.basename(entry.raw_path) })
+      const key = cardId.toLowerCase()
+      sources.set(key, [...(sources.get(key) ?? []), { wiki, fileName: posix.basename(entry.raw_path) }])
     }
   }
 
@@ -304,11 +298,22 @@ function resolveCards(placed: readonly PlacedCard[], wikis: readonly Wiki[], pro
 
   const cards = placed.map((card): BoardCard => {
     const key = card.cardId.toLowerCase()
-    const mirror = mirrors.get(key)
-    if (mirror) return { ...card, status: "mirror", wiki: mirror.wiki.id, pages: mirror.pages.sort(compareText) }
-    const source = sources.get(key)
-    if (source) return { ...card, status: "ingested", wiki: source.wiki.id, pages: citingPages(source) }
-    return { ...card, status: "not-ingested", wiki: null, pages: [] }
+    const entries = mirrors.get(key) ?? []
+    // An active page of the card in any wiki wins over a retired one; the first wiki wins among the same kind.
+    for (const retired of [false, true]) {
+      const first = entries.find((entry) => entry.retired === retired)
+      if (first) {
+        const pages = entries.filter((entry) => entry.wiki === first.wiki && entry.retired === retired).map((entry) => entry.path)
+        return { ...card, status: retired ? "retired" : "mirror", wiki: first.wiki.id, pages: pages.sort(compareText) }
+      }
+    }
+    const hits = sources.get(key) ?? []
+    if (hits.length === 0) return { ...card, status: "not-ingested", wiki: null, pages: [] }
+    for (const hit of hits) {
+      const pages = citingPages(hit)
+      if (pages.length > 0) return { ...card, status: "ingested", wiki: hit.wiki.id, pages: [...pages] }
+    }
+    return { ...card, status: "ingested", wiki: hits[0].wiki.id, pages: [] }
   })
   return problems.length > 0 ? null : cards
 }

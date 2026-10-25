@@ -267,6 +267,11 @@ export function readHeptabaseConfig(project: string, problems: string[]): Heptab
   return readConfigFile(project, "heptabase.yaml", parseHeptabaseYaml, problems)
 }
 
+/** The parsed wiki.yaml of a project, or null with the problems when it cannot be read or is not valid. */
+export function readWikiIdentity(project: string, problems: string[]): WikiIdentity | null {
+  return readConfigFile(project, "wiki.yaml", parseWikiYaml, problems)
+}
+
 function readConfigFile<T>(
   project: string,
   name: string,
