@@ -1195,6 +1195,10 @@ impl ReviewStatus {
 struct ReviewQuery {
     status: ReviewStatus,
     item_type: Option<String>,
+    /// Only the item with this id. It matches the stored id or the stable id, as `review_id_matches` does.
+    id: Option<String>,
+    /// Only items whose trimmed title starts with this text. Letter case counts.
+    title_prefix: Option<String>,
     limit: usize,
 }
 
@@ -1218,6 +1222,15 @@ fn parse_review_query(query: &str) -> Result<ReviewQuery, String> {
         .get("type")
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let id = params
+        .get("id")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    // The prefix is not trimmed: "Verify (slug): " ends in a space that belongs to it.
+    let title_prefix = params
+        .get("title_prefix")
+        .cloned()
+        .filter(|s| !s.is_empty());
     let limit = params
         .get("limit")
         .and_then(|s| s.parse::<usize>().ok())
@@ -1227,6 +1240,8 @@ fn parse_review_query(query: &str) -> Result<ReviewQuery, String> {
     Ok(ReviewQuery {
         status,
         item_type,
+        id,
+        title_prefix,
         limit,
     })
 }
@@ -1303,9 +1318,12 @@ fn load_review_items(project_path: &str, query: &ReviewQuery) -> Result<Vec<Valu
         .ok_or_else(|| "Invalid review state JSON: expected an array".to_string())?;
 
     let mut normalized: Vec<Value> = Vec::new();
+    // The ids as they are stored, for each normalized item. Merged duplicates add their ids.
+    let mut stored_ids: Vec<Vec<String>> = Vec::new();
     let mut index_by_id: BTreeMap<String, usize> = BTreeMap::new();
     for item in items {
         let sanitized = sanitize_review_item(item);
+        let stored_id = item.get("id").and_then(Value::as_str).map(str::to_string);
         let id = sanitized
             .get("id")
             .and_then(Value::as_str)
@@ -1313,15 +1331,19 @@ fn load_review_items(project_path: &str, query: &ReviewQuery) -> Result<Vec<Valu
         if let Some(id) = id {
             if let Some(existing_idx) = index_by_id.get(&id).copied() {
                 merge_sanitized_review(&mut normalized[existing_idx], &sanitized);
+                stored_ids[existing_idx].extend(stored_id);
                 continue;
             }
             index_by_id.insert(id, normalized.len());
         }
         normalized.push(sanitized);
+        stored_ids.push(stored_id.into_iter().collect());
     }
 
+    // The filters run before the limit. The file lists the oldest item first, so a lookup that
+    // waited for the limit would never find a new item in a long list.
     let mut reviews: Vec<Value> = Vec::new();
-    for item in normalized {
+    for (item, stored) in normalized.into_iter().zip(stored_ids) {
         let resolved = item
             .get("resolved")
             .and_then(Value::as_bool)
@@ -1331,6 +1353,17 @@ fn load_review_items(project_path: &str, query: &ReviewQuery) -> Result<Vec<Valu
         }
         if let Some(item_type) = &query.item_type {
             if item.get("type").and_then(Value::as_str) != Some(item_type.as_str()) {
+                continue;
+            }
+        }
+        if let Some(id) = &query.id {
+            if !review_id_matches(&item, id) && !stored.iter().any(|stored_id| stored_id == id) {
+                continue;
+            }
+        }
+        if let Some(prefix) = &query.title_prefix {
+            let title = item.get("title").and_then(Value::as_str).unwrap_or("");
+            if !title.trim().starts_with(prefix.as_str()) {
                 continue;
             }
         }
@@ -1883,6 +1916,63 @@ const REVIEW_TYPES: &[&str] = &[
     "fusion-candidate",
 ];
 
+/// The words that `actionIsDismissal` in `src/components/review/review-view.tsx` accepts as a plain
+/// dismissal. An action equal to one of them (letter case ignored) only closes the card.
+/// `src/lib/review-option-actions.ts` holds the same list; `review-option-actions.test.ts` checks it.
+const DISMISSAL_ACTION_WORDS: &[&str] = &[
+    "skip",
+    "dismiss",
+    "ignore",
+    "跳过",
+    "忽略",
+    "approve",
+    "keep existing",
+    "no",
+];
+
+/// The `mech:` actions that an API caller may put on a button. The other `mech:` actions write files
+/// (`mech:replace-source`, `mech:approve-domain`, `mech:accept-research`).
+const API_MECHANISM_ACTIONS: &[&str] = &[
+    "mech:propose-mechanism",
+    "mech:start-fusion",
+    "mech:dismiss-fusion",
+];
+
+/// The prefix of an action that opens a page. The path after it must be inside `wiki/`.
+const OPEN_ACTION_PREFIX: &str = "open:";
+
+/// What the 400 message lists as allowed.
+const ALLOWED_REVIEW_ACTIONS_TEXT: &str = "a dismissal word (skip, dismiss, ignore, approve, keep existing, no, 跳过, 忽略), mech:propose-mechanism, mech:start-fusion, mech:dismiss-fusion, or open:wiki/<path>";
+
+/// Ruling S17. The caller of `POST /reviews` is an agent that reads text it does not trust, and the
+/// Review tab runs the action of a button with the rights of the app. So an item may carry only an
+/// action that cannot change or delete a file by accident: a dismissal word, one of the three
+/// `mech:` actions above, or `open:wiki/<path>`. Everything else (`delete:`, `save:`,
+/// `__deep_research__`, `__create_page__:`, `mech:replace-source`, and free text that the view
+/// would take for a request to create or research a page) is refused.
+fn review_action_allowed(action: &str) -> bool {
+    let action = action.trim();
+    let lower = action.to_lowercase();
+    if DISMISSAL_ACTION_WORDS.contains(&lower.as_str()) {
+        return true;
+    }
+    if API_MECHANISM_ACTIONS.contains(&action) {
+        return true;
+    }
+    match action.strip_prefix(OPEN_ACTION_PREFIX) {
+        Some(path) => review_open_path_allowed(path),
+        None => false,
+    }
+}
+
+/// A project-relative path in `wiki/`. The prefix rule also keeps out a leading `/` and a drive letter.
+fn review_open_path_allowed(path: &str) -> bool {
+    let Some(rest) = path.strip_prefix("wiki/") else {
+        return false;
+    };
+    !rest.is_empty() && !path.contains('\\') && !path.split('/').any(|segment| segment == "..")
+}
+
 /// The option of an item that the caller gave no options for. The item can then be dismissed.
 const DEFAULT_REVIEW_OPTION_LABEL: &str = "Dismiss";
 const DEFAULT_REVIEW_OPTION_ACTION: &str = "dismiss";
@@ -1933,6 +2023,16 @@ fn parse_add_review_request(body: &str) -> Result<AddReviewRequest, String> {
             return Err(
                 "Invalid options: every option needs a non-empty label and action".to_string(),
             );
+        }
+        if let Some(option) = options
+            .iter()
+            .find(|option| !review_action_allowed(&option.action))
+        {
+            return Err(format!(
+                "Option action '{}' is not allowed on an API review item. Allowed: {}",
+                option.action.trim(),
+                ALLOWED_REVIEW_ACTIONS_TEXT
+            ));
         }
     }
     Ok(request)
@@ -3792,6 +3892,149 @@ mod tests {
         serde_json::from_str(&raw).unwrap()
     }
 
+    // ---- ruling S18: GET reviews can look an item up by id or by title prefix ----
+
+    fn numbered_reviews(count: usize) -> Value {
+        Value::Array(
+            (0..count)
+                .map(|n| {
+                    json!({
+                        "id": format!("stored-{n}"),
+                        "type": "fusion-candidate",
+                        "title": format!("Candidate {n}"),
+                        "description": "d",
+                        "options": [],
+                        "resolved": n % 2 == 0,
+                        "createdAt": n
+                    })
+                })
+                .collect(),
+        )
+    }
+
+    fn review_ids(reviews: &[Value]) -> Vec<String> {
+        reviews
+            .iter()
+            .filter_map(|review| review.get("id").and_then(Value::as_str).map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn review_query_finds_the_newest_of_sixty_items_by_id() {
+        let root = test_project_dir();
+        write_reviews(&root, numbered_reviews(60));
+        let newest = review_id_for_parts("fusion-candidate", "Candidate 59");
+
+        for query in [
+            format!("status=all&id={newest}"),
+            format!("status=all&type=fusion-candidate&limit=50&id={newest}"),
+        ] {
+            let parsed = parse_review_query(&query).unwrap();
+            let reviews = load_review_items(root.to_str().unwrap(), &parsed).unwrap();
+            assert_eq!(review_ids(&reviews), vec![newest.clone()], "{query}");
+        }
+        // Without the filter the same limit cuts the newest item off.
+        let cut = parse_review_query("status=all&limit=50").unwrap();
+        let reviews = load_review_items(root.to_str().unwrap(), &cut).unwrap();
+        assert!(!review_ids(&reviews).contains(&newest));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn review_query_id_filter_applies_before_the_limit_on_a_long_list() {
+        let root = test_project_dir();
+        write_reviews(&root, numbered_reviews(250));
+        let newest = review_id_for_parts("fusion-candidate", "Candidate 249");
+        let parsed = parse_review_query(&format!("status=all&id={newest}")).unwrap();
+        let reviews = load_review_items(root.to_str().unwrap(), &parsed).unwrap();
+        assert_eq!(review_ids(&reviews), vec![newest]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn review_query_id_matches_the_stored_id_and_the_stable_id() {
+        let root = test_project_dir();
+        write_reviews(&root, numbered_reviews(3));
+        let stable = review_id_for_parts("fusion-candidate", "Candidate 1");
+        for requested in ["stored-1", stable.as_str()] {
+            let parsed = parse_review_query(&format!("status=all&id={requested}")).unwrap();
+            let reviews = load_review_items(root.to_str().unwrap(), &parsed).unwrap();
+            assert_eq!(review_ids(&reviews), vec![stable.clone()], "{requested}");
+        }
+        let missing = parse_review_query("status=all&id=review-00000000").unwrap();
+        assert!(load_review_items(root.to_str().unwrap(), &missing)
+            .unwrap()
+            .is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn review_query_title_prefix_returns_only_matching_items() {
+        let root = test_project_dir();
+        write_reviews(
+            &root,
+            json!([
+                { "id": "a", "type": "suggestion", "title": "Verify (alpha): claim one", "options": [], "resolved": false },
+                { "id": "b", "type": "suggestion", "title": "Verify (beta): claim two", "options": [], "resolved": false },
+                { "id": "c", "type": "suggestion", "title": "  Verify (alpha): claim three  ", "options": [], "resolved": true },
+                { "id": "d", "type": "suggestion", "title": "verify (alpha): lower case", "options": [], "resolved": false },
+                { "id": "e", "type": "suggestion", "title": "Something else", "options": [], "resolved": false }
+            ]),
+        );
+        let titles = |query: &str| -> Vec<String> {
+            let parsed = parse_review_query(query).unwrap();
+            load_review_items(root.to_str().unwrap(), &parsed)
+                .unwrap()
+                .iter()
+                .filter_map(|r| r.get("title").and_then(Value::as_str).map(str::to_string))
+                .collect()
+        };
+        // The prefix is percent-encoded the way URLSearchParams does it; a space is `+`.
+        // A title with spaces around it matches too: the prefix is tested on the trimmed title.
+        assert_eq!(
+            titles("status=all&title_prefix=Verify+%28alpha%29%3A+"),
+            vec![
+                "Verify (alpha): claim one".to_string(),
+                "  Verify (alpha): claim three  ".to_string()
+            ]
+        );
+        assert_eq!(
+            titles("status=unresolved&title_prefix=Verify+%28alpha%29%3A+"),
+            vec!["Verify (alpha): claim one".to_string()]
+        );
+        assert!(titles("status=all&title_prefix=Nothing").is_empty());
+        // An empty prefix is no filter.
+        assert_eq!(titles("status=all&title_prefix=").len(), 5);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn review_query_title_prefix_applies_before_the_limit() {
+        let root = test_project_dir();
+        let mut items = Vec::new();
+        for n in 0..300 {
+            items.push(json!({
+                "id": format!("n{n}"), "type": "suggestion",
+                "title": format!("Noise {n}"), "options": [], "resolved": false
+            }));
+        }
+        items.push(json!({
+            "id": "late", "type": "suggestion",
+            "title": "Verify (late): the last item", "options": [], "resolved": false
+        }));
+        write_reviews(&root, Value::Array(items));
+        let parsed =
+            parse_review_query("type=suggestion&limit=5&title_prefix=Verify+%28late%29%3A+")
+                .unwrap();
+        let reviews = load_review_items(root.to_str().unwrap(), &parsed).unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(
+            reviews[0].get("title").and_then(Value::as_str),
+            Some("Verify (late): the last item")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn patch_review_item_marks_resolved_and_preserves_unsanitized_fields() {
         let root = test_project_dir();
@@ -4667,6 +4910,109 @@ mod tests {
                 "{item_type} must be accepted"
             );
         }
+    }
+
+    // ---- ruling S17: an API review item carries only safe option actions ----
+
+    fn request_with_action(action: &str) -> String {
+        let mut body = mirror_edited_request();
+        body["options"] = json!([{ "label": "Dismiss", "action": action }]);
+        body.to_string()
+    }
+
+    #[test]
+    fn add_review_request_refuses_an_action_that_does_something_dangerous() {
+        for action in [
+            "delete:/home/user",
+            "delete:wiki/a.md",
+            "save:SGVsbG8=",
+            "__deep_research__",
+            "__create_page__:Attention",
+            "mech:replace-source",
+            "mech:approve-domain",
+            "mech:accept-research",
+            "mech:unknown",
+            "Create page X",
+            "research attention",
+            "open",
+            "view page",
+            "https://example.com",
+        ] {
+            let err = parse_add_review_request(&request_with_action(action)).unwrap_err();
+            assert!(
+                err.contains(&format!("'{action}'")),
+                "the error names the action {action}: {err}"
+            );
+            assert!(
+                err.contains("mech:start-fusion") && err.contains("open:wiki/"),
+                "the error lists what is allowed: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn add_review_request_accepts_every_allowed_action() {
+        for action in [
+            "skip",
+            "Skip",
+            "DISMISS",
+            "Ignore",
+            "跳过",
+            "忽略",
+            "approve",
+            "Keep existing",
+            "No",
+            "  Skip  ",
+            "mech:propose-mechanism",
+            "mech:start-fusion",
+            "mech:dismiss-fusion",
+            "open:wiki/mechanisms/attention.md",
+            "open:wiki/a b/c.md",
+        ] {
+            assert!(
+                parse_add_review_request(&request_with_action(action)).is_ok(),
+                "{action} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn add_review_request_refuses_an_open_path_outside_the_wiki_folder() {
+        for action in [
+            "open:../x",
+            "open:/etc/x",
+            "open:raw/x",
+            "open:wiki/../raw/x",
+            "open:wiki/..",
+            "open:wiki\\a.md",
+            "open:C:/x",
+            "open:C:\\x",
+            "open:",
+            "open:wiki/",
+            "open:Wiki/a.md",
+        ] {
+            let err = parse_add_review_request(&request_with_action(action)).unwrap_err();
+            assert!(err.contains(action.trim()), "{action}: {err}");
+        }
+    }
+
+    #[test]
+    fn add_review_request_checks_every_option_not_only_the_first() {
+        let mut body = mirror_edited_request();
+        body["options"] = json!([
+            { "label": "Skip", "action": "Skip" },
+            { "label": "Dismiss", "action": "delete:/home/user" }
+        ]);
+        let err = parse_add_review_request(&body.to_string()).unwrap_err();
+        assert!(err.contains("delete:/home/user"), "{err}");
+    }
+
+    #[test]
+    fn add_review_request_without_options_is_still_accepted() {
+        assert!(parse_add_review_request(&mirror_edited_request().to_string()).is_ok());
+        let mut body = mirror_edited_request();
+        body["options"] = json!([]);
+        assert!(parse_add_review_request(&body.to_string()).is_ok());
     }
 
     #[test]
