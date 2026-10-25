@@ -186,6 +186,17 @@ export class LlmWikiApiUnreachableError extends Error {
   }
 }
 
+/** The app answered with an error status. `status` is the HTTP status; the message is `LLM Wiki API <status>: <text>`. */
+export class LlmWikiApiError extends Error {
+  readonly status: number
+
+  constructor(status: number, detail: string) {
+    super(`LLM Wiki API ${status}: ${detail}`)
+    this.name = "LlmWikiApiError"
+    this.status = status
+  }
+}
+
 function apiPath(path: string): string {
   return path.startsWith("/api/v1") ? path : `/api/v1${path.startsWith("/") ? path : `/${path}`}`
 }
@@ -258,10 +269,19 @@ export class LlmWikiApiClient {
     }
   }
 
-  async reviews(projectId = "current", options: { status?: ApiReviewStatus; type?: string; limit?: number } = {}): Promise<ApiReviewsResponse> {
+  /**
+   * The Review items of a project, oldest first. `id` and `titlePrefix` pick items before `limit` cuts the list, so
+   * they find a new item in a long list.
+   */
+  async reviews(
+    projectId = "current",
+    options: { status?: ApiReviewStatus; type?: string; id?: string; titlePrefix?: string; limit?: number } = {},
+  ): Promise<ApiReviewsResponse> {
     const params = new URLSearchParams()
     if (options.status) params.set("status", options.status)
     if (options.type) params.set("type", options.type)
+    if (options.id) params.set("id", options.id)
+    if (options.titlePrefix) params.set("title_prefix", options.titlePrefix)
     if (options.limit !== undefined) params.set("limit", String(options.limit))
     const suffix = params.toString() ? `?${params.toString()}` : ""
     const json = await this.request(`/projects/${encodeURIComponent(projectId)}/reviews${suffix}`)
@@ -446,7 +466,7 @@ export class LlmWikiApiClient {
 
     if (!response.ok || json.ok === false) {
       const message = typeof json.error === "string" ? json.error : response.statusText
-      throw new Error(`LLM Wiki API ${response.status}: ${message}`)
+      throw new LlmWikiApiError(response.status, message)
     }
     return json
   }

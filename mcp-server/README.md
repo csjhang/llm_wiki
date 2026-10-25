@@ -48,7 +48,7 @@ Example MCP client config:
 }
 ```
 
-When API unauthenticated mode is enabled, omit `LLM_WIKI_API_TOKEN`. If MCP access is disabled in Settings, `llm_wiki_status` still works for diagnosis but other tools return an explicit disabled error.
+When API unauthenticated mode is enabled, you can omit `LLM_WIKI_API_TOKEN` for the read tools. `llm_wiki_add_review` always needs `LLM_WIKI_API_TOKEN`, even in unauthenticated mode. Without it the tool fails with `LLM Wiki API 401: Unauthorized` and a hint to set the token. If MCP access is disabled in Settings, `llm_wiki_status` still works for diagnosis but other tools return an explicit disabled error.
 
 ## Tools
 
@@ -57,8 +57,8 @@ When API unauthenticated mode is enabled, omit `LLM_WIKI_API_TOKEN`. If MCP acce
 - `llm_wiki_set_project`: pin the MCP process session to a project. Once pinned, other project tools reject attempts to access a different project.
 - `llm_wiki_files`: list project files. `project_id` can be a project UUID, a project filesystem path, or `current`.
 - `llm_wiki_read_file`: read an allowed text file such as `wiki/index.md`.
-- `llm_wiki_reviews`: list Review tab items. Defaults to unresolved items and supports `status`, `type`, and `limit` filters.
-- `llm_wiki_add_review`: add one item to the Review tab (`type`, `title`, `description`, optional `options`, `affectedPages`, `searchQueries`). `type` is one of the app's review types or `mirror-edited`. Returns `{ id }`; the same type and title give the same id and merge into one item. Needs the desktop app to run.
+- `llm_wiki_reviews`: list Review tab items. Defaults to unresolved items and supports `status`, `type`, `id`, `title_prefix`, and `limit` filters. The list is oldest first and ends at `limit` (default 200, at most 1000). `id` and `title_prefix` pick items before the list is cut, so use them to find one item. `title_prefix` is case-sensitive and a space at its end counts.
+- `llm_wiki_add_review`: add one item to the Review tab (`type`, `title`, `description`, optional `options`, `affectedPages`, `searchQueries`). `type` is one of the review types of the app, which include `mirror-edited` and `fusion-candidate`. The `action` of an option must be a dismissal word (`skip`, `dismiss`, `ignore`, `approve`, `keep existing`, `no`), `mech:propose-mechanism`, `mech:start-fusion`, `mech:dismiss-fusion`, or `open:wiki/<path>`. The tool refuses every other action before it calls the app. The Review tab runs the action of a button with the rights of the app. Returns `{ id }`; the same type and title give the same id and merge into one item. Needs the desktop app to run, and needs `LLM_WIKI_API_TOKEN` even in unauthenticated mode.
 - `llm_wiki_resolve_review`: mark one Review item as resolved (`id`, `action`, the label the card shows). Returns `{ ok }`. Needs the desktop app to run.
 - `llm_wiki_search`: search with the app's shared keyword/vector backend.
 - `llm_wiki_chat`: ask the backend Agent chat endpoint and receive answer text, references, usage, and tool events. `mode: deep` broadens backend evidence collection; full Deep Research workflows still live in the desktop app.

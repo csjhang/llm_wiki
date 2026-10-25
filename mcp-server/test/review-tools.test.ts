@@ -2,11 +2,14 @@ import assert from "node:assert/strict"
 import { test } from "node:test"
 import { LlmWikiApiClient, type ApiProject } from "../src/api-client.js"
 import {
+  ADD_REVIEW_ACTION_HELP,
   REVIEW_TYPES,
   addReviewTool,
+  isAllowedReviewAction,
   parseAddReviewArgs,
   parseResolveReviewArgs,
   resolveReviewTool,
+  reviewsTool,
   type ReviewToolContext,
 } from "../src/review-tools.js"
 
@@ -256,4 +259,175 @@ test("parseResolveReviewArgs requires id and action", () => {
   assert.deepEqual(parseResolveReviewArgs({ id: "r1", action: "Skip" }), { id: "r1", action: "Skip" })
   assert.throws(() => parseResolveReviewArgs({ action: "Skip" }), /id is required/)
   assert.throws(() => parseResolveReviewArgs({ id: "r1" }), /action is required/)
+})
+
+// ---- ruling S17: an API review item carries only safe option actions ----
+
+const DANGEROUS_ACTIONS = [
+  "delete:/home/user",
+  "delete:wiki/a.md",
+  "save:SGVsbG8=",
+  "__deep_research__",
+  "__create_page__:Attention",
+  "mech:replace-source",
+  "mech:approve-domain",
+  "mech:accept-research",
+  "Create page X",
+  "research attention",
+  "open",
+  "view page",
+]
+
+test("parseAddReviewArgs refuses an option action that is not allowed, and names it", () => {
+  for (const action of DANGEROUS_ACTIONS) {
+    assert.throws(
+      () => parseAddReviewArgs({ type: "confirm", title: "T", description: "D", options: [{ label: "Dismiss", action }] }),
+      (error: Error) => {
+        assert.ok(error.message.includes("options[0]"), error.message)
+        assert.ok(error.message.includes(`'${action}'`), error.message)
+        assert.match(error.message, /mech:start-fusion/)
+        assert.match(error.message, /open:wiki\//)
+        return true
+      },
+      action,
+    )
+  }
+})
+
+test("parseAddReviewArgs checks every option, not only the first", () => {
+  assert.throws(
+    () => parseAddReviewArgs({
+      type: "confirm",
+      title: "T",
+      description: "D",
+      options: [{ label: "Skip", action: "Skip" }, { label: "Dismiss", action: "delete:/home/user" }],
+    }),
+    /options\[1\].*'delete:\/home\/user'/,
+  )
+})
+
+test("parseAddReviewArgs accepts the dismissal words, the three mech actions, and open:wiki paths", () => {
+  const allowed = [
+    "skip", "Skip", "DISMISS", "Ignore", "跳过", "忽略", "approve", "Keep existing", "No",
+    "mech:propose-mechanism", "mech:start-fusion", "mech:dismiss-fusion",
+    "open:wiki/mechanisms/attention.md", "open:wiki/a b/c.md",
+  ]
+  for (const action of allowed) {
+    const parsed = parseAddReviewArgs({ type: "confirm", title: "T", description: "D", options: [{ label: "Button", action }] })
+    assert.deepEqual(parsed.options, [{ label: "Button", action }], action)
+    assert.equal(isAllowedReviewAction(action), true, action)
+  }
+})
+
+test("an open: action must name a path inside wiki/", () => {
+  for (const action of [
+    "open:../x", "open:/etc/x", "open:raw/x", "open:wiki/../raw/x", "open:wiki/..", "open:wiki\\a.md",
+    "open:C:/x", "open:C:\\x", "open:", "open:wiki/", "open:Wiki/a.md",
+  ]) {
+    assert.equal(isAllowedReviewAction(action), false, action)
+    assert.throws(
+      () => parseAddReviewArgs({ type: "confirm", title: "T", description: "D", options: [{ label: "Open", action }] }),
+      /is not allowed/,
+      action,
+    )
+  }
+})
+
+test("add_review refuses a dangerous action before any call to the app", async () => {
+  let calls = 0
+  const ctx = context(async () => {
+    calls += 1
+    return json({ ok: true })
+  })
+  await assert.rejects(
+    () => addReviewTool(ctx, {
+      type: "confirm",
+      title: "T",
+      description: "D",
+      options: [{ label: "Dismiss", action: "delete:/home/user" }],
+    }),
+    /'delete:\/home\/user' is not allowed/,
+  )
+  assert.equal(calls, 0)
+})
+
+test("the tool description lists what an option action may be", () => {
+  for (const word of ["skip", "dismiss", "mech:propose-mechanism", "mech:start-fusion", "mech:dismiss-fusion", "open:wiki/<path>"]) {
+    assert.ok(ADD_REVIEW_ACTION_HELP.includes(word), word)
+  }
+  assert.doesNotMatch(ADD_REVIEW_ACTION_HELP, /Action id that the Review tab runs/)
+})
+
+// ---- M2: the add route needs the token in every mode ----
+
+test("add_review maps a 401 to a hint about LLM_WIKI_API_TOKEN", async () => {
+  const ctx = context(route({
+    ...baseRoutes,
+    "POST /api/v1/projects/current/reviews": () => json({ ok: false, error: "Unauthorized" }, 401),
+  }))
+  await assert.rejects(
+    () => addReviewTool(ctx, { type: "confirm", title: "T", description: "D" }),
+    (error: Error) => {
+      assert.match(error.message, /LLM Wiki API 401: Unauthorized/)
+      assert.match(error.message, /LLM_WIKI_API_TOKEN/)
+      assert.match(error.message, /even when the app allows unauthenticated/)
+      return true
+    },
+  )
+})
+
+test("a 401 from another tool is not changed", async () => {
+  const ctx = context(route({
+    ...baseRoutes,
+    "PATCH /api/v1/projects/current/reviews/r1": () => json({ ok: false, error: "Unauthorized" }, 401),
+  }))
+  await assert.rejects(
+    () => resolveReviewTool(ctx, { id: "r1", action: "Skip" }),
+    (error: Error) => {
+      assert.match(error.message, /LLM Wiki API 401: Unauthorized/)
+      assert.doesNotMatch(error.message, /LLM_WIKI_API_TOKEN/)
+      return true
+    },
+  )
+})
+
+// ---- ruling S18: look an item up by id or by title prefix ----
+
+test("llm_wiki_reviews passes id and title_prefix on to the reviews route", async () => {
+  const calls: Call[] = []
+  const ctx = context(route({
+    ...baseRoutes,
+    "GET /api/v1/projects/current/reviews": () => json({
+      ok: true,
+      status: "all",
+      count: 1,
+      reviews: [{ id: "review-1", type: "suggestion", title: "Verify (a): claim", description: "d", options: [], resolved: false }],
+    }),
+  }), calls)
+
+  const text = await reviewsTool(ctx, { status: "all", type: "suggestion", id: "review-1", title_prefix: "Verify (a): ", limit: 1000 })
+
+  const get = calls.find((call) => call.url.includes("/reviews"))
+  const params = new URL(get?.url ?? "").searchParams
+  assert.equal(params.get("id"), "review-1")
+  assert.equal(params.get("title_prefix"), "Verify (a): ")
+  assert.equal(params.get("status"), "all")
+  assert.equal(params.get("type"), "suggestion")
+  assert.equal(params.get("limit"), "1000")
+  assert.match(text, /^\[activeProject: Demo \(p1\)\]/)
+  assert.match(text, /ID: review-1/)
+  assert.match(text, /Count: 1/)
+})
+
+test("llm_wiki_reviews leaves id and title_prefix out when they are empty or not strings", async () => {
+  const calls: Call[] = []
+  const ctx = context(route({
+    ...baseRoutes,
+    "GET /api/v1/projects/current/reviews": () => json({ ok: true, status: "unresolved", count: 0, reviews: [] }),
+  }), calls)
+  const text = await reviewsTool(ctx, { id: " ", title_prefix: 7 })
+  const params = new URL(calls.find((call) => call.url.includes("/reviews"))?.url ?? "").searchParams
+  assert.equal(params.has("id"), false)
+  assert.equal(params.has("title_prefix"), false)
+  assert.match(text, /No unresolved review items found\./)
 })

@@ -11,8 +11,6 @@ import {
   LlmWikiApiClient,
   type ApiFileNode,
   type ApiGraphNode,
-  type ApiReviewItem,
-  type ApiReviewsResponse,
   type ApiChatResponse,
   type ApiSearchResult,
   type ApiProject,
@@ -20,9 +18,11 @@ import {
 import { VERSION } from "./version.js"
 import { McpProjectBinding, withActiveProject } from "./project-binding.js"
 import {
+  ADD_REVIEW_ACTION_HELP,
   REVIEW_TYPES,
   addReviewTool,
   resolveReviewTool,
+  reviewsTool,
   type ReviewToolContext,
 } from "./review-tools.js"
 
@@ -101,13 +101,15 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "llm_wiki_reviews",
-      description: "List Review tab items from a project. Defaults to unresolved items so agent clients can help manage pending wiki review work.",
+      description: "List Review tab items from a project. Defaults to unresolved items so agent clients can help manage pending wiki review work. The list is oldest first and ends at limit (default 200, at most 1000). To find one item, pass id or title_prefix: they pick items before the list is cut.",
       inputSchema: {
         type: "object",
         properties: {
           project_id: { type: "string", description: "Project UUID, project path, or 'current'. Defaults to current." },
           status: { type: "string", enum: ["unresolved", "resolved", "all"], description: "Review status filter. Defaults to unresolved." },
           type: { type: "string", description: "Optional Review item type filter, for example missing-page, duplicate, contradiction, confirm, or suggestion." },
+          id: { type: "string", description: "Optional. Return only the item with this id (the id that llm_wiki_add_review or this tool gave)." },
+          title_prefix: { type: "string", description: "Optional. Return only items whose title starts with this text. Letter case counts. A space at the end of the text counts." },
           limit: { type: "number", description: "Maximum review items returned. The local API clamps to its configured maximum." },
         },
         additionalProperties: false,
@@ -115,7 +117,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "llm_wiki_add_review",
-      description: "Add one item to the Review tab of a project. The item gets a stable id from its type and title, so adding the same item again merges into it. Returns { id }. The desktop app must be running.",
+      description: "Add one item to the Review tab of a project. The item gets a stable id from its type and title, so adding the same item again merges into it. Returns { id }. The desktop app must be running. This tool always needs LLM_WIKI_API_TOKEN in the env of the MCP server, even when the app allows unauthenticated API access.",
       inputSchema: {
         type: "object",
         properties: {
@@ -129,7 +131,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
               type: "object",
               properties: {
                 label: { type: "string", description: "Text of the button." },
-                action: { type: "string", description: "Action id that the Review tab runs when the user clicks the button." },
+                action: { type: "string", description: ADD_REVIEW_ACTION_HELP },
               },
               required: ["label", "action"],
               additionalProperties: false,
@@ -300,16 +302,8 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const { path, content } = await client.fileContent(scope.id, relPath)
         return textResult(withActiveProject(`# ${path}\n\n${truncateText(content, MAX_TEXT_BYTES)}`, scope.project, scope.id))
       }
-      case "llm_wiki_reviews": {
-        await assertMcpEnabled()
-        const scope = await resolveProjectScope(args)
-        const reviews = await client.reviews(scope.id, {
-          status: enumArg(args.status, ["unresolved", "resolved", "all"] as const, "unresolved"),
-          type: optionalStringArg(args.type),
-          limit: numberArg(args.limit),
-        })
-        return textResult(withActiveProject(formatReviews(reviews), scope.project, scope.id))
-      }
+      case "llm_wiki_reviews":
+        return textResult(await reviewsTool(reviewToolContext, args))
       case "llm_wiki_add_review":
         return textResult(await addReviewTool(reviewToolContext, args))
       case "llm_wiki_resolve_review":
@@ -577,43 +571,6 @@ function formatChatResponse(chat: ApiChatResponse): string {
   }
 
   return lines.join("\n")
-}
-
-function formatReviews(response: ApiReviewsResponse): string {
-  const { reviews } = response
-  if (reviews.length === 0) return `No ${response.status} review items found.`
-  const lines = [
-    "# Review items",
-    "",
-    `Status: ${response.status}`,
-    `Count: ${response.count}`,
-    "",
-  ]
-  reviews.forEach((review, index) => {
-    lines.push(`## ${index + 1}. ${review.title || review.id}`)
-    lines.push(`ID: ${review.id}`)
-    lines.push(`Type: ${review.type}`)
-    lines.push(`Resolved: ${review.resolved ? "yes" : "no"}`)
-    if (review.sourcePath) lines.push(`Source: ${review.sourcePath}`)
-    if (review.affectedPages && review.affectedPages.length > 0) {
-      lines.push(`Affected pages: ${review.affectedPages.join(", ")}`)
-    }
-    if (review.searchQueries && review.searchQueries.length > 0) {
-      lines.push(`Search queries: ${review.searchQueries.join(", ")}`)
-    }
-    if (review.description) lines.push(`Description: ${review.description}`)
-    const optionSummary = formatReviewOptions(review)
-    if (optionSummary) lines.push(`Options: ${optionSummary}`)
-    lines.push("")
-  })
-  return lines.join("\n")
-}
-
-function formatReviewOptions(review: ApiReviewItem): string {
-  if (!review.options || review.options.length === 0) return ""
-  return review.options
-    .map((option) => option.label ? `${option.label} (${option.action})` : option.action)
-    .join(", ")
 }
 
 function formatGraph(graph: { nodes: ApiGraphNode[]; edges: Array<{ source: string; target: string; weight?: number }>; offset: number; totalCount: number; hasMore: boolean }): string {

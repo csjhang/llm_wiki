@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
-import { LlmWikiApiClient, LlmWikiApiUnreachableError, normalizeBaseUrl } from "../src/api-client.js"
+import { LlmWikiApiClient, LlmWikiApiError, LlmWikiApiUnreachableError, normalizeBaseUrl } from "../src/api-client.js"
 
 test("normalizeBaseUrl trims trailing slashes and falls back to localhost", () => {
   assert.equal(normalizeBaseUrl("http://127.0.0.1:19828///"), "http://127.0.0.1:19828")
@@ -321,6 +321,36 @@ test("reviews requests unresolved review items with filters", async () => {
   assert.equal(result.count, 1)
   assert.equal(result.reviews[0]?.id, "r1")
   assert.equal(result.reviews[0]?.resolved, false)
+})
+
+test("reviews sends the id and title_prefix filters", async () => {
+  const calls: string[] = []
+  const fetchImpl = async (url: string | URL | Request): Promise<Response> => {
+    calls.push(String(url))
+    return new Response(JSON.stringify({ ok: true, status: "all", count: 0, reviews: [] }), { status: 200 })
+  }
+  const client = new LlmWikiApiClient({ baseUrl: "http://localhost:19828", fetchImpl })
+
+  await client.reviews("current", { status: "all", id: "review-1a2b3c4d", titlePrefix: "Verify (a b): ", limit: 1000 })
+
+  const params = new URL(calls[0] ?? "").searchParams
+  assert.equal(params.get("id"), "review-1a2b3c4d")
+  assert.equal(params.get("title_prefix"), "Verify (a b): ")
+  assert.equal(params.get("limit"), "1000")
+})
+
+test("an error answer is an LlmWikiApiError with the status", async () => {
+  const fetchImpl = async (): Promise<Response> => new Response(JSON.stringify({ ok: false, error: "Unauthorized" }), { status: 401 })
+  const client = new LlmWikiApiClient({ baseUrl: "http://localhost:19828", fetchImpl })
+  await assert.rejects(
+    () => client.addReview("current", { type: "confirm", title: "T", description: "D" }),
+    (error: Error) => {
+      assert.ok(error instanceof LlmWikiApiError)
+      assert.equal((error as LlmWikiApiError).status, 401)
+      assert.equal(error.message, "LLM Wiki API 401: Unauthorized")
+      return true
+    },
+  )
 })
 
 test("network failures include desktop app hint", async () => {
