@@ -208,7 +208,7 @@ function domainOf(
 }
 
 /** The lenses a domain may use: the built-in ones and the stems of `lenses/*.md`, as the app allows. */
-function knownLenses(project: string): string[] {
+export function knownLenses(project: string): string[] {
   let names: string[] = []
   try {
     names = readdirSync(resolveInProject(project, LENSES_DIRECTORY))

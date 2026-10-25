@@ -4,9 +4,11 @@
  * Commands never call Heptabase. A skill saves the MCP output to files, and the commands read those files and the wikis.
  */
 import type { CommandGroup } from "../io"
+import { fuseCheck } from "./check"
+import { fuseCommit } from "./commit"
 import { resolveBoard } from "./resolve-board"
 
 export const FUSE_GROUP: CommandGroup = {
   name: "fuse",
-  commands: { "resolve-board": resolveBoard },
+  commands: { "resolve-board": resolveBoard, check: fuseCheck, commit: fuseCommit },
 }

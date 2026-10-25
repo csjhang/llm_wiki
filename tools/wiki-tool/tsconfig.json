@@ -3,5 +3,5 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["src", "../../src/lib/wiki-config"]
+  "include": ["src", "../../src/lib/wiki-config", "../../src/lib/commit-message.ts"]
 }
