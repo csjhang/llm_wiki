@@ -3,7 +3,8 @@
  *
  * A reading wiki that writes a new mechanism page asks the model for fusion candidates and sends them to
  * review. The model is a fake with canned answers; the temp project, the prompts, the rules, the page writer,
- * and the review store are real. Candidate generation is an extra, so no failure of it may fail the ingest.
+ * and the review store are real. Candidate generation is an extra: it starts after the commit, does not hold
+ * the ingest, and no failure of it may fail the ingest. Tests wait for it with `pendingFusionProposals()`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import fs from "node:fs/promises"
@@ -20,14 +21,20 @@ vi.mock("@/commands/fs", () => realFs)
 const model = vi.hoisted(() => ({
   /** Every call, in order: its kind and its system prompt. */
   calls: [] as Array<{ kind: "analysis" | "generation" | "fusion" | "other"; system: string }>,
-  /** The answer to the call for candidates. An `Error` makes the stream report it; "throw" makes the call reject. */
+  /**
+   * The answer to the call for candidates. An `Error` makes the stream report it; "throw" makes the call
+   * reject; `hang` makes the call wait for ever.
+   */
   fusionAnswer: "" as string | Error | "throw",
+  hang: false,
+  /** The signal that each call for candidates got. */
+  signals: [] as Array<AbortSignal | undefined>,
   /** Called when the call for candidates arrives, to look at the project at that moment. */
   onFusion: null as null | (() => Promise<void>),
 }))
 
 vi.mock("./llm-client", () => ({
-  streamChat: vi.fn(async (_config, messages, callbacks) => {
+  streamChat: vi.fn(async (_config, messages, callbacks, signal) => {
     const system = String(messages?.[0]?.content ?? "")
     const record = (kind: "analysis" | "generation" | "fusion" | "other"): void => {
       model.calls.push({ kind, system })
@@ -35,7 +42,9 @@ vi.mock("./llm-client", () => ({
 
     if (system.startsWith("You find domains where a mechanism may also work")) {
       record("fusion")
+      model.signals.push(signal)
       await model.onFusion?.()
+      if (model.hang) await new Promise<never>(() => {})
       if (model.fusionAnswer === "throw") throw new Error("the connection broke")
       if (model.fusionAnswer instanceof Error) {
         callbacks.onError(model.fusionAnswer)
@@ -72,7 +81,7 @@ vi.mock("./mineru", () => ({
   parseWithMineruResult: vi.fn(),
 }))
 
-import { autoIngest } from "./ingest"
+import { autoIngest, pendingFusionProposals } from "./ingest"
 
 const MECHANISM_PATH = "wiki/mechanisms/event-driven-computation.md"
 const FIRST = "first-source"
@@ -172,6 +181,8 @@ describe("ingest and fusion candidates", () => {
   beforeEach(async () => {
     model.calls.length = 0
     model.fusionAnswer = ""
+    model.hang = false
+    model.signals.length = 0
     model.onFusion = null
     vi.spyOn(console, "warn").mockImplementation(() => {})
     tmp = await createTempProject("ingest-fusion")
@@ -213,23 +224,49 @@ describe("ingest and fusion candidates", () => {
   })
 
   afterEach(async () => {
+    vi.useRealTimers()
     vi.restoreAllMocks()
     await tmp.cleanup()
   })
 
-  function ingest(slug: string, commit?: <T>(operation: () => Promise<T>) => Promise<T>): Promise<string[]> {
+  /** The ingest, as the queue calls it. The candidate step is not waited for. */
+  function ingestOnly(
+    slug: string,
+    commit?: <T>(operation: () => Promise<T>) => Promise<T>,
+    signal?: AbortSignal,
+  ): Promise<string[]> {
     return autoIngest(
       project,
       `${project}/raw/sources/${slug}.md`,
       { ...useWikiStore.getState().llmConfig },
-      undefined,
+      signal,
       undefined,
       undefined,
       commit === undefined ? undefined : { runCommit: commit },
     )
   }
 
+  /** The ingest, then the candidate step that it started. */
+  async function ingest(slug: string, commit?: <T>(operation: () => Promise<T>) => Promise<T>): Promise<string[]> {
+    const written = await ingestOnly(slug, commit)
+    await Promise.all(pendingFusionProposals())
+    return written
+  }
+
   const fusionCalls = () => model.calls.filter((call) => call.kind === "fusion")
+
+  /**
+   * Wait until the call for candidates has arrived. It polls with `setImmediate`, which the fake timers of a
+   * test leave alone, so the clock of the test does not move while it waits.
+   */
+  async function untilFusionCall(): Promise<void> {
+    // A real-time limit, because the reads before the call take as long as the machine needs.
+    const limit = Date.now() + 4_000
+    while (fusionCalls().length === 0 && Date.now() < limit) {
+      await new Promise<void>((resolve) => setImmediate(resolve))
+    }
+    expect(fusionCalls()).toHaveLength(1)
+  }
 
   it("sends one fusion-candidate review after an ingest that writes a new mechanism page", async () => {
     model.fusionAnswer = [
@@ -249,7 +286,7 @@ describe("ingest and fusion candidates", () => {
     expect(items).toHaveLength(1)
     expect(items[0]).toMatchObject({
       type: "fusion-candidate",
-      title: "Fusion candidates: Event-driven computation",
+      title: "Fusion candidates: Event-driven computation (event-driven-computation)",
       affectedPages: [MECHANISM_PATH],
       options: [
         { label: "Start fusion", action: "mech:start-fusion" },
@@ -379,5 +416,91 @@ describe("ingest and fusion candidates", () => {
     expect(written).not.toContain(MECHANISM_PATH)
     expect(fusionCalls()).toEqual([])
     expect(useReviewStore.getState().items).toEqual([])
+  })
+
+  describe("without holding the ingest", () => {
+    const TIMEOUT_MS = 120_000
+
+    beforeEach(() => {
+      // Only the timers: the files of the temp project are read and written for real.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] })
+    })
+
+    afterEach(async () => {
+      // A step that is still waiting for a model that never answers ends at its timeout.
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS)
+      await Promise.all(pendingFusionProposals())
+    })
+
+    it("returns the result of the ingest while a model call that never answers is still waiting", async () => {
+      model.hang = true
+
+      const written = await ingestOnly(FIRST)
+
+      expect(written).toEqual(expect.arrayContaining([`wiki/sources/${FIRST}.md`, MECHANISM_PATH]))
+      expect(pendingFusionProposals()).toHaveLength(1)
+      expect(useReviewStore.getState().items).toEqual([])
+      expect(useActivityStore.getState().items.find((item) => item.title === `${FIRST}.md`)?.status).toBe("done")
+    })
+
+    it("ends the step with a logged timeout after 120 seconds, and its signal is aborted then", async () => {
+      model.hang = true
+      await ingestOnly(FIRST)
+      await untilFusionCall()
+
+      await vi.advanceTimersByTimeAsync(TIMEOUT_MS - 1)
+      expect(pendingFusionProposals()).toHaveLength(1)
+      expect(model.signals[0]?.aborted).toBe(false)
+
+      await vi.advanceTimersByTimeAsync(1)
+      await Promise.all(pendingFusionProposals())
+
+      expect(model.signals[0]?.aborted).toBe(true)
+      expect(pendingFusionProposals()).toHaveLength(0)
+      expect(useReviewStore.getState().items).toEqual([])
+      expect(console.warn).toHaveBeenCalledWith(
+        expect.stringContaining("[ingest:mechanism] Fusion candidates for wiki/mechanisms/event-driven-computation.md timed out after 120 s"),
+      )
+    })
+
+    it("does not stop the step when the task of the ingest is cancelled after the ingest returned", async () => {
+      model.hang = true
+      const cancel = new AbortController()
+      await ingestOnly(FIRST, undefined, cancel.signal)
+      await untilFusionCall()
+
+      cancel.abort()
+      await vi.advanceTimersByTimeAsync(1_000)
+
+      // Its own signal: the cancel of the task does not reach it, and the ingest result is not touched.
+      expect(model.signals[0]).not.toBe(cancel.signal)
+      expect(model.signals[0]?.aborted).toBe(false)
+      expect(pendingFusionProposals()).toHaveLength(1)
+    })
+
+    it("does not ask the model when the ingest was cancelled before the step started", async () => {
+      model.fusionAnswer = candidateLine("business/franchising", "surface", "A franchisee acts on a request.")
+      const cancel = new AbortController()
+
+      // The cancel arrives as the commit ends, after the last check of the ingest.
+      const written = await ingestOnly(FIRST, async (operation) => {
+        const result = await operation()
+        cancel.abort()
+        return result
+      }, cancel.signal)
+      await Promise.all(pendingFusionProposals())
+
+      expect(written).toContain(MECHANISM_PATH)
+      expect(fusionCalls()).toEqual([])
+      expect(useReviewStore.getState().items).toEqual([])
+    })
+
+    it("lists no step once it has finished", async () => {
+      model.fusionAnswer = "NONE"
+
+      await ingest(FIRST)
+
+      expect(pendingFusionProposals()).toEqual([])
+    })
   })
 })

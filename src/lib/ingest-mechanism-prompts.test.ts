@@ -82,6 +82,7 @@ import {
   buildGenerationPrompt,
   computeIngestSourceBudget,
   executeIngestWrites,
+  pendingFusionProposals,
   updateBoundedRecentIndexSection,
 } from "./ingest"
 import { streamChat } from "./llm-client"
@@ -213,6 +214,8 @@ describe("ingest prompts and the mechanism context", () => {
     const llmConfig = { ...useWikiStore.getState().llmConfig }
     if (options.maxContextSize !== undefined) llmConfig.maxContextSize = options.maxContextSize
     await autoIngest(project, `${project}/${SOURCE_PATH}`, llmConfig)
+    // A new mechanism page starts a fusion candidate step that the ingest does not wait for.
+    await Promise.all(pendingFusionProposals())
   }
 
   /**
@@ -885,6 +888,7 @@ describe("ingest prompts and the mechanism context", () => {
       undefined,
       (relativePath) => reported.push(relativePath),
     )
+    await Promise.all(pendingFusionProposals())
     return { reported, returned }
   }
 

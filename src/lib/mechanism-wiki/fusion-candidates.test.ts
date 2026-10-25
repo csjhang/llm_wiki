@@ -17,6 +17,8 @@ vi.mock("@/commands/fs", () => realFs)
 /** What the fake model saw and what it answers. An `Error` makes the call fail. */
 const model = vi.hoisted(() => ({
   answer: "" as string | Error,
+  /** A call that never answers and never reports an error, as a stuck connection does. */
+  hang: false,
   calls: [] as Array<{ system: string; user: string; maxTokens: unknown }>,
 }))
 
@@ -27,6 +29,7 @@ vi.mock("@/lib/llm-client", () => ({
       user: String(messages?.[1]?.content ?? ""),
       maxTokens: overrides?.max_tokens,
     })
+    if (model.hang) await new Promise<never>(() => {})
     if (model.answer instanceof Error) {
       callbacks.onError(model.answer)
       return
@@ -371,11 +374,11 @@ describe("readRecentBoards", () => {
     ])
   })
 
-  it("reads the map in .llm-wiki when the project folder has none", async () => {
+  it("reads only the card map of the project folder, not a file of that name in .llm-wiki", async () => {
     await writeFileRaw(`${project}/raw/sources/heptabase/card-1.md`, snapshot(["Board One"]))
     await writeMap({ "card-1": { raw_path: "raw/sources/heptabase/card-1.md", card_updated_at: "2026-02-01T10:00:00.000Z" } }, ".llm-wiki/heptabase-map.json")
 
-    expect(await readRecentBoards(project)).toEqual(["Board One"])
+    expect(await readRecentBoards(project)).toEqual([])
   })
 
   it("skips a missing snapshot, a snapshot without boards, and a path outside the project", async () => {
@@ -475,6 +478,7 @@ describe("proposeFusionCandidates", () => {
     tmp = await createTempProject("fusion-propose")
     project = tmp.path
     model.answer = ""
+    model.hang = false
     model.calls.length = 0
     useReviewStore.setState({ items: [] })
     vi.spyOn(console, "warn").mockImplementation(() => {})
@@ -499,7 +503,7 @@ describe("proposeFusionCandidates", () => {
     expect(items).toHaveLength(1)
     expect(items[0]).toMatchObject({
       type: "fusion-candidate",
-      title: "Fusion candidates: Example loop",
+      title: "Fusion candidates: Example loop (example-loop)",
       description: [
         "Domains where Example loop may also work:",
         "CANDIDATE: example/gamma | structural | Same trigger and same reaction.",
@@ -525,8 +529,34 @@ describe("proposeFusionCandidates", () => {
 
     await propose(ctx)
 
+    // The slug is the title now: it is not written twice.
     expect(useReviewStore.getState().items[0].title).toBe("Fusion candidates: example-loop")
     expect(useReviewStore.getState().items[0].description.split("\n")[0]).toBe("Domains where example-loop may also work:")
+  })
+
+  it("gives two mechanisms with the same title two items", async () => {
+    const ctx = await setUp()
+    await writeFileRaw(`${project}/wiki/mechanisms/other-loop.md`, PAGE)
+    model.answer = line("example/gamma", "structural", "Same trigger.")
+
+    expect(await propose(ctx)).toBe(1)
+    expect(await proposeFusionCandidates(project, ctx, "wiki/mechanisms/other-loop.md", { ...useWikiStore.getState().llmConfig })).toBe(1)
+
+    expect(useReviewStore.getState().items.map((item) => item.title)).toEqual([
+      "Fusion candidates: Example loop (example-loop)",
+      "Fusion candidates: Example loop (other-loop)",
+    ])
+  })
+
+  it("adds the item and leaves the file alone when .llm-wiki/fusion-dismissed.json is corrupt", async () => {
+    const ctx = await setUp()
+    await writeFileRaw(`${project}/${FUSION_DISMISSED_FILE}`, "{ this is not json")
+    model.answer = line("example/gamma", "structural", "Same trigger.")
+
+    expect(await propose(ctx)).toBe(1)
+
+    expect(useReviewStore.getState().items).toHaveLength(1)
+    expect(await readFileRaw(`${project}/${FUSION_DISMISSED_FILE}`)).toBe("{ this is not json")
   })
 
   it("no review when no candidates", async () => {
@@ -635,6 +665,30 @@ describe("proposeFusionCandidates", () => {
 
     await expect(propose(ctx)).rejects.toThrow("provider down")
     expect(useReviewStore.getState().items).toEqual([])
+  })
+
+  it("stops waiting for a model that never answers when the signal aborts, and adds nothing", async () => {
+    const ctx = await setUp()
+    model.hang = true
+    const controller = new AbortController()
+
+    const result = propose(ctx, { signal: controller.signal })
+    // Let the call start, then cut it off.
+    await vi.waitFor(() => expect(model.calls).toHaveLength(1))
+    controller.abort(new Error("timed out"))
+
+    await expect(result).rejects.toThrow("timed out")
+    expect(useReviewStore.getState().items).toEqual([])
+  })
+
+  it("does not ask the model when the signal is aborted already", async () => {
+    const ctx = await setUp()
+    model.answer = line("example/gamma", "structural", "Same trigger.")
+    const controller = new AbortController()
+    controller.abort()
+
+    expect(await propose(ctx, { signal: controller.signal })).toBe(0)
+    expect(model.calls).toEqual([])
   })
 
   it("throws when the page cannot be read", async () => {

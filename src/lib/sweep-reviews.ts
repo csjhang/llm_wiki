@@ -6,8 +6,10 @@
  *   1. Rule-based matching (filename / frontmatter title / affectedPages)
  *   2. LLM semantic judgment for remaining pending items
  *
- * Conservative: preserves contradiction / suggestion / confirm types
- * that need human judgment.
+ * Conservative: an item of a type in `HUMAN_CHOICE_REVIEW_TYPES` is never
+ * resolved here and never shown to the LLM judge, because it asks the user
+ * to decide. The judge itself is also told to keep contradiction /
+ * suggestion / confirm items that need human judgment.
  */
 
 import { listDirectory, readFile } from "@/commands/fs"
@@ -21,6 +23,19 @@ import { normalizeReviewTitle } from "@/lib/review-utils"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { parseFrontmatter } from "@/lib/frontmatter"
+
+/**
+ * Review types that the sweep never resolves. Each one asks the user to choose, and the pages it names
+ * exist, so a judge that sees the page list would call it done.
+ */
+export const HUMAN_CHOICE_REVIEW_TYPES: ReadonlySet<ReviewItem["type"]> = new Set<ReviewItem["type"]>([
+  "fusion-candidate",
+  "mirror-edited",
+  "new-domain",
+  "new-mechanism",
+  "duplicate-source",
+  "research-result",
+])
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -347,7 +362,7 @@ export async function sweepResolvedReviews(
   if (!matchesCurrentProject(projectPath)) return 0
 
   const store = useReviewStore.getState()
-  const pending = store.items.filter((i) => !i.resolved)
+  const pending = store.items.filter((i) => !i.resolved && !HUMAN_CHOICE_REVIEW_TYPES.has(i.type))
 
   if (pending.length === 0) return 0
 

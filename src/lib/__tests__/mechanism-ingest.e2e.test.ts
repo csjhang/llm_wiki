@@ -82,7 +82,7 @@ vi.mock("@/lib/mineru", () => ({
   parseWithMineruResult: vi.fn(),
 }))
 
-import { autoIngest } from "@/lib/ingest"
+import { autoIngest, pendingFusionProposals } from "@/lib/ingest"
 import { streamChat } from "@/lib/llm-client"
 import type { Fingerprint } from "@/lib/mechanism-wiki/source-fingerprint"
 
@@ -391,8 +391,11 @@ describe("mechanism ingest, end to end", () => {
     await tmp.cleanup()
   })
 
-  function ingest(slug: string): Promise<string[]> {
-    return autoIngest(project, `${project}/raw/sources/${slug}.md`, { ...useWikiStore.getState().llmConfig })
+  /** The ingest, then the fusion candidate step that it starts after its commit (the ingest does not wait for it). */
+  async function ingest(slug: string): Promise<string[]> {
+    const written = await autoIngest(project, `${project}/raw/sources/${slug}.md`, { ...useWikiStore.getState().llmConfig })
+    await Promise.all(pendingFusionProposals())
+    return written
   }
 
   async function page(relativePath: string): Promise<string> {
@@ -508,7 +511,7 @@ describe("mechanism ingest, end to end", () => {
     // The second source added an instance to a mechanism that existed, so it asked for no candidate.
     const fusion = useReviewStore.getState().items
     expect(fusion.map((item) => [item.type, item.title, item.affectedPages])).toEqual([
-      ["fusion-candidate", "Fusion candidates: Event-driven computation", [MECHANISM_PATH]],
+      ["fusion-candidate", "Fusion candidates: Event-driven computation (event-driven-computation)", [MECHANISM_PATH]],
     ])
     expect(fusion[0].description.split("\n")).toEqual([
       "Domains where Event-driven computation may also work:",

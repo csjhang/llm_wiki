@@ -1739,17 +1739,10 @@ async function autoIngestImpl(
   return writtenPaths
   })
 
-  // The files are written and the commit is over. The candidates are an extra: they run after the commit
-  // so a slow model does not hold the project, and nothing in them can change what the ingest returns.
+  // The files are written and the commit is over. The candidates are an extra: the step starts here and
+  // runs on its own, so a slow model neither holds this ingest nor can it undo it (ruling S14).
   if (mechanismCtx && newMechanismPages.length > 0) {
-    await proposeFusionCandidatesForNewPages(
-      pp,
-      mechanismCtx,
-      newMechanismPages,
-      llmConfig,
-      mechanismDecisions?.domain ?? null,
-      signal,
-    )
+    startFusionProposals(pp, mechanismCtx, newMechanismPages, llmConfig, mechanismDecisions?.domain ?? null, signal)
   }
   return committedPaths
 }
@@ -1759,29 +1752,66 @@ function isMechanismPagePath(relativePath: string): boolean {
   return /^wiki\/mechanisms\/[^/]+\.md$/i.test(relativePath)
 }
 
+/** How long the candidate step of one ingest may run before it is cut off. */
+const FUSION_STEP_TIMEOUT_MS = 120_000
+
+/** The candidate steps that are running. */
+const fusionSteps = new Set<Promise<void>>()
+
 /**
- * Ask for the fusion candidates of each new mechanism page. A failure is logged and goes no further: a
- * wiki that cannot get candidates is still a wiki that was ingested.
+ * The candidate steps that are still running, for a caller that has to wait for them (a test, or a shutdown).
+ * Each promise resolves when its step ends and never rejects. The ingest does not wait for them.
  */
-async function proposeFusionCandidatesForNewPages(
+export function pendingFusionProposals(): Promise<void>[] {
+  return [...fusionSteps]
+}
+
+/**
+ * Start the fusion candidates of the new mechanism pages and return at once. The step has its own
+ * `AbortController`, so a cancel of the ingest task after `autoIngest` returned does not reach it, and it
+ * is cut off after `FUSION_STEP_TIMEOUT_MS`. When the ingest was cancelled before the start, no call is made.
+ * Every error is logged and goes no further.
+ */
+function startFusionProposals(
   projectPath: string,
   ctx: MechanismContext,
   pages: readonly string[],
   llmConfig: LlmConfig,
   sourceDomain: string | null,
-  signal?: AbortSignal,
-): Promise<void> {
-  for (const page of pages) {
-    if (signal?.aborted) return
-    try {
-      await proposeFusionCandidates(projectPath, ctx, page, llmConfig, { sourceDomain, signal })
-    } catch (err) {
+  ingestSignal?: AbortSignal,
+): void {
+  const controller = new AbortController()
+  if (ingestSignal?.aborted) controller.abort()
+  let timedOut = false
+  const timer = setTimeout(() => {
+    timedOut = true
+    controller.abort(new Error("timed out"))
+  }, FUSION_STEP_TIMEOUT_MS)
+
+  const step: Promise<void> = (async () => {
+    for (const page of pages) {
+      if (controller.signal.aborted) break
+      try {
+        await proposeFusionCandidates(projectPath, ctx, page, llmConfig, { sourceDomain, signal: controller.signal })
+      } catch (err) {
+        if (!timedOut) {
+          console.warn(
+            `[ingest:mechanism] Could not propose fusion candidates for ${page}:`,
+            err instanceof Error ? err.message : err,
+          )
+        }
+      }
+    }
+    if (timedOut) {
       console.warn(
-        `[ingest:mechanism] Could not propose fusion candidates for ${page}:`,
-        err instanceof Error ? err.message : err,
+        `[ingest:mechanism] Fusion candidates for ${pages.join(", ")} timed out after ${FUSION_STEP_TIMEOUT_MS / 1000} s`,
       )
     }
-  }
+  })().finally(() => {
+    clearTimeout(timer)
+    fusionSteps.delete(step)
+  })
+  fusionSteps.add(step)
 }
 
 /**

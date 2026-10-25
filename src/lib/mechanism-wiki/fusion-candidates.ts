@@ -58,8 +58,8 @@ export const MAX_CANDIDATES = 3
 /** How many of the newest snapshots tell which boards the user works on. */
 const RECENT_SNAPSHOTS = 5
 
-/** The card map. wiki-tool writes it to the project folder; the folder `.llm-wiki` is the fallback. */
-const CARD_MAP_FILES = ["heptabase-map.json", ".llm-wiki/heptabase-map.json"] as const
+/** The card map that wiki-tool writes, in the project folder. */
+const CARD_MAP_FILE = "heptabase-map.json"
 
 /** The model has nothing to write but three short lines; the rest is room for a reasoning model. */
 const MAX_OUTPUT_TOKENS = 4_096
@@ -312,27 +312,24 @@ interface MapSource {
   updatedAt: string
 }
 
-/** The `sources` of the first card map that can be read. */
+/** The `sources` of the card map. A map that is missing, is not valid JSON, or has no `sources` object gives []. */
 async function readCardMapSources(root: string): Promise<MapSource[]> {
-  for (const file of CARD_MAP_FILES) {
-    try {
-      const parsed: unknown = JSON.parse(await readFile(`${root}/${file}`))
-      const sources = typeof parsed === "object" && parsed !== null ? (parsed as { sources?: unknown }).sources : undefined
-      if (typeof sources !== "object" || sources === null || Array.isArray(sources)) continue
-      const found: MapSource[] = []
-      for (const entry of Object.values(sources as Record<string, unknown>)) {
-        if (typeof entry !== "object" || entry === null) continue
-        const { raw_path: path, card_updated_at: updatedAt } = entry as Record<string, unknown>
-        if (typeof path === "string" && path.trim() !== "") {
-          found.push({ path: path.trim(), updatedAt: typeof updatedAt === "string" ? updatedAt : "" })
-        }
+  try {
+    const parsed: unknown = JSON.parse(await readFile(`${root}/${CARD_MAP_FILE}`))
+    const sources = typeof parsed === "object" && parsed !== null ? (parsed as { sources?: unknown }).sources : undefined
+    if (typeof sources !== "object" || sources === null || Array.isArray(sources)) return []
+    const found: MapSource[] = []
+    for (const entry of Object.values(sources as Record<string, unknown>)) {
+      if (typeof entry !== "object" || entry === null) continue
+      const { raw_path: path, card_updated_at: updatedAt } = entry as Record<string, unknown>
+      if (typeof path === "string" && path.trim() !== "") {
+        found.push({ path: path.trim(), updatedAt: typeof updatedAt === "string" ? updatedAt : "" })
       }
-      return found
-    } catch {
-      // The next candidate file.
     }
+    return found
+  } catch {
+    return []
   }
-  return []
 }
 
 function timeOf(text: string): number {
@@ -401,9 +398,11 @@ export async function proposeFusionCandidates(
   if (candidates.length === 0) return 0
 
   const name = mechanismTitle(text, page)
+  const slug = page.slice(page.lastIndexOf("/") + 1).replace(/\.md$/i, "")
   const item: ReviewDraft = {
     type: FUSION_CANDIDATE_TYPE,
-    title: `Fusion candidates: ${name}`,
+    // The review id comes from the title. The slug keeps two mechanisms with one title apart.
+    title: `Fusion candidates: ${name}${name === slug ? "" : ` (${slug})`}`,
     description: [
       `Domains where ${name} may also work:`,
       ...candidates.map((candidate) => `CANDIDATE: ${candidate.targetDomain} | ${candidate.strength} | ${candidate.reason}`),
@@ -428,10 +427,13 @@ function mechanismTitle(pageText: string, path: string): string {
   return text !== "" ? text : path.slice(path.lastIndexOf("/") + 1).replace(/\.md$/i, "")
 }
 
-/** One call to the model. Throws when the stream reports an error. */
+/**
+ * One call to the model. Throws when the stream reports an error. When `signal` aborts, the wait ends at
+ * once with the reason of the signal, also for a call that does not look at the signal.
+ */
 async function askModel(llm: LlmConfig, prompt: string, signal: AbortSignal | undefined): Promise<string> {
   const state = { output: "", failure: null as Error | null }
-  await streamChat(
+  const call = streamChat(
     llm,
     [
       { role: "system", content: prompt },
@@ -449,6 +451,22 @@ async function askModel(llm: LlmConfig, prompt: string, signal: AbortSignal | un
     signal,
     { temperature: 0.1, reasoning: resolveIngestReasoning(llm), max_tokens: MAX_OUTPUT_TOKENS },
   )
+  if (signal === undefined) {
+    await call
+  } else {
+    // A call that loses the race must not become an unhandled rejection later.
+    call.catch(() => {})
+    await Promise.race([call, abortion(signal)])
+  }
   if (state.failure !== null) throw state.failure
   return state.output
+}
+
+/** A promise that rejects with the reason of `signal` when it aborts (at once when it has aborted). */
+function abortion(signal: AbortSignal): Promise<never> {
+  return new Promise<never>((_resolve, reject) => {
+    const fail = (): void => reject(signal.reason instanceof Error ? signal.reason : new Error("The call for candidates was cancelled."))
+    if (signal.aborted) fail()
+    else signal.addEventListener("abort", fail, { once: true })
+  })
 }
