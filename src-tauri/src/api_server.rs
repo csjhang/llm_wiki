@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 use futures::FutureExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager, Runtime};
 use tiny_http::{Header, Method, Response, Server, StatusCode};
 use uuid::Uuid;
 use walkdir::WalkDir;
@@ -366,6 +366,9 @@ fn handle_request(
         (&Method::Get, ["projects", project_id, "reviews"]) => {
             handle_reviews(app, project_id, query)
         }
+        (&Method::Post, ["projects", project_id, "reviews"]) => {
+            handle_add_review(app, project_id, body)
+        }
         (&Method::Post, ["projects", project_id, "reviews", "resolve"]) => {
             handle_bulk_resolve_reviews(app, project_id, body)
         }
@@ -440,7 +443,9 @@ fn is_token_required_request(method: &Method, path: &str) -> bool {
     method == &Method::Post
         && matches!(
             parts.as_slice(),
-            ["projects", _, "pages", "embed"] | ["projects", _, "pages", "write"]
+            ["projects", _, "pages", "embed"]
+                | ["projects", _, "pages", "write"]
+                | ["projects", _, "reviews"]
         )
 }
 
@@ -1554,6 +1559,29 @@ fn handle_reviews(app: &AppHandle, project_id: &str, query: &str) -> ApiResponse
     }
 }
 
+/// `POST /projects/{id}/reviews` — append one item to the Review queue. Body
+/// `{ type, title, description?, options?, affectedPages?, searchQueries? }`.
+/// Answers `{ id }`. The id is the stable id the app derives from type and title,
+/// so a second add of the same item merges into the first.
+fn handle_add_review(app: &AppHandle, project_id: &str, body: &str) -> ApiResponse {
+    let project = match resolve_project(app, project_id) {
+        Ok(project) => project,
+        Err(e) => return err(404, e),
+    };
+    let request = match parse_add_review_request(body) {
+        Ok(request) => request,
+        Err(e) => return err(400, e),
+    };
+    match add_review_and_emit(app, &project.path, &request) {
+        Ok(id) => ok(json!({
+            "ok": true,
+            "projectId": project.id,
+            "id": id,
+        })),
+        Err(e) => err(500, e),
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PatchReviewRequest {
@@ -1591,7 +1619,13 @@ fn handle_patch_review(
         }
     };
     let resolved = req.resolved.unwrap_or(true);
-    match patch_review_item(&project.path, review_id, resolved, req.action.as_deref()) {
+    match patch_review_and_emit(
+        app,
+        &project.path,
+        review_id,
+        resolved,
+        req.action.as_deref(),
+    ) {
         Ok(true) => ok(json!({
             "ok": true,
             "projectId": project.id,
@@ -1618,7 +1652,7 @@ fn handle_delete_review(app: &AppHandle, project_id: &str, review_id: &str) -> A
         Ok(project) => project,
         Err(e) => return err(404, e),
     };
-    match delete_review_item(&project.path, review_id) {
+    match delete_review_and_emit(app, &project.path, review_id) {
         Ok(true) => ok(json!({
             "ok": true,
             "projectId": project.id,
@@ -1631,6 +1665,7 @@ fn handle_delete_review(app: &AppHandle, project_id: &str, review_id: &str) -> A
 }
 
 fn delete_review_item(project_path: &str, review_id: &str) -> Result<bool, String> {
+    let _guard = lock_review_file();
     let path = Path::new(project_path).join(".llm-wiki/review.json");
     let mut parsed = match read_raw_review_array(&path)? {
         Some(parsed) => parsed,
@@ -1665,7 +1700,7 @@ fn handle_bulk_resolve_reviews(app: &AppHandle, project_id: &str, body: &str) ->
     if req.ids.is_empty() {
         return err(400, "ids must be a non-empty array".to_string());
     }
-    match resolve_review_items(&project.path, &req.ids, req.action.as_deref()) {
+    match bulk_resolve_and_emit(app, &project.path, &req.ids, req.action.as_deref()) {
         Ok((resolved, not_found)) => ok(json!({
             "ok": true,
             "projectId": project.id,
@@ -1690,6 +1725,7 @@ fn patch_review_item(
     resolved: bool,
     action: Option<&str>,
 ) -> Result<bool, String> {
+    let _guard = lock_review_file();
     let path = Path::new(project_path).join(".llm-wiki/review.json");
     let mut parsed = match read_raw_review_array(&path)? {
         Some(parsed) => parsed,
@@ -1730,6 +1766,7 @@ fn resolve_review_items(
     ids: &[String],
     action: Option<&str>,
 ) -> Result<(Vec<String>, Vec<String>), String> {
+    let _guard = lock_review_file();
     let path = Path::new(project_path).join(".llm-wiki/review.json");
     let mut parsed = match read_raw_review_array(&path)? {
         Some(parsed) => parsed,
@@ -1805,10 +1842,308 @@ fn read_raw_review_array(path: &Path) -> Result<Option<Value>, String> {
     Ok(Some(parsed))
 }
 
+/// Held by every route that reads `review.json`, changes the items, and writes the file back.
+/// Each request runs on its own thread, and two of them would lose one change.
+static REVIEW_FILE_LOCK: Mutex<()> = Mutex::new(());
+
+fn lock_review_file() -> std::sync::MutexGuard<'static, ()> {
+    REVIEW_FILE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Write the file in one step: a reader sees the old file or the new one, never half of it.
 fn write_raw_review_array(path: &Path, parsed: &Value) -> Result<(), String> {
     let serialized = serde_json::to_string_pretty(parsed)
         .map_err(|err| format!("Failed to serialize review state: {err}"))?;
-    fs::write(path, serialized).map_err(|err| format!("Failed to write review state: {err}"))
+    let temp = path.with_extension("json.tmp");
+    fs::write(&temp, serialized).map_err(|err| format!("Failed to write review state: {err}"))?;
+    fs::rename(&temp, path).map_err(|err| {
+        let _ = fs::remove_file(&temp);
+        format!("Failed to write review state: {err}")
+    })
+}
+
+/// The review item types that `POST /projects/{id}/reviews` accepts.
+///
+/// One list, kept in step with `ReviewItem["type"]` in `src/stores/review-store.ts`
+/// (`src/lib/review-types-parity.test.ts` checks it). To add a type, add it here,
+/// in the store, in the icon table of the review view, and in the MCP tool.
+const REVIEW_TYPES: &[&str] = &[
+    "contradiction",
+    "duplicate",
+    "missing-page",
+    "confirm",
+    "suggestion",
+    "new-domain",
+    "new-mechanism",
+    "duplicate-source",
+    "research-result",
+    "mirror-edited",
+];
+
+/// The option of an item that the caller gave no options for. The item can then be dismissed.
+const DEFAULT_REVIEW_OPTION_LABEL: &str = "Dismiss";
+const DEFAULT_REVIEW_OPTION_ACTION: &str = "dismiss";
+
+/// Tauri event for a change that a review route wrote to `review.json`. The app applies it to
+/// its review store. Without it, the next auto-save of the store would write the old state back.
+const REVIEW_CHANGED_EVENT: &str = "review://changed";
+
+#[derive(Debug, Deserialize)]
+struct AddReviewOption {
+    label: String,
+    action: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AddReviewRequest {
+    #[serde(rename = "type")]
+    item_type: String,
+    title: String,
+    #[serde(default)]
+    description: String,
+    options: Option<Vec<AddReviewOption>>,
+    affected_pages: Option<Vec<String>>,
+    search_queries: Option<Vec<String>>,
+}
+
+/// Parse and check the body of `POST /projects/{id}/reviews`. The error text is the 400 message.
+fn parse_add_review_request(body: &str) -> Result<AddReviewRequest, String> {
+    let mut request: AddReviewRequest =
+        serde_json::from_str(body).map_err(|e| format!("Invalid request body: {e}"))?;
+    if !REVIEW_TYPES.contains(&request.item_type.as_str()) {
+        return Err(format!(
+            "Unknown review type '{}'. Expected one of: {}",
+            request.item_type,
+            REVIEW_TYPES.join(", ")
+        ));
+    }
+    request.title = request.title.trim().to_string();
+    if request.title.is_empty() {
+        return Err("title must not be empty".to_string());
+    }
+    if let Some(options) = &request.options {
+        let valid = options
+            .iter()
+            .all(|option| !option.label.trim().is_empty() && !option.action.trim().is_empty());
+        if !valid {
+            return Err(
+                "Invalid options: every option needs a non-empty label and action".to_string(),
+            );
+        }
+    }
+    Ok(request)
+}
+
+fn trimmed_non_empty(values: &[String]) -> Vec<Value> {
+    values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(|value| Value::String(value.to_string()))
+        .collect()
+}
+
+/// Append the item to `.llm-wiki/review.json`, or merge it into the item that has the same
+/// stable id. Works on the raw array, so fields of other items that the app does not know
+/// stay as they are. Returns the id and the stored item (the merged one on a merge).
+fn add_review_item(
+    project_path: &str,
+    request: &AddReviewRequest,
+    now_ms: f64,
+) -> Result<(String, Value), String> {
+    let id = review_id_for_parts(&request.item_type, &request.title);
+    let options: Vec<Value> = match &request.options {
+        Some(options) if !options.is_empty() => options
+            .iter()
+            .map(|option| json!({ "label": option.label.trim(), "action": option.action.trim() }))
+            .collect(),
+        _ => vec![json!({
+            "label": DEFAULT_REVIEW_OPTION_LABEL,
+            "action": DEFAULT_REVIEW_OPTION_ACTION,
+        })],
+    };
+    let mut incoming = Map::new();
+    incoming.insert("id".to_string(), Value::String(id.clone()));
+    incoming.insert("type".to_string(), Value::String(request.item_type.clone()));
+    incoming.insert("title".to_string(), Value::String(request.title.clone()));
+    incoming.insert(
+        "description".to_string(),
+        Value::String(request.description.clone()),
+    );
+    incoming.insert("options".to_string(), Value::Array(options));
+    if let Some(pages) = &request.affected_pages {
+        incoming.insert(
+            "affectedPages".to_string(),
+            Value::Array(trimmed_non_empty(pages)),
+        );
+    }
+    if let Some(queries) = &request.search_queries {
+        incoming.insert(
+            "searchQueries".to_string(),
+            Value::Array(trimmed_non_empty(queries)),
+        );
+    }
+    incoming.insert("resolved".to_string(), Value::Bool(false));
+    incoming.insert("createdAt".to_string(), json!(now_ms));
+    let incoming = Value::Object(incoming);
+
+    let _guard = lock_review_file();
+    let path = Path::new(project_path).join(".llm-wiki/review.json");
+    let mut parsed = read_raw_review_array(&path)?.unwrap_or_else(|| Value::Array(Vec::new()));
+    let items = parsed
+        .as_array_mut()
+        .ok_or_else(|| "Invalid review state JSON: expected an array".to_string())?;
+
+    let stored = match items.iter().position(|item| review_id_matches(item, &id)) {
+        Some(index) => {
+            merge_sanitized_review(&mut items[index], &sanitize_review_item(&incoming));
+            if let Some(obj) = items[index].as_object_mut() {
+                obj.insert("id".to_string(), Value::String(id.clone()));
+            }
+            sanitize_review_item(&items[index])
+        }
+        None => {
+            items.push(incoming.clone());
+            incoming
+        }
+    };
+
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)
+            .map_err(|err| format!("Failed to create review state folder: {err}"))?;
+    }
+    write_raw_review_array(&path, &parsed)?;
+    Ok((id, stored))
+}
+
+/// What one review write changed. It becomes the payload of `review://changed`.
+#[derive(Debug, Default)]
+struct ReviewChange {
+    /// Full items, as stored.
+    added: Vec<Value>,
+    /// Ids and the action label (if any) of items that became resolved.
+    resolved: Vec<(String, Option<String>)>,
+    /// Ids of items that were set back to unresolved.
+    reopened: Vec<String>,
+    /// Ids of items that were removed.
+    deleted: Vec<String>,
+}
+
+/// `{ projectPath, added?, resolved?, reopened?, deleted? }`. A key is left out when it has no entries.
+fn review_changed_payload(project_path: &str, change: &ReviewChange) -> Value {
+    let mut payload = Map::new();
+    payload.insert(
+        "projectPath".to_string(),
+        Value::String(project_path.to_string()),
+    );
+    if !change.added.is_empty() {
+        payload.insert("added".to_string(), Value::Array(change.added.clone()));
+    }
+    if !change.resolved.is_empty() {
+        let resolved = change
+            .resolved
+            .iter()
+            .map(|(id, action)| json!({ "id": id, "action": action }))
+            .collect();
+        payload.insert("resolved".to_string(), Value::Array(resolved));
+    }
+    if !change.reopened.is_empty() {
+        payload.insert("reopened".to_string(), json!(change.reopened));
+    }
+    if !change.deleted.is_empty() {
+        payload.insert("deleted".to_string(), json!(change.deleted));
+    }
+    Value::Object(payload)
+}
+
+/// Tell the app about a change that was already written to the file. A failed emit is logged:
+/// the file is right, and the Review tab's Refresh button reads it.
+fn emit_review_changed<R: Runtime>(app: &AppHandle<R>, project_path: &str, change: &ReviewChange) {
+    if let Err(err) = app.emit(
+        REVIEW_CHANGED_EVENT,
+        review_changed_payload(project_path, change),
+    ) {
+        eprintln!("[API Server] Failed to emit {REVIEW_CHANGED_EVENT}: {err}");
+    }
+}
+
+fn add_review_and_emit<R: Runtime>(
+    app: &AppHandle<R>,
+    project_path: &str,
+    request: &AddReviewRequest,
+) -> Result<String, String> {
+    let now_ms = chrono::Utc::now().timestamp_millis() as f64;
+    let (id, item) = add_review_item(project_path, request, now_ms)?;
+    emit_review_changed(
+        app,
+        project_path,
+        &ReviewChange {
+            added: vec![item],
+            ..ReviewChange::default()
+        },
+    );
+    Ok(id)
+}
+
+fn patch_review_and_emit<R: Runtime>(
+    app: &AppHandle<R>,
+    project_path: &str,
+    review_id: &str,
+    resolved: bool,
+    action: Option<&str>,
+) -> Result<bool, String> {
+    let found = patch_review_item(project_path, review_id, resolved, action)?;
+    if found {
+        let mut change = ReviewChange::default();
+        if resolved {
+            change
+                .resolved
+                .push((review_id.to_string(), action.map(str::to_string)));
+        } else {
+            change.reopened.push(review_id.to_string());
+        }
+        emit_review_changed(app, project_path, &change);
+    }
+    Ok(found)
+}
+
+fn bulk_resolve_and_emit<R: Runtime>(
+    app: &AppHandle<R>,
+    project_path: &str,
+    ids: &[String],
+    action: Option<&str>,
+) -> Result<(Vec<String>, Vec<String>), String> {
+    let (resolved, not_found) = resolve_review_items(project_path, ids, action)?;
+    if !resolved.is_empty() {
+        let change = ReviewChange {
+            resolved: resolved
+                .iter()
+                .map(|id| (id.clone(), action.map(str::to_string)))
+                .collect(),
+            ..ReviewChange::default()
+        };
+        emit_review_changed(app, project_path, &change);
+    }
+    Ok((resolved, not_found))
+}
+
+fn delete_review_and_emit<R: Runtime>(
+    app: &AppHandle<R>,
+    project_path: &str,
+    review_id: &str,
+) -> Result<bool, String> {
+    let found = delete_review_item(project_path, review_id)?;
+    if found {
+        let change = ReviewChange {
+            deleted: vec![review_id.to_string()],
+            ..ReviewChange::default()
+        };
+        emit_review_changed(app, project_path, &change);
+    }
+    Ok(found)
 }
 
 #[derive(Deserialize)]
@@ -3822,6 +4157,19 @@ mod tests {
             &Method::Post,
             "/api/v1/projects/current/chat"
         ));
+        // A new review item can carry option actions that the app runs when clicked.
+        assert!(is_token_required_request(
+            &Method::Post,
+            "/api/v1/projects/current/reviews"
+        ));
+        assert!(!is_token_required_request(
+            &Method::Post,
+            "/api/v1/projects/current/reviews/resolve"
+        ));
+        assert!(!is_token_required_request(
+            &Method::Patch,
+            "/api/v1/projects/current/reviews/r1"
+        ));
         assert!(!is_token_required_request(
             &Method::Post,
             "/api/v1/projects/current/search"
@@ -4102,5 +4450,388 @@ mod tests {
         assert_eq!(config.model, "live-model");
         assert_eq!(config.api_key, "live-secret");
         assert_eq!(config.custom_endpoint, "https://live.example/v1");
+    }
+
+    // ---- POST /reviews, and the `review://changed` event of every review write ----
+
+    use tauri::Listener;
+
+    fn add_request(value: Value) -> AddReviewRequest {
+        parse_add_review_request(&value.to_string()).unwrap()
+    }
+
+    fn mirror_edited_request() -> Value {
+        json!({
+            "type": "mirror-edited",
+            "title": "Mirror card edited: wiki/mechanisms/attention.md",
+            "description": "The note is raw/sources/heptabase/attention-edit.md.",
+            "affectedPages": ["wiki/mechanisms/attention.md"]
+        })
+    }
+
+    /// Collect the payloads of `review://changed` that the app emits.
+    fn collect_review_events(app: &tauri::App<tauri::test::MockRuntime>) -> mpsc::Receiver<Value> {
+        let (tx, rx) = mpsc::channel();
+        app.handle().listen(REVIEW_CHANGED_EVENT, move |event| {
+            let payload: Value = serde_json::from_str(event.payload()).unwrap();
+            tx.send(payload).unwrap();
+        });
+        rx
+    }
+
+    #[test]
+    fn add_review_item_stores_a_stable_id_and_resolved_false() {
+        let root = test_project_dir();
+        let request = add_request(mirror_edited_request());
+
+        let (id, item) =
+            add_review_item(root.to_str().unwrap(), &request, 1_700_000_000_000.0).unwrap();
+
+        let expected = review_id_for_parts(
+            "mirror-edited",
+            "Mirror card edited: wiki/mechanisms/attention.md",
+        );
+        assert_eq!(id, expected);
+        assert_eq!(
+            item.get("id").and_then(Value::as_str),
+            Some(expected.as_str())
+        );
+        let parsed = read_reviews(&root);
+        let items = parsed.as_array().unwrap();
+        assert_eq!(items.len(), 1);
+        let stored = &items[0];
+        assert_eq!(
+            stored.get("id").and_then(Value::as_str),
+            Some(expected.as_str())
+        );
+        assert_eq!(
+            stored.get("type").and_then(Value::as_str),
+            Some("mirror-edited")
+        );
+        assert_eq!(stored.get("resolved").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            stored.get("createdAt").and_then(Value::as_f64),
+            Some(1_700_000_000_000.0)
+        );
+        assert_eq!(
+            stored.get("affectedPages"),
+            Some(&json!(["wiki/mechanisms/attention.md"]))
+        );
+        // The route works on a project that has no `.llm-wiki` folder yet.
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_review_item_without_options_stores_the_dismiss_option() {
+        let root = test_project_dir();
+        let request = add_request(mirror_edited_request());
+        add_review_item(root.to_str().unwrap(), &request, 1.0).unwrap();
+        let parsed = read_reviews(&root);
+        assert_eq!(
+            parsed[0].get("options"),
+            Some(&json!([{ "label": "Dismiss", "action": "dismiss" }]))
+        );
+
+        let mut with_options = mirror_edited_request();
+        with_options["title"] = json!("Mirror card edited: wiki/mechanisms/other.md");
+        with_options["options"] =
+            json!([{ "label": "Open page", "action": "open:wiki/mechanisms/other.md" }]);
+        add_review_item(root.to_str().unwrap(), &add_request(with_options), 2.0).unwrap();
+        let parsed = read_reviews(&root);
+        assert_eq!(
+            parsed[1].get("options"),
+            Some(&json!([{ "label": "Open page", "action": "open:wiki/mechanisms/other.md" }]))
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_review_item_merges_into_an_unresolved_item_with_the_same_id() {
+        let root = test_project_dir();
+        let first = add_request(mirror_edited_request());
+        let (first_id, _) = add_review_item(root.to_str().unwrap(), &first, 100.0).unwrap();
+
+        let mut again = mirror_edited_request();
+        again["affectedPages"] =
+            json!(["wiki/mechanisms/attention.md", "wiki/mechanisms/other.md"]);
+        again["searchQueries"] = json!(["attention heads"]);
+        let (second_id, merged) =
+            add_review_item(root.to_str().unwrap(), &add_request(again), 200.0).unwrap();
+
+        assert_eq!(second_id, first_id);
+        let parsed = read_reviews(&root);
+        let items = parsed.as_array().unwrap();
+        assert_eq!(items.len(), 1, "a second add must not create a second item");
+        assert_eq!(
+            items[0].get("affectedPages"),
+            Some(&json!([
+                "wiki/mechanisms/attention.md",
+                "wiki/mechanisms/other.md"
+            ]))
+        );
+        assert_eq!(
+            items[0].get("searchQueries"),
+            Some(&json!(["attention heads"]))
+        );
+        // The earliest creation time wins, and the merged item is what the event carries.
+        assert_eq!(
+            items[0].get("createdAt").and_then(Value::as_f64),
+            Some(100.0)
+        );
+        assert_eq!(merged.get("affectedPages"), items[0].get("affectedPages"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_review_item_leaves_other_items_and_their_extra_fields_alone() {
+        let root = test_project_dir();
+        write_reviews(
+            &root,
+            json!([{ "id": "r1", "type": "confirm", "title": "Keep", "resolved": false, "internalSecret": "keep-me" }]),
+        );
+        add_review_item(
+            root.to_str().unwrap(),
+            &add_request(mirror_edited_request()),
+            1.0,
+        )
+        .unwrap();
+        let parsed = read_reviews(&root);
+        let items = parsed.as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items[0].get("internalSecret").and_then(Value::as_str),
+            Some("keep-me")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn concurrent_review_writes_do_not_lose_items() {
+        let root = test_project_dir();
+        fs::create_dir_all(root.join(".llm-wiki")).unwrap();
+        let project = root.to_str().unwrap().to_string();
+        let workers: Vec<_> = (0..16)
+            .map(|worker| {
+                let project = project.clone();
+                thread::spawn(move || {
+                    for round in 0..8 {
+                        let request = add_request(json!({
+                            "type": "confirm",
+                            "title": format!("Item {worker}-{round}"),
+                            "description": "d"
+                        }));
+                        add_review_item(&project, &request, 1.0).unwrap();
+                    }
+                })
+            })
+            .collect();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert_eq!(read_reviews(&root).as_array().unwrap().len(), 16 * 8);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn add_review_request_rejects_an_unknown_type() {
+        let mut body = mirror_edited_request();
+        body["type"] = json!("not-a-type");
+        let err = parse_add_review_request(&body.to_string()).unwrap_err();
+        assert!(err.contains("Unknown review type 'not-a-type'"), "{err}");
+        assert!(
+            err.contains("mirror-edited"),
+            "the error lists the allowed types: {err}"
+        );
+    }
+
+    #[test]
+    fn add_review_request_accepts_every_app_review_type() {
+        for item_type in [
+            "contradiction",
+            "duplicate",
+            "missing-page",
+            "confirm",
+            "suggestion",
+            "new-domain",
+            "new-mechanism",
+            "duplicate-source",
+            "research-result",
+            "mirror-edited",
+        ] {
+            let mut body = mirror_edited_request();
+            body["type"] = json!(item_type);
+            assert!(
+                parse_add_review_request(&body.to_string()).is_ok(),
+                "{item_type} must be accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn add_review_request_rejects_bad_bodies() {
+        for (body, needle) in [
+            ("not json", "Invalid request body"),
+            (r#"{"title":"T"}"#, "Invalid request body"),
+            (
+                r#"{"type":"confirm","title":"   "}"#,
+                "title must not be empty",
+            ),
+            (
+                r#"{"type":"confirm","title":"T","options":[{"label":"","action":"x"}]}"#,
+                "options",
+            ),
+            (
+                r#"{"type":"confirm","title":"T","options":[{"label":"X","action":" "}]}"#,
+                "options",
+            ),
+        ] {
+            let err = parse_add_review_request(body).unwrap_err();
+            assert!(err.contains(needle), "{body}: {err}");
+        }
+    }
+
+    #[test]
+    fn review_changed_payload_holds_only_the_changes_that_happened() {
+        let change = ReviewChange {
+            added: vec![json!({ "id": "review-1" })],
+            resolved: vec![("review-2".to_string(), Some("Skip".to_string()))],
+            reopened: vec!["review-3".to_string()],
+            deleted: vec!["review-4".to_string()],
+        };
+        assert_eq!(
+            review_changed_payload("/proj", &change),
+            json!({
+                "projectPath": "/proj",
+                "added": [{ "id": "review-1" }],
+                "resolved": [{ "id": "review-2", "action": "Skip" }],
+                "reopened": ["review-3"],
+                "deleted": ["review-4"]
+            })
+        );
+        let only_delete = ReviewChange {
+            deleted: vec!["review-4".to_string()],
+            ..ReviewChange::default()
+        };
+        assert_eq!(
+            review_changed_payload("/proj", &only_delete),
+            json!({ "projectPath": "/proj", "deleted": ["review-4"] })
+        );
+        let no_action = ReviewChange {
+            resolved: vec![("review-2".to_string(), None)],
+            ..ReviewChange::default()
+        };
+        assert_eq!(
+            review_changed_payload("/proj", &no_action),
+            json!({ "projectPath": "/proj", "resolved": [{ "id": "review-2", "action": null }] })
+        );
+    }
+
+    #[test]
+    fn add_review_route_emits_review_changed_with_the_added_item() {
+        let root = test_project_dir();
+        let app = tauri::test::mock_app();
+        let events = collect_review_events(&app);
+
+        let id = add_review_and_emit(
+            app.handle(),
+            root.to_str().unwrap(),
+            &add_request(mirror_edited_request()),
+        )
+        .unwrap();
+
+        let payload = events.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(payload["projectPath"], json!(root.to_str().unwrap()));
+        assert_eq!(payload["added"][0]["id"], json!(id));
+        assert_eq!(payload["added"][0]["resolved"], json!(false));
+        assert!(payload.get("resolved").is_none());
+        assert!(payload.get("deleted").is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn patch_review_route_emits_resolved_and_reopened() {
+        let root = test_project_dir();
+        write_reviews(&root, json!([{ "id": "r1", "resolved": false }]));
+        let app = tauri::test::mock_app();
+        let events = collect_review_events(&app);
+
+        assert!(patch_review_and_emit(
+            app.handle(),
+            root.to_str().unwrap(),
+            "r1",
+            true,
+            Some("Skip")
+        )
+        .unwrap());
+        let payload = events.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            payload,
+            json!({ "projectPath": root.to_str().unwrap(), "resolved": [{ "id": "r1", "action": "Skip" }] })
+        );
+
+        assert!(
+            patch_review_and_emit(app.handle(), root.to_str().unwrap(), "r1", false, None).unwrap()
+        );
+        let payload = events.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            payload,
+            json!({ "projectPath": root.to_str().unwrap(), "reopened": ["r1"] })
+        );
+
+        // An unknown id changes nothing and emits nothing.
+        assert!(
+            !patch_review_and_emit(app.handle(), root.to_str().unwrap(), "nope", true, None)
+                .unwrap()
+        );
+        assert!(events.recv_timeout(Duration::from_millis(200)).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn bulk_resolve_route_emits_only_the_ids_it_resolved() {
+        let root = test_project_dir();
+        write_reviews(
+            &root,
+            json!([{ "id": "r1", "resolved": false }, { "id": "r2", "resolved": false }]),
+        );
+        let app = tauri::test::mock_app();
+        let events = collect_review_events(&app);
+
+        let ids = vec!["r1".to_string(), "missing".to_string()];
+        let (resolved, not_found) =
+            bulk_resolve_and_emit(app.handle(), root.to_str().unwrap(), &ids, Some("Bulk"))
+                .unwrap();
+        assert_eq!(resolved, vec!["r1".to_string()]);
+        assert_eq!(not_found, vec!["missing".to_string()]);
+        let payload = events.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            payload,
+            json!({ "projectPath": root.to_str().unwrap(), "resolved": [{ "id": "r1", "action": "Bulk" }] })
+        );
+
+        // Nothing resolved, nothing emitted.
+        let none = vec!["missing".to_string()];
+        bulk_resolve_and_emit(app.handle(), root.to_str().unwrap(), &none, None).unwrap();
+        assert!(events.recv_timeout(Duration::from_millis(200)).is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn delete_route_emits_the_deleted_id() {
+        let root = test_project_dir();
+        write_reviews(&root, json!([{ "id": "r1", "resolved": false }]));
+        let app = tauri::test::mock_app();
+        let events = collect_review_events(&app);
+
+        assert!(delete_review_and_emit(app.handle(), root.to_str().unwrap(), "r1").unwrap());
+        let payload = events.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert_eq!(
+            payload,
+            json!({ "projectPath": root.to_str().unwrap(), "deleted": ["r1"] })
+        );
+
+        assert!(!delete_review_and_emit(app.handle(), root.to_str().unwrap(), "r1").unwrap());
+        assert!(events.recv_timeout(Duration::from_millis(200)).is_err());
+        let _ = fs::remove_dir_all(root);
     }
 }

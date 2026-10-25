@@ -11,6 +11,7 @@ import {
   ListTree,
   MessageSquare,
   Network,
+  PencilLine,
   X,
   Check,
   Trash2,
@@ -43,6 +44,7 @@ const typeConfig: Record<ReviewItem["type"], { icon: typeof AlertTriangle; color
   "new-mechanism": { icon: Network, color: "text-indigo-500" },
   "duplicate-source": { icon: Files, color: "text-sky-500" },
   "research-result": { icon: FileSearch, color: "text-teal-500" },
+  "mirror-edited": { icon: PencilLine, color: "text-orange-500" },
 }
 
 export function ReviewView() {

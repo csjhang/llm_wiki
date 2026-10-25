@@ -73,6 +73,8 @@ html2text = { version = "0.17.1", default-features = false, features = ["xml"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+# `tauri::test::mock_app` lets the api_server tests check the events that the review routes emit.
+tauri = { version = "2", features = ["test"] }
 
 [profile.release]
 codegen-units = 1

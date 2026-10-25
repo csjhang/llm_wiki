@@ -48,6 +48,7 @@ export const API_ENDPOINTS: Array<{ method: "GET" | "POST" | "PATCH"; path: stri
   { method: "GET", path: "/api/v1/projects/{id}/files", noteKey: "endpointFilesNote" },
   { method: "GET", path: "/api/v1/projects/{id}/files/content", noteKey: "endpointContentNote" },
   { method: "GET", path: "/api/v1/projects/{id}/reviews", noteKey: "endpointReviewsNote" },
+  { method: "POST", path: "/api/v1/projects/{id}/reviews", noteKey: "endpointAddReviewNote" },
   { method: "PATCH", path: "/api/v1/projects/{id}/reviews/{reviewId}", noteKey: "endpointPatchReviewNote" },
   { method: "POST", path: "/api/v1/projects/{id}/reviews/resolve", noteKey: "endpointBulkResolveNote" },
   { method: "POST", path: "/api/v1/projects/{id}/search", noteKey: "endpointSearchNote" },

@@ -13,6 +13,7 @@ import { getLastProject, getRecentProjects, saveLastProject, loadLlmConfig, load
 import { loadReviewItems, loadLintItems, loadChatHistory, loadChatPreferences } from "@/lib/persist"
 import { setupAutoSave } from "@/lib/auto-save"
 import { startClipWatcher } from "@/lib/clip-watcher"
+import { startReviewSync } from "@/lib/review-sync"
 import { DEFAULT_SOURCE_WATCH_CONFIG } from "@/lib/source-watch-config"
 import { useGlobalShortcut } from "@/hooks/use-global-shortcut"
 import { AppLayout } from "@/components/layout/app-layout"
@@ -141,6 +142,23 @@ function App() {
   useEffect(() => {
     setupAutoSave()
     startClipWatcher()
+  }, [])
+
+  // Apply the review changes that the API server writes to review.json to the review store. Without this,
+  // the next auto-save of the store would write the old state over the change.
+  useEffect(() => {
+    let cancelled = false
+    let stop: (() => void) | undefined
+    startReviewSync()
+      .then((unlisten) => {
+        if (cancelled) unlisten()
+        else stop = unlisten
+      })
+      .catch((err) => console.warn("[startup] failed to listen for review changes:", err))
+    return () => {
+      cancelled = true
+      stop?.()
+    }
   }, [])
 
   // Register global keyboard shortcuts

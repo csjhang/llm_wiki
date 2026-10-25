@@ -19,6 +19,8 @@ export interface ReviewItem {
     | "new-mechanism"
     | "duplicate-source"
     | "research-result"
+    // Sync items. `mirror-edited`: the user edited a mirror card in Heptabase and wiki-sync did not overwrite it.
+    | "mirror-edited"
   title: string
   description: string
   sourcePath?: string
@@ -86,7 +88,7 @@ function mergeOptions(a: ReviewOption[], b: ReviewOption[]): ReviewOption[] {
  * wins (if either was resolved, the survivor is), union the array
  * fields, keep the earliest createdAt, prefer a non-empty description.
  */
-function mergeReviewItems(a: ReviewItem, b: ReviewItem): ReviewItem {
+export function mergeReviewItems(a: ReviewItem, b: ReviewItem): ReviewItem {
   const resolved = a.resolved || b.resolved
   const resolvedAction = resolved ? a.resolvedAction ?? b.resolvedAction : undefined
   return {
