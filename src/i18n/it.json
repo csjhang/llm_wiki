@@ -455,7 +455,8 @@
     "affectedPages": "Pagine",
     "allClear": "Tutto a posto — niente da revisionare",
     "resolvedDivider": "— Risolti —",
-    "actionFailed": "L'azione non è riuscita e resta in sospeso. Puoi riprovare: {{error}}"
+    "actionFailed": "L'azione non è riuscita e resta in sospeso. Puoi riprovare: {{error}}",
+    "fusionCopied": "Copiato: {{command}}"
   },
   "settings": {
     "title": "Impostazioni",

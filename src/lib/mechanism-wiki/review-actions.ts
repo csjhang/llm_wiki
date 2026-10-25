@@ -55,6 +55,11 @@ export interface ReviewActionContext {
    * Left out, or when it fails, the action throws an error that names the command, so the user can type it.
    */
   copyText?(text: string): Promise<void>
+  /**
+   * `mech:start-fusion` calls it with the command after the copy worked, so the view can tell the user what is on
+   * the clipboard. The action does not resolve the item.
+   */
+  copied?(command: string): void
 }
 
 type ReviewDraft = Omit<ReviewItem, "id" | "resolved" | "createdAt">
@@ -594,6 +599,7 @@ async function startFusion(item: ReviewItem, ctx: ReviewActionContext): Promise<
     const reason = err instanceof Error ? err.message : String(err)
     throw new Error(`Could not copy the command to the clipboard (${reason}). Type it in Claude Code: ${command}`)
   }
+  ctx.copied?.(command)
 }
 
 /**

@@ -1203,6 +1203,36 @@ describe("fusion candidates", () => {
       expect(await fileExists(`${reading}/${DISMISSED}`)).toBe(false)
     })
 
+    it("tells the caller which command it copied, after the copy worked", async () => {
+      await setUpReading()
+      const order: string[] = []
+      const copyText = vi.fn(async (_text: string) => {
+        order.push("copy")
+      })
+      const copied = vi.fn((_command: string) => {
+        order.push("copied")
+      })
+      const { ctx } = makeCtx(reading, { copyText, copied })
+
+      await handleMechanismReviewAction(candidateItem(), "mech:start-fusion", ctx)
+
+      expect(copied).toHaveBeenCalledTimes(1)
+      expect(copied).toHaveBeenCalledWith("/wiki-fuse --candidate review-1a2b3c4d")
+      expect(order).toEqual(["copy", "copied"])
+    })
+
+    it("does not say copied when the copy fails", async () => {
+      await setUpReading()
+      const copied = vi.fn()
+      const copyText = vi.fn(async (_text: string) => {
+        throw new Error("clipboard is blocked")
+      })
+      const { ctx } = makeCtx(reading, { copyText, copied })
+
+      await expect(handleMechanismReviewAction(candidateItem(), "mech:start-fusion", ctx)).rejects.toThrow()
+      expect(copied).not.toHaveBeenCalled()
+    })
+
     it("names the command in the error when the copy fails, and keeps the item open", async () => {
       await setUpReading()
       const copyText = vi.fn(async (_text: string) => {

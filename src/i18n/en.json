@@ -455,7 +455,8 @@
     "affectedPages": "Pages",
     "allClear": "All clear — nothing to review",
     "resolvedDivider": "— Resolved —",
-    "actionFailed": "The action failed and remains pending. You can retry: {{error}}"
+    "actionFailed": "The action failed and remains pending. You can retry: {{error}}",
+    "fusionCopied": "Copied: {{command}}"
   },
   "settings": {
     "title": "Settings",

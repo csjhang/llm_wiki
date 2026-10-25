@@ -34,6 +34,7 @@ import { useResearchStore } from "@/stores/research-store"
 import { reviewResearchQueries, reviewResearchTopic, selectedResearchReviews } from "@/lib/review-batch-research"
 import { enqueueSourceIngest } from "@/lib/source-lifecycle"
 import { handleMechanismReviewAction, MECHANISM_ACTION_PREFIX } from "@/lib/mechanism-wiki/review-actions"
+import { deleteReviewTarget, isDismissalAction } from "@/lib/review-option-actions"
 
 const typeConfig: Record<ReviewItem["type"], { icon: typeof AlertTriangle; color: string }> = {
   contradiction: { icon: AlertTriangle, color: "text-amber-500" },
@@ -62,6 +63,7 @@ export function ReviewView() {
   const [selectedReviewIds, setSelectedReviewIds] = useState<Set<string>>(() => new Set())
   const [workingReviewIds, setWorkingReviewIds] = useState<Set<string>>(() => new Set())
   const [reviewErrors, setReviewErrors] = useState<Record<string, string>>({})
+  const [reviewNotices, setReviewNotices] = useState<Record<string, string>>({})
   const researchTasks = useResearchStore((s) => s.tasks)
 
   const setReviewWorking = useCallback((id: string, working: boolean) => {
@@ -78,6 +80,15 @@ export function ReviewView() {
       const next = { ...current }
       if (error === null) delete next[id]
       else next[id] = error instanceof Error ? error.message : String(error)
+      return next
+    })
+  }, [])
+
+  const setReviewNotice = useCallback((id: string, notice: string | null) => {
+    setReviewNotices((current) => {
+      const next = { ...current }
+      if (notice === null) delete next[id]
+      else next[id] = notice
       return next
     })
   }, [])
@@ -104,6 +115,7 @@ export function ReviewView() {
   const handleResolve = useCallback(async (id: string, action: string) => {
     const pp = project ? normalizePath(project.path) : ""
     const item = items.find((i) => i.id === id)
+    setReviewNotice(id, null)
     // Mechanism wiki actions (`mech:`). The handler returns false for any other action.
     if (project && action.startsWith(MECHANISM_ACTION_PREFIX)) {
       try {
@@ -119,6 +131,8 @@ export function ReviewView() {
           },
           // `mech:start-fusion` puts the command of the wiki-fuse skill on the clipboard.
           copyText: (text) => navigator.clipboard.writeText(text),
+          // The item stays open, so the card says what is on the clipboard.
+          copied: (command) => setReviewNotice(id, t("review.fusionCopied", { command })),
         })
         if (handled) return
       } catch (err) {
@@ -226,12 +240,12 @@ export function ReviewView() {
         }
       }
     } else if (action.startsWith("delete:") && project) {
-      // Delete a file
-      const filePath = action.slice(7)
+      // Delete a file. Only a file inside <project>/wiki/: the lint view builds this action from a wiki page, and an
+      // item that came through the API can carry any text. A refused path shows an error on the card.
       try {
         setReviewWorking(id, true)
         setReviewError(id, null)
-        await deleteFile(filePath)
+        await deleteReviewTarget(pp, action.slice(7), deleteFile)
         await refreshProjectFileTree(pp, {
           projectId: project.id,
           bumpDataVersion: true,
@@ -352,7 +366,7 @@ export function ReviewView() {
     } else {
       resolveItem(id, action)
     }
-  }, [appDialog, project, items, resolveItem, setReviewError, setReviewWorking, t])
+  }, [appDialog, project, items, resolveItem, setReviewError, setReviewNotice, setReviewWorking, t])
 
   const pending = items.filter((i) => !i.resolved)
   const resolved = items.filter((i) => i.resolved)
@@ -523,6 +537,7 @@ export function ReviewView() {
                 onSelectedChange={setReviewSelected}
                 working={workingReviewIds.has(item.id)}
                 error={reviewErrors[item.id]}
+                notice={reviewNotices[item.id]}
               />
             ))}
             {resolved.length > 0 && pending.length > 0 && (
@@ -540,6 +555,7 @@ export function ReviewView() {
                 onSelectedChange={setReviewSelected}
                 working={workingReviewIds.has(item.id)}
                 error={reviewErrors[item.id]}
+                notice={reviewNotices[item.id]}
               />
             ))}
           </div>
@@ -549,7 +565,7 @@ export function ReviewView() {
   )
 }
 
-function ReviewCard({
+export function ReviewCard({
   item,
   onResolve,
   onDismiss,
@@ -557,6 +573,7 @@ function ReviewCard({
   onSelectedChange,
   working,
   error,
+  notice,
 }: {
   item: ReviewItem
   onResolve: (id: string, action: string) => void
@@ -565,6 +582,8 @@ function ReviewCard({
   onSelectedChange: (id: string, selected: boolean) => void
   working: boolean
   error?: string
+  /** A short message that is not an error, for example what "Start fusion" copied. */
+  notice?: string
 }) {
   const { t } = useTranslation()
   const config = typeConfig[item.type]
@@ -613,7 +632,8 @@ function ReviewCard({
         </button>
       </div>
 
-      <p className="mb-3 text-xs text-muted-foreground">{item.description}</p>
+      {/* pre-line keeps the line breaks: a fusion candidate shows one CANDIDATE line per row. */}
+      <p className="mb-3 whitespace-pre-line text-xs text-muted-foreground">{item.description}</p>
 
       {item.affectedPages && item.affectedPages.length > 0 && (
         <div className="mb-3 text-xs text-muted-foreground">
@@ -626,6 +646,11 @@ function ReviewCard({
           {error && (
             <div className="rounded border border-destructive/30 bg-destructive/10 px-2 py-1.5 text-xs text-destructive">
               {t("review.actionFailed", { error })}
+            </div>
+          )}
+          {notice && (
+            <div className="rounded border border-emerald-600/30 bg-emerald-600/10 px-2 py-1.5 text-xs text-emerald-700 dark:text-emerald-400">
+              {notice}
             </div>
           )}
           {researchRunning && (
@@ -699,22 +724,7 @@ function actionLooksLikeOpen(action: string): boolean {
   )
 }
 
-/** Detect if an action is a dismissal (no-op) or should create a page */
-function actionIsDismissal(action: string): boolean {
-  const lower = action.toLowerCase()
-  return (
-    lower === "skip" ||
-    lower === "dismiss" ||
-    lower === "ignore" ||
-    lower === "跳过" ||
-    lower === "忽略" ||
-    lower === "approve" ||
-    lower === "keep existing" ||
-    lower === "no"
-  )
-}
-
+/** Detect an action that should create a page: anything that is not a dismissal. */
 function actionLooksLikeCreate(action: string): boolean {
-  // Anything that isn't a dismissal should create a page
-  return !actionIsDismissal(action)
+  return !isDismissalAction(action)
 }
