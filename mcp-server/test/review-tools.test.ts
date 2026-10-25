@@ -41,6 +41,11 @@ function context(fetchImpl: typeof fetch, calls: Call[] = []): ReviewToolContext
   }
 }
 
+/** The error that Node's fetch throws when nothing listens on the port. */
+function connectionRefused(): TypeError {
+  return new TypeError("fetch failed", { cause: Object.assign(new Error("connect ECONNREFUSED 127.0.0.1:19828"), { code: "ECONNREFUSED" }) })
+}
+
 function route(handlers: Record<string, () => Response>): typeof fetch {
   return async (url, init) => {
     const key = `${init?.method ?? "GET"} ${new URL(String(url)).pathname}`
@@ -118,15 +123,33 @@ test("add_review sends options and search queries, and defaults the project to c
 
 test("add_review reports app offline", async () => {
   const ctx = context(async () => {
-    throw new TypeError("fetch failed: connect ECONNREFUSED 127.0.0.1:19828")
+    throw connectionRefused()
   })
 
   await assert.rejects(
     () => addReviewTool(ctx, { type: "confirm", title: "T", description: "D" }),
     (error: Error) => {
-      assert.match(error.message, /app is not running/i)
+      assert.match(error.message, /the LLM Wiki app is not running, or its local API is off/i)
       assert.match(error.message, /review item was not added/i)
-      assert.match(error.message, /ECONNREFUSED/)
+      assert.match(error.message, /fetch failed, ECONNREFUSED/)
+      return true
+    },
+  )
+})
+
+test("the offline text names the error code from either level of the cause, and works without one", async () => {
+  const flat = context(async () => {
+    throw Object.assign(new Error("connect failed"), { code: "ECONNREFUSED" })
+  })
+  await assert.rejects(() => addReviewTool(flat, { type: "confirm", title: "T", description: "D" }), /connect failed, ECONNREFUSED/)
+
+  const plain = context(async () => {
+    throw new Error("socket hang up")
+  })
+  await assert.rejects(
+    () => addReviewTool(plain, { type: "confirm", title: "T", description: "D" }),
+    (error: Error) => {
+      assert.match(error.message, /\(socket hang up\)/)
       return true
     },
   )
@@ -183,11 +206,11 @@ test("resolve_review reports an unknown id and an offline app", async () => {
   await assert.rejects(() => resolveReviewTool(unknown, { id: "nope", action: "Skip" }), /404: Review item 'nope' not found/)
 
   const offline = context(async () => {
-    throw new Error("ECONNREFUSED")
+    throw connectionRefused()
   })
   await assert.rejects(
     () => resolveReviewTool(offline, { id: "r1", action: "Skip" }),
-    /app is not running.*review item was not resolved/is,
+    /the LLM Wiki app is not running, or its local API is off.*review item was not resolved.*ECONNREFUSED/is,
   )
 })
 
@@ -217,7 +240,7 @@ test("parseAddReviewArgs checks options and drops non-string list entries", () =
   assert.equal(parsed.options, undefined)
 })
 
-test("parseAddReviewArgs also reads snake_case names so no list is lost", () => {
+test("parseAddReviewArgs reads only the names of the schema", () => {
   const parsed = parseAddReviewArgs({
     type: "confirm",
     title: "T",
@@ -225,8 +248,8 @@ test("parseAddReviewArgs also reads snake_case names so no list is lost", () => 
     affected_pages: ["wiki/a.md"],
     search_queries: ["q"],
   })
-  assert.deepEqual(parsed.affectedPages, ["wiki/a.md"])
-  assert.deepEqual(parsed.searchQueries, ["q"])
+  assert.equal(parsed.affectedPages, undefined)
+  assert.equal(parsed.searchQueries, undefined)
 })
 
 test("parseResolveReviewArgs requires id and action", () => {

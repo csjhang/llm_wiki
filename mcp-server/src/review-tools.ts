@@ -84,10 +84,9 @@ export function parseAddReviewArgs(args: Record<string, unknown>): ApiAddReviewI
   }
   const options = parseOptions(args.options)
   if (options && options.length > 0) input.options = options
-  // The other tools name their arguments in snake_case, so read those names too. A list must not be lost.
-  const affectedPages = stringList(args.affectedPages ?? args.affected_pages)
+  const affectedPages = stringList(args.affectedPages)
   if (affectedPages) input.affectedPages = affectedPages
-  const searchQueries = stringList(args.searchQueries ?? args.search_queries)
+  const searchQueries = stringList(args.searchQueries)
   if (searchQueries) input.searchQueries = searchQueries
   return input
 }
@@ -100,6 +99,22 @@ export function parseResolveReviewArgs(args: Record<string, unknown>): { id: str
   }
 }
 
+/** The `code` of an error, for example ECONNREFUSED. Node's fetch puts it one level down, in `cause`. */
+function errorCode(error: unknown): string | undefined {
+  for (const level of [error, (error as { cause?: unknown } | null | undefined)?.cause]) {
+    const code = (level as { code?: unknown } | null | undefined)?.code
+    if (typeof code === "string" && code !== "") return code
+  }
+  return undefined
+}
+
+/** What went wrong in a failed fetch: its message, and the error code when there is one. */
+function unreachableDetail(error: LlmWikiApiUnreachableError): string {
+  const message = error.cause instanceof Error ? error.cause.message : String(error.cause)
+  const code = errorCode(error.cause)
+  return code && !message.includes(code) ? `${message}, ${code}` : message
+}
+
 /**
  * Run `run`. When the app cannot be reached, throw an error that says so, and what did not happen.
  * An error that the app itself answered with (a 400, a 404) is not changed.
@@ -109,9 +124,9 @@ async function whenAppRuns<T>(notDone: string, run: () => Promise<T>): Promise<T
     return await run()
   } catch (error) {
     if (error instanceof LlmWikiApiUnreachableError) {
-      const detail = error.cause instanceof Error ? error.cause.message : String(error.cause)
       throw new Error(
-        `The LLM Wiki app is not running, so the ${notDone}. Start the desktop app, then call the tool again. (${detail})`,
+        `The LLM Wiki app is not running, or its local API is off, so the ${notDone}. ` +
+        `Start the desktop app, check that its API is on, then call the tool again. (${unreachableDetail(error)})`,
         { cause: error },
       )
     }

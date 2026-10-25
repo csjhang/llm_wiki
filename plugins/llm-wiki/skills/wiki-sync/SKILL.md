@@ -304,7 +304,7 @@ node "<plugin dir>/scripts/wiki-tool.mjs" hepta record --project "<project>" --e
 4. Read the JSON. The tool compares the card with the text the wiki sent.
 5. If `note` is a path, the tool saved the lines that the user added and removed as a note in `raw/sources/heptabase/`. The app ingests it as a view of the user.
 6. If `note` is `null`, the card is the same as the text the wiki sent. Nothing is saved. Add the card to the report as checked.
-7. If `note` is a path and `llm_wiki_status` said that the app runs, call `llm_wiki_add_review` with `project_id` set to the project folder. Use the arguments in `reference/mcp-steps.md`. It adds a review item of type `mirror-edited` for the page. A second edit of the same page does not add a second item.
+7. If `note` is a path and `llm_wiki_status` said that the app runs, call `llm_wiki_add_review` with `project_id` set to the project folder. Use the arguments in `reference/mcp-steps.md`. It adds a review item of type `mirror-edited` for the page. Each edit adds its own item.
 8. If the app does not run, or the call fails, skip step 7. Do not fail. Say so in the report. The note is the record.
 9. Add the card to the list of edited cards for the report.
 

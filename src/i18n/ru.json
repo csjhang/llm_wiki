@@ -876,7 +876,7 @@
         "endpointContentNote": "?path=wiki/index.md — только текстовые файлы, максимум 2 МБ.",
         "endpointReviewsNote": "?status=unresolved|resolved|all; ?type=missing-page; ?limit=N. По умолчанию — нерешённые элементы ревью.",
         "endpointAddReviewNote": "Добавляет один элемент ревью. Требуется токен. JSON-тело: { type, title, description, options?, affectedPages?, searchQueries? }. Возвращает { id }; одинаковые тип и заголовок объединяются в один элемент.",
-        "endpointPatchReviewNote": "Обновляет один элемент ревью. JSON-тело: { resolved?, action? } (resolved по умолчанию true; передайте false, чтобы открыть заново). Используйте кнопку «Обновить» на вкладке «Ревью», чтобы перечитать.",
+        "endpointPatchReviewNote": "Обновляет один элемент ревью. JSON-тело: { resolved?, action? } (resolved по умолчанию true; передайте false, чтобы открыть заново). Приложение сразу применяет изменение к открытому проекту; кнопка «Обновить» не нужна.",
         "endpointBulkResolveNote": "Массовое решение элементов ревью. JSON-тело: { ids, action? }. Возвращает { resolved, notFound, count }.",
         "endpointSearchNote": "JSON-тело: { query, topK?, includeContent?, queryEmbedding? }. Использует общий поиск по ключевым словам и векторам, если настроены эмбеддинги.",
         "endpointGraphNote": "?q=…&nodeType=…&limit=N — граф вики-ссылок, построенный из wiki/*.md.",

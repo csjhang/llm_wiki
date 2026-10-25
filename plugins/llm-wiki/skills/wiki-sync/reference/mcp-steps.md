@@ -337,7 +337,7 @@ Use it for a `skip-edited` action when `note` is a path and `llm_wiki_status` sa
 {
   "project_id": "<project folder>",
   "type": "mirror-edited",
-  "title": "Mirror card edited: <page path>",
+  "title": "Mirror card edited: <page path> (<note file name>)",
   "description": "The user edited the mirror card of this page in Heptabase. The skill did not overwrite it. The changes are in <note path>.",
   "affectedPages": ["<page path>"]
 }
@@ -346,6 +346,7 @@ Use it for a `skip-edited` action when `note` is a path and `llm_wiki_status` sa
 - Use the full path of this project folder. The app can have another project open.
 - `<page path>` is the `page` of the action, for example `wiki/mechanisms/attention.md`.
 - `<note path>` is the `note` of the `record` result.
+- `<note file name>` is the base name of `<note path>`, for example `feedback-<card id>-<stamp>.md`.
 - Save as `llm_wiki_add_review-<card id>.json`.
-- The result holds the `id` of the item. The same title gives the same id, so a second edit of the same page adds no second item.
+- The result holds the `id` of the item. The same title gives the same id. Each edit has its own note, so each edit adds its own item.
 - If the call fails, or the app does not run, go on. Name the card in the report. The note is the record.

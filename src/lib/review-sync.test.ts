@@ -173,17 +173,22 @@ describe("an API change survives the next auto-save (S2)", () => {
     await tmp.cleanup()
   })
 
-  /** Let the debounce of the auto-save run, then read what it wrote. Null when it wrote no file. */
-  async function nextAutoSave(): Promise<ReviewItem[] | null> {
+  /**
+   * Let the debounce of the auto-save run, then read what it wrote. Null when it wrote no file.
+   * `isWritten` tells the new file from one that was there before (the write is not done at once).
+   */
+  async function nextAutoSave(isWritten: (items: ReviewItem[]) => boolean = () => true): Promise<ReviewItem[] | null> {
     await vi.advanceTimersByTimeAsync(1100)
     vi.useRealTimers()
     const file = `${tmp.path}/.llm-wiki/review.json`
     for (let attempt = 0; attempt < 15; attempt++) {
       try {
-        return JSON.parse(await readFileRaw(file)) as ReviewItem[]
+        const items = JSON.parse(await readFileRaw(file)) as ReviewItem[]
+        if (isWritten(items)) return items
       } catch {
-        await new Promise((resolve) => setTimeout(resolve, 20))
+        // The file is not there yet.
       }
+      await new Promise((resolve) => setTimeout(resolve, 20))
     }
     return null
   }
@@ -195,6 +200,20 @@ describe("an API change survives the next auto-save (S2)", () => {
 
     expect(written?.map((entry) => entry.id)).toEqual([existing.id, added.id])
     expect(written?.[1]).toMatchObject({ type: "mirror-edited", resolved: false })
+  })
+
+  it("does not bring back an item that the user deleted in the app", async () => {
+    // The file still holds X. The user deleted X in the app, so the store does not have it.
+    const deleted = item({ type: "confirm", title: "Deleted in the app" })
+    const addedLater = item({ type: "mirror-edited", title: "Mirror card edited: wiki/mechanisms/other.md (feedback-1.md)" })
+    await realFs.writeFile(`${tmp.path}/.llm-wiki/review.json`, JSON.stringify([deleted, existing]))
+    expect(useReviewStore.getState().items).toEqual([existing])
+
+    handleReviewChanged({ projectPath: tmp.path, added: [addedLater] })
+
+    const written = await nextAutoSave((items) => !items.some((entry) => entry.id === deleted.id))
+
+    expect(written?.map((entry) => entry.id)).toEqual([existing.id, addedLater.id])
   })
 
   it("does not write anything for a payload of another project", async () => {

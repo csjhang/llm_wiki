@@ -876,7 +876,7 @@
         "endpointContentNote": "?path=wiki/index.md — text files only, 2 MB max.",
         "endpointReviewsNote": "?status=unresolved|resolved|all; ?type=missing-page; ?limit=N. Defaults to unresolved Review items.",
         "endpointAddReviewNote": "Add one Review item. Needs the token. JSON body: { type, title, description, options?, affectedPages?, searchQueries? }. Returns { id }; the same type and title merge into one item.",
-        "endpointPatchReviewNote": "Update one Review item. JSON body: { resolved?, action? } (resolved defaults to true; pass false to reopen). Use the Review tab's Refresh button to re-read.",
+        "endpointPatchReviewNote": "Update one Review item. JSON body: { resolved?, action? } (resolved defaults to true; pass false to reopen). The app applies the change to the open project at once. You do not need the Refresh button.",
         "endpointBulkResolveNote": "Bulk-resolve Review items. JSON body: { ids, action? }. Returns { resolved, notFound, count }.",
         "endpointSearchNote": "JSON body: { query, topK?, includeContent?, queryEmbedding? }. Uses shared keyword + vector retrieval when embeddings are configured.",
         "endpointGraphNote": "?q=…&nodeType=…&limit=N — wikilinks graph derived from wiki/*.md.",

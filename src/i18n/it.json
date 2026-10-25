@@ -876,7 +876,7 @@
         "endpointContentNote": "?path=wiki/index.md — solo file di testo, massimo 2 MB.",
         "endpointReviewsNote": "?status=unresolved|resolved|all; ?type=missing-page; ?limit=N. Per impostazione predefinita restituisce gli elementi di revisione non risolti.",
         "endpointAddReviewNote": "Aggiunge un elemento di revisione. Richiede il token. Corpo JSON: { type, title, description, options?, affectedPages?, searchQueries? }. Restituisce { id }; lo stesso tipo e titolo si uniscono in un solo elemento.",
-        "endpointPatchReviewNote": "Aggiorna un elemento di revisione. Corpo JSON: { resolved?, action? } (resolved vale true per impostazione predefinita; passa false per riaprirlo). Usa il pulsante Aggiorna nella scheda Revisione per rileggere i dati.",
+        "endpointPatchReviewNote": "Aggiorna un elemento di revisione. Corpo JSON: { resolved?, action? } (resolved vale true per impostazione predefinita; passa false per riaprirlo). L'app applica subito la modifica al progetto aperto, senza bisogno del pulsante Aggiorna.",
         "endpointBulkResolveNote": "Risolve in blocco gli elementi di revisione. Corpo JSON: { ids, action? }. Restituisce { resolved, notFound, count }.",
         "endpointSearchNote": "Corpo JSON: { query, topK?, includeContent?, queryEmbedding? }. Usa il recupero condiviso per parole chiave e vettori quando gli embedding sono configurati.",
         "endpointGraphNote": "?q=…&nodeType=…&limit=N — grafo dei wikilink derivato da wiki/*.md.",
