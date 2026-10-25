@@ -407,6 +407,28 @@ describe("fuse check: what to verify", () => {
       await expectFails({ fields: { status: "supported" }, sections: { verify: verifyTable(rows) } }, /row 1.*no-such-page/s)
     })
 
+    it("a hypothesis page is not evidence: not the page itself, by slug or by path", async () => {
+      for (const target of ["threshold-restocking", "Threshold-Restocking#part", "wiki/hypotheses/threshold-restocking.md"]) {
+        const rows = [["A claim", `Records in ${link(target)}`, "A result that disproves it"]]
+        await expectFails({ fields: { status: "supported" }, sections: { verify: verifyTable(rows) } }, /row 1.*hypothesis page.*evidence/s)
+        await expectFails({ fields: { status: "refuted" }, sections: { verify: verifyTable(rows) } }, /row 1.*hypothesis page.*evidence/s)
+      }
+    })
+
+    it("a hypothesis page is not evidence: not another page under wiki/hypotheses/", async () => {
+      const project = makeWiki({ "wiki/hypotheses/other-idea.md": hypothesisPage() })
+      for (const target of ["other-idea", "hypotheses/other-idea"]) {
+        const rows = [["A claim", `Records in ${link(target)}`, "A result that disproves it"]]
+        await expectFails({ fields: { status: "supported" }, sections: { verify: verifyTable(rows) } }, /row 1.*other-idea.*hypothesis page/s, project)
+      }
+    })
+
+    it("a row may cite a hypothesis page next to a page that is evidence", async () => {
+      const project = makeWiki({ "wiki/hypotheses/other-idea.md": hypothesisPage() })
+      const rows = [["A claim", `Records in ${link("other-idea")} and ${link(EVIDENCE_PAGE)}`, "A result that disproves it"]]
+      await expectPasses({ fields: { status: "supported" }, sections: { verify: verifyTable(rows) } }, project)
+    })
+
     it("a link may name the page by its path", async () => {
       const rows = [["A claim", `Records in ${link(`wiki/concepts/${EVIDENCE_PAGE}.md`)}`, "A result that disproves it"]]
       await expectPasses({ fields: { status: "supported" }, sections: { verify: verifyTable(rows) } })

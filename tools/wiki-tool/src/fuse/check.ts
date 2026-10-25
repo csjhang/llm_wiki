@@ -16,7 +16,8 @@
  * - What to verify: it has a table, and the last column (How to refute) is not empty in any row. A cell with no
  *   letter or digit (`-`, `<br>`) is empty. The rows by `status` (rulings R16, R18):
  *   `draft` may have no row; `testing` needs a row that links a page in `wiki/queries/`; `supported` and `refuted` need
- *   at least one row, and each row links at least one page of this wiki as evidence.
+ *   at least one row, and each row links at least one page of this wiki as evidence. A hypothesis page (a page in
+ *   `wiki/hypotheses/`, this one included) is not evidence.
  * - `relation: stack` (ruling R17): `from_domain` is the base layer and `to_domain` is the upper layer. Which of two
  *   domains is the lower one is not in the page, so the check only refuses a stack of a domain on itself.
  *
@@ -250,10 +251,17 @@ function checkVerify(project: string, section: string, status: string | null): s
     if (!linksQuery) problems.push(`status testing needs a row under What to verify that links a page in ${QUERIES_FOLDER}`)
   } else {
     table.rows.forEach((row, index) => {
-      const targets = wikiLinkTargets(row.join(" | "))
-      if (pages.find(targets).length > 0) return
-      const missing = targets.length > 0 ? `; no page found for ${targets.map((target) => `[[${target}]]`).join(", ")}` : ""
-      problems.push(`What to verify ${rowName(row, index)}: status ${status} needs a link to a wiki page as evidence${missing}`)
+      const resolved = wikiLinkTargets(row.join(" | ")).map((target) => ({ target, found: pages.find([target]) }))
+      // A hypothesis page (this one, or another) holds no evidence: it is a claim that is still to be tested.
+      if (resolved.some(({ found }) => found.some((page) => !isHypothesisPage(page)))) return
+      const missing = resolved.filter(({ found }) => found.length === 0).map(({ target }) => `[[${target}]]`)
+      const claims = resolved.filter(({ found }) => found.length > 0).map(({ target }) => `[[${target}]]`)
+      const notes = [
+        missing.length > 0 ? `no page found for ${missing.join(", ")}` : "",
+        claims.length > 0 ? `${claims.join(", ")} ${claims.length > 1 ? "are hypothesis pages" : "is a hypothesis page"}, and a hypothesis page is not evidence` : "",
+      ].filter((note) => note !== "")
+      const why = notes.length > 0 ? `; ${notes.join("; ")}` : ""
+      problems.push(`What to verify ${rowName(row, index)}: status ${status} needs a link to a wiki page as evidence${why}`)
     })
   }
   problems.push(...pages.problems)
@@ -264,6 +272,10 @@ function rowName(row: readonly string[], index: number): string {
   const claim = (row[0] ?? "").replace(/\s+/g, " ").trim()
   const shown = claim.length > LABEL_LENGTH ? `${claim.slice(0, LABEL_LENGTH - 1)}…` : claim
   return shown === "" ? `row ${index + 1}` : `row ${index + 1} (${JSON.stringify(shown)})`
+}
+
+function isHypothesisPage(page: WikiPage): boolean {
+  return isHypothesisPath(page.path)
 }
 
 function isQueryPage(page: WikiPage): boolean {

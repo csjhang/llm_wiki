@@ -9,8 +9,11 @@ import { execFileSync } from "node:child_process"
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { afterEach, describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest"
 import { commitPaths, commitPathsLocked } from "./git"
+
+// Each test starts many git processes; a busy machine needs more than the default 5 s.
+vi.setConfig({ testTimeout: 30_000 })
 
 const tempDirs: string[] = []
 

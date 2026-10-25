@@ -1100,7 +1100,7 @@ describe("mechanism template: final review fixes", () => {
       'Change `draft` to `testing` when at least one row under "What to verify" links a query page that holds evidence.',
     )
     expect(rules).toContain('`supported` also needs at least one row under "What to verify".')
-    expect(rules).toContain("A page with zero rows stays `testing`.")
+    expect(rules).toContain("A page with zero rows stays `draft`.")
   })
 
   it("A11: the unknown rule covers parts, flows, and constraints; the one-line exemption is repeated", () => {

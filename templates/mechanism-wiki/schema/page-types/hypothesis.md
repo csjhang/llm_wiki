@@ -70,7 +70,7 @@ Pick the headings by the meaning of the output language, as `schema.md` says.
 - Write `status: draft` when you create the page. `draft` means you wrote the page and have not tested it.
 - Change `draft` to `testing` when at least one row under "What to verify" links a query page that holds evidence.
 - Set `status: supported` only when evidence from the top two ranks resolves every row under "What to verify". The ranks are in the Evidence standard of the lens of `to_domain`.
-- `supported` also needs at least one row under "What to verify". A page with zero rows stays `testing`.
+- `supported` also needs at least one row under "What to verify". A page with zero rows stays `draft`.
 - A row that rests only on lower ranks stays open. Then the status stays `testing` at most.
 - Set `status: refuted` only when evidence from the top two ranks refutes one row under "What to verify".
 - A later fusion update changes the status after it reads new evidence.
