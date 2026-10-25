@@ -55,13 +55,14 @@ Read the `status` of each card that is in the pairing.
 
 1. If the user says that a `not-ingested` card belongs to another wiki, ask for the path of that wiki. Run `resolve-board` again with that path as `--wiki`.
 2. The target wiki is the wiki of the target pages. Its id is `wiki` in the entry. If it is not the project folder, ask the user for its path. The folder of the target wiki is the project folder from now on. Use it as `<project>` and as `project_id`.
-3. Read `CLAUDE.md` of the target wiki, as Rule 1 of `SKILL.md` says. Read `wiki.yaml` and `domains.yaml`. Read `purpose.md` for the `Output language:` line.
-4. Read the `domain` in the frontmatter of the target pages. This is `to_domain`. Do the same for the source pages. This is `from_domain`.
-5. A page that is not a mechanism page and has no `domain` cannot give a domain. An example is a hypothesis page. Leave its card out.
-6. Each side needs at least one card that has a page. If a side has none, stop. Tell the user what is missing.
-7. If you left out any card, name each card and say why. Ask the user: go on without it? Wait for the answer. If the answer is no, stop.
-8. If a side has pages from more than one domain, ask the user which domain to use. A domain must be in `domains.yaml` of the target wiki or of the reading wiki.
-9. A mechanism page has no `domain`. If the source page is a mechanism page, propose the domain of one instance from "Known instances". Ask the user to confirm it.
+3. Leave out each target card whose `wiki` is not the target wiki. The page of the card is in another wiki, and a hypothesis page never cites or links a page of another wiki. Add the card to the cards that you left out. The report names them.
+4. Read `CLAUDE.md` of the target wiki, as Rule 1 of `SKILL.md` says. Read `wiki.yaml` and `domains.yaml`. Read `purpose.md` for the `Output language:` line.
+5. Read the `domain` in the frontmatter of the target pages. This is `to_domain`. Do the same for the source pages. This is `from_domain`.
+6. A page that is not a mechanism page and has no `domain` cannot give a domain. An example is a hypothesis page. Leave its card out.
+7. Each side needs at least one card that has a page. If a side has none, stop. Tell the user what is missing.
+8. If you left out any card, name each card and say why. Ask the user: go on without it? Wait for the answer. If the answer is no, stop.
+9. If a side has pages from more than one domain, ask the user which domain to use. A domain must be in `domains.yaml` of the target wiki or of the reading wiki.
+10. A mechanism page has no `domain`. If the source page is a mechanism page, propose the domain of one instance from "Known instances". Ask the user to confirm it.
 
 ## Step 3: Find the mechanism
 
@@ -75,10 +76,12 @@ grep -n '\[\[<slug>[]|#\]' "<reading wiki>/wiki/mechanisms/"*.md
 3. A hit counts only in two cases. The link is a line under "Known instances", or the slug is in the `instances:` list of the frontmatter. A link in another section does not count. In a reading wiki, the folder is `wiki/mechanisms/` of the project. In a work wiki, it is in the reading wiki.
 4. If more than one mechanism page is found, show them to the user and ask which one to use.
 5. Read the whole mechanism page. Note its parts, its flows, its constraints, and its failure conditions.
-6. If no mechanism page is found, the source side has no mechanism yet. Do not write a mechanism page. Do these steps:
+6. If no mechanism page is found, the source side has no mechanism yet. Do not write a mechanism page in this run. Do these steps:
    1. Read the source pages. Extract one candidate mechanism in domain-neutral words, as `schema/page-types/mechanism.md` says.
-   2. Call `llm_wiki_add_review` with the arguments below. Save the result as `llm_wiki_add_review-new-mechanism.json`.
-   3. Stop the fusion for now. Tell the user that the mechanism needs approval first. Say that the user can run the fusion again after the mechanism page exists.
+   2. Call `llm_wiki_add_review` with the arguments below. In a reading wiki, change the item as the note under the block says. Save the result as `llm_wiki_add_review-new-mechanism.json`.
+   3. Stop the fusion for now. Say that the user can run the fusion again after the mechanism page exists.
+   4. In a work wiki, tell the user that the mechanism needs approval first. The option `mech:propose-mechanism` sends the proposal to the reading wiki as a note.
+   5. In a reading wiki, tell the user that the mechanism page can be written in this wiki directly. A proposal is not needed.
 
 ```json
 {
@@ -92,6 +95,12 @@ grep -n '\[\[<slug>[]|#\]' "<reading wiki>/wiki/mechanisms/"*.md
     { "label": "Skip", "action": "Skip" }
   ]
 }
+```
+
+   In a reading wiki, the library is this wiki. The action `mech:propose-mechanism` would write a note that says "Instances: 1 in work wiki", which is wrong there. Start the `description` with the sentence "This reading wiki can hold the mechanism page itself. Write the page here directly." Then replace `options` with this:
+
+```json
+{ "options": [{ "label": "Skip", "action": "Skip" }] }
 ```
 
 7. If the app does not run, give the proposal to the user as text. Then stop.
@@ -137,10 +146,10 @@ grep -n '\[\[<slug>[]|#\]' "<reading wiki>/wiki/mechanisms/"*.md
    - `related`: the slugs of the pages of this wiki that you cite.
    - `sources`: the file names in the `sources` of the cited pages, each name once.
    - `created` and `updated`: today.
-4. In a work wiki, write the mechanism name as plain text. Do not link the mechanism page.
+4. In a work wiki, write the mechanism name as plain text. Do not link the mechanism page. `fuse check` fails on a link to it.
 5. Write the section headings of the output language. Write short sentences, as `schema/writing-rules.md` says.
 6. Go through the Checklist at the end of `schema/page-types/hypothesis.md`. Fix each item that fails.
-7. Run `fuse check`. Fix the page and run it again until it passes.
+7. Run `fuse check`. Fix the page and run it again until it passes. Show the warnings to the user. Fix a link that is no page of this wiki when you can.
 8. In a reading wiki, add the slug of the new page to the `related` list in the frontmatter of the mechanism page. The rule file of the mechanism page allows this. Set `updated` of that page to today. Change nothing else in it. A work wiki never does this.
 9. Run `fuse commit` with the title of the hypothesis. Give `--file` for the hypothesis page. In a reading wiki, give `--file` for the mechanism page too.
 10. Read the JSON. Keep `sha`. Tell the user the page path and the `sha`.

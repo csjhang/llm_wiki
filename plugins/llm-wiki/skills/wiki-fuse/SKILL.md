@@ -65,6 +65,7 @@ node "<plugin dir>/scripts/wiki-tool.mjs" fuse <command> --project "<project>" .
 - Put a path in double quotes. Put a title in single quotes. A single quote inside the title is written `'\''`.
 - A list option is given once for each file. Example: `--file "<file 1>" --file "<file 2>"`.
 - A path of a page is relative to the project folder, for example `wiki/hypotheses/<slug>.md`.
+- A relative path in an option starts at the folder of `--project`, not at the current folder. This holds for `--file`, `--structure`, `--mindmap`, and `--wiki`.
 - Obey the last two rules of the section "Command lines" of `<base>/../wiki-sync/SKILL.md`. They protect `heptabase-map.json` and `heptabase.yaml`.
 
 The two commands that every mode uses:
@@ -75,6 +76,8 @@ node "<plugin dir>/scripts/wiki-tool.mjs" fuse commit --project "<project>" --ti
 ```
 
 - `check` prints `{"ok":true,"problems":[]}` when the page follows `schema/page-types/hypothesis.md`. Otherwise `problems` names each rule that the page breaks.
+- `check` adds a list `warnings` when a Role mapping link or a Gaps and impact link is no page of this wiki. A warning does not fail the page. Show each warning to the user. Fix the link when you can.
+- In a work wiki, `check` fails on a link to the mechanism page of the reading wiki. It also fails on a link to a page that only the reading wiki has. Write that name as plain text.
 - `commit` checks each listed hypothesis page first. If one fails, nothing is committed.
 - `commit` commits only the listed files. The subject is `fuse: <title> (N pages)`. N is the number of files. The JSON has `sha`.
 - If `sha` is `null`, the files had nothing to commit. Tell the user.
@@ -96,12 +99,13 @@ node "<plugin dir>/scripts/wiki-tool.mjs" fuse commit --project "<project>" --ti
 - Save every raw MCP result as a file in `<project>/.llm-wiki/hepta/`.
 - `<base>/../wiki-sync/reference/mcp-steps.md` gives the exact arguments for `list_whiteboards`, `read_whiteboard`, `read_object`, and the other Heptabase calls. The reference files of this skill name the section to use.
 - Pass `project_id` to every `llm_wiki_*` project tool. Set it to the full path of the project folder. The app can have another project open.
+- `llm_wiki_reviews` lists the oldest item first and stops at `limit`. To find one item, pass `id` or `title_prefix`. The app applies them before it cuts the list. Never list the items and search the list for one item.
 - Heptabase writes are real. The Down steps of `wiki-sync` ask for a yes before the first write. Keep that rule.
 - Never call a Heptabase write tool outside the Down steps.
 
 ## Rules
 
-1. Read `CLAUDE.md` of the target wiki before you read or write a page of it. Follow its read order. If the target wiki is not the project folder, read the `CLAUDE.md` of both.
+1. Read `CLAUDE.md` of the target wiki before you read or write a page of it. Follow its read order.
 2. Read the mechanism page. Read the lens of `to_domain`, the lens of `from_domain`, and `schema/page-types/hypothesis.md`.
 3. Write the page as `schema/page-types/hypothesis.md` says. That file is the one source for the frontmatter, the six sections, the table columns, and the checklist.
 4. Cite a wiki page for every claim. Put every claim that has no page under "What to verify".

@@ -170,7 +170,7 @@ updated: 2026-01-15
 - [ ] Do `from_domain` and `to_domain` each hold one path from `domains.yaml`?
 - [ ] For a stack, is `from_domain` the base layer and `to_domain` the upper layer?
 - [ ] Are `relation`, `strength`, and `status` values from the allowed lists?
-- [ ] Does `status` follow the Rules? `testing` needs a linked query page. `supported` needs a linked evidence page in every row. `refuted` needs one.
+- [ ] Does `status` follow the status rules in the Do list of the Rules section?
 - [ ] Did you set `strength` from the Strength rules, and `status` from the evidence ranks, in the lens of `to_domain`?
 - [ ] Did you read the lens of `to_domain` and the lens of `from_domain`?
 - [ ] Are the six sections present, in order, with headings in the output language?

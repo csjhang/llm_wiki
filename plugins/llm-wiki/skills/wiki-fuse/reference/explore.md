@@ -13,6 +13,7 @@ CANDIDATE: <domain> | <strength> | <reason>
 - The candidate modes have no whiteboard. The hypothesis goes into the wiki of the mechanism page. It has no `heptabase_whiteboard`.
 - Only a reading wiki holds mechanism pages. Run these modes in a reading wiki. If `wiki.yaml` says `role: work`, tell the user to run the mode in the reading wiki. Stop.
 - Both modes need the app. If `llm_wiki_status` fails, tell the user to open the app. Stop.
+- The project folder is the target wiki. Read its `CLAUDE.md` first, before you read any page. Follow its read order, as Rule 1 of `SKILL.md` says.
 
 ## Explore
 
@@ -24,8 +25,11 @@ Use these steps for `/wiki-fuse --explore`.
 { "project_id": "<project folder>", "type": "fusion-candidate", "status": "unresolved", "limit": 50 }
 ```
 
+   The app lists the oldest item first and stops at `limit`. If `Count` in the answer equals `limit`, newer items may be missing. Call again with `"limit": 1000`, the largest value that the app takes. If `Count` is 1000 again, tell the user that the list is cut and that some candidates may be missing.
+
 2. Read each item: its `ID`, its title, its `Affected pages`, and its `CANDIDATE:` lines. Each line is one candidate.
 3. Read `.llm-wiki/fusion-dismissed.json` if it exists. It is a JSON list of `{ "mechanism", "targetDomain" }` pairs. `mechanism` is the path of the mechanism page. Never show a candidate that has a pair in the list.
+   Drop an open candidate when its target domain has an instance of the mechanism now. The app made the item earlier, and an ingest can have added the instance since then. The instances are the lines under "Known instances" of the mechanism page.
 4. Add up to two new candidates:
    1. List `wiki/mechanisms/`. Sort the pages by `created` in the frontmatter, newest first. Read up to five pages.
    2. Read `domains.yaml` and the lens of each domain.
@@ -38,6 +42,8 @@ Use these steps for `/wiki-fuse --explore`.
 7. Show at most five candidates as a numbered table. Use the columns `#`, mechanism, target domain, strength hint, reason, and origin. The origin is the review `ID`, or "new" for a candidate from step 4.
 8. If there is no candidate, tell the user. Stop.
 9. Ask the user to pick one. Wait for the answer.
+   - If the user says "never this one" for a candidate, tell the user to press Skip on the card of that candidate in the app. Only Skip records the pair in `fusion-dismissed.json`. This skill never writes that file.
+   - A candidate with origin "new" has no card. Tell the user that the skill cannot skip it, and ask for another pick.
 10. Run the section "Start from a candidate" for the picked pair.
 
 ## Start from a candidate
@@ -46,10 +52,17 @@ Use these steps after step 10 of "Explore", and for `/wiki-fuse --candidate <rev
 
 Steps 1 to 3 are for `--candidate` only. After "Explore", you have the mechanism page and the domain already. Go to step 4.
 
-1. Call `llm_wiki_reviews` as in "Explore" step 1, with `"status": "all"`. Find the item with the `ID` that the user gave.
-2. If the item does not exist, tell the user. Stop. If the item is resolved, tell the user and ask if the fusion should still run.
+1. Call `llm_wiki_reviews` with the `ID` that the user gave. Save the result as `llm_wiki_reviews-<id>.json`.
+
+```json
+{ "project_id": "<project folder>", "id": "<review id>", "type": "fusion-candidate", "status": "all" }
+```
+
+   The app picks the item by `id` before it cuts the list, so the call finds the item in a long list. Never list the items and search for the `ID`.
+
+2. If the answer has no item, tell the user. Stop. If the item is resolved, tell the user and ask if the fusion should still run.
 3. If the item has more than one `CANDIDATE:` line, ask the user which domain to fuse. Wait for the answer.
-4. The mechanism page is the first entry of `affectedPages` of the item. A candidate marked "new" has no item. Its mechanism page is the page that you read in "Explore" step 4. Read `CLAUDE.md` of the project, as Rule 1 of `SKILL.md` says. Read the mechanism page. If the page does not exist, tell the user. Stop.
+4. The mechanism page is the first entry of `affectedPages` of the item. A candidate marked "new" has no item. Its mechanism page is the page that you read in "Explore" step 4. Read the mechanism page. If the page does not exist, tell the user. Stop.
 5. The target domain is the domain of the candidate. It must be in `domains.yaml`. If it is not, tell the user. Stop.
 6. Find `from_domain`. Read the instance lines under "Known instances". If all instances are in one domain, use it. If there are several, propose the domain whose instance page explains the parts best. Ask the user to confirm it.
 7. Read the index of the target domain. If the file does not exist or lists no page, there is nothing to fuse with. Tell the user to ingest sources about the target domain first. Stop.

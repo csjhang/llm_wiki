@@ -3,11 +3,12 @@
 Use these steps for `/wiki-fuse --update <hypothesis>`.
 The new evidence is in the query pages of `wiki/queries/`. The goal is to re-evaluate each row under "What to verify" and to update the page.
 `SKILL.md` has the rules and the command lines. Read it first.
+Read `CLAUDE.md` of the wiki before you read any page. Follow its read order, as Rule 1 of `SKILL.md` says.
 
 ## Steps
 
 1. Find the hypothesis page. `<hypothesis>` is a slug, a title, or a path. Search `wiki/hypotheses/`. If more than one page matches, ask the user.
-2. Read `CLAUDE.md` of the wiki. Read the page. Note `status`, `strength`, `updated`, and the rows under "What to verify".
+2. Read the page. Note `status`, `strength`, `updated`, and the rows under "What to verify".
 3. Read the lens of `to_domain`. Its Evidence standard ranks the evidence. Read the Do list of `schema/page-types/hypothesis.md` for the rules of `status`.
 4. Find the query pages that matter. A query page matters in these cases:
    - The hypothesis page links it.
@@ -25,13 +26,19 @@ The new evidence is in the query pages of `wiki/queries/`. The goal is to re-eva
 11. Update the mapping rows that the new evidence changes. A "Fits?" value changes only when a cited page supports the new value. Update "Gaps and impact" to match.
 12. Add a new row under "What to verify" for each new claim that has no page. Keep the "How to refute" cell filled.
 13. Set `status` by the Do list of `schema/page-types/hypothesis.md`. Use the results of step 9 and the ranks of step 8.
-14. `fuse check` follows the rule file. `refuted` needs one row that links an evidence page, and the other rows can have no link. `supported` needs a link in every row. If a row of a `supported` page has no page, do not link an unrelated page to pass the check. Keep the status `testing`. Tell the user which row blocks the status.
+14. `fuse check` follows the status rules in the Do list of `schema/page-types/hypothesis.md`. Read the rules for `testing`, `supported`, and `refuted` there. If a row of a `supported` page has no page, do not link an unrelated page to pass the check. Keep the status `testing`. Tell the user which row blocks the status.
 15. Do not change `strength` because of evidence. Change it only when the role mapping itself changed. Then follow the Strength rules again, as Step 6 of `directed.md` says.
 16. Set `updated` to today.
 17. Run `fuse check` until the page passes.
 18. Run `fuse commit` with the title `update <title>`. Give `--file` for the hypothesis page. The subject is `fuse: update <title> (1 pages)`.
 19. Run the Down steps of `wiki-sync` for the page, as Step 8 of `directed.md` says. Run the actions that the plan gives for the page. Normally this is one `update` action.
-20. Update the review items, if the app runs. Call `llm_wiki_reviews` with `"type": "suggestion"` and `"status": "unresolved"`. The title of the item of a row is `Verify (<hypothesis slug>): ` and the start of the claim of the row. Match a row to its item by this title.
+20. Update the review items, if the app runs. The title of the item of a row is `Verify (<hypothesis slug>): ` and the start of the claim of the row. Call `llm_wiki_reviews` with this prefix. Save the result as `llm_wiki_reviews-verify-<slug>.json`.
+
+```json
+{ "project_id": "<project folder>", "type": "suggestion", "status": "unresolved", "title_prefix": "Verify (<hypothesis slug>): " }
+```
+
+   The prefix ends in a space. Keep the space. The app picks the items by prefix before it cuts the list, so the other `suggestion` items cannot push them out. Match a row to its item by the rest of the title.
 21. For each row that is now resolved or refuted, resolve its item with `llm_wiki_resolve_review`.
 
 ```json
