@@ -4,3 +4,11 @@ version: 1
 id: reading                   # A slug for this wiki, for example reading or work. The Heptabase `wiki` property uses it.
 role: reading                 # `reading` holds the mechanism library. `work` does not.
 mechanism_library: null       # In a work wiki: the path to the reading wiki. In a reading wiki: null.
+
+# Lint thresholds. This block is optional. A key that you leave out takes its default.
+# To change a value, remove "# " at the start of its line. Each value is a positive integer.
+# lint:
+#   draft_days: 30                 # A draft hypothesis is stale after this many days.
+#   max_domain_pages: 200          # A domain with more pages than this is too large.
+#   min_domain_pages: 3            # A domain with fewer pages than this is too small.
+#   semantic_reminder_ingests: 10  # The app reminds you to run a semantic lint after this many ingests.

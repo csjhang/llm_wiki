@@ -368,6 +368,24 @@ describe("mechanism template: config files", () => {
     expect(result.value).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null, lint: DEFAULT_LINT_THRESHOLDS })
   })
 
+  it("wiki.yaml shows the lint block as a comment, with one line for each key and its default", () => {
+    const lines = readTemplate("wiki.yaml").split(/\r?\n/)
+    expect(lines).toContain("# lint:")
+    for (const [key, value] of Object.entries(DEFAULT_LINT_THRESHOLDS)) {
+      const line = lines.find((candidate) => candidate.startsWith(`#   ${key}: ${value} `))
+      expect(line, key).toBeDefined()
+      // The comment after the value says what the key does.
+      expect(line, key).toMatch(/ # \S/)
+    }
+    // Remove the leading "# " from the example and the file still parses, with the same values.
+    const keys = Object.keys(DEFAULT_LINT_THRESHOLDS).join("|")
+    const uncommented = lines.map((line) => (new RegExp(`^# (lint:|  (${keys}):)`).test(line) ? line.slice(2) : line))
+    const result = parseWikiYaml(uncommented.join("\n"))
+    expect(result.issues).toEqual([])
+    if (!result.ok) return
+    expect(result.value.lint).toEqual(DEFAULT_LINT_THRESHOLDS)
+  })
+
   it("heptabase example holds Heptabase settings only: wiki identity lives in wiki.yaml", () => {
     const text = readTemplate("heptabase.example.yaml")
     expect(text).not.toMatch(/^wiki_id:/m)

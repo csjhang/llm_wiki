@@ -185,6 +185,38 @@ describe("parseWikiYaml", () => {
       }
     })
 
+    it("rejects min_domain_pages greater than max_domain_pages and names both keys", () => {
+      const result = parseWikiYaml(build() + "lint:\n  min_domain_pages: 10\n  max_domain_pages: 5\n")
+      expect(pathsOf(result)).toEqual(["lint.min_domain_pages"])
+      if (result.ok) throw new Error("expected issues")
+      expect(result.issues[0].message).toBe("min_domain_pages (10) must not be greater than max_domain_pages (5)")
+    })
+
+    it("compares min_domain_pages with the default max_domain_pages when only min is set", () => {
+      const result = parseWikiYaml(build() + "lint:\n  min_domain_pages: 201\n")
+      expect(pathsOf(result)).toEqual(["lint.min_domain_pages"])
+      if (result.ok) throw new Error("expected issues")
+      expect(result.issues[0].message).toBe("min_domain_pages (201) must not be greater than max_domain_pages (200)")
+    })
+
+    it("compares max_domain_pages with the default min_domain_pages when only max is set", () => {
+      const result = parseWikiYaml(build() + "lint:\n  max_domain_pages: 2\n")
+      // The file sets max, so the issue points at max.
+      expect(pathsOf(result)).toEqual(["lint.max_domain_pages"])
+      if (result.ok) throw new Error("expected issues")
+      expect(result.issues[0].message).toBe("min_domain_pages (3) must not be greater than max_domain_pages (2)")
+    })
+
+    it("accepts min_domain_pages equal to max_domain_pages", () => {
+      const text = build() + "lint:\n  min_domain_pages: 7\n  max_domain_pages: 7\n"
+      expect(valueOf(parseWikiYaml(text)).lint).toMatchObject({ min_domain_pages: 7, max_domain_pages: 7 })
+    })
+
+    it("does not compare the two keys when one of them is not a positive integer", () => {
+      const text = build() + "lint:\n  min_domain_pages: 10\n  max_domain_pages: 0\n"
+      expect(pathsOf(parseWikiYaml(text))).toEqual(["lint.max_domain_pages"])
+    })
+
     it("accepts a lint block in a work wiki", () => {
       const text = build({ id: "work", role: "work", library: "../reading" }) + "lint:\n  draft_days: 60\n"
       expect(valueOf(parseWikiYaml(text)).lint.draft_days).toBe(60)

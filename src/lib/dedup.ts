@@ -29,6 +29,7 @@
  */
 
 import { parseFrontmatter } from "./frontmatter"
+import { UNION_FIELDS } from "./page-merge"
 import {
   parseFrontmatterArray,
   mergeArrayFieldsIntoContent,
@@ -331,13 +332,6 @@ Rules:
 - Pick the most descriptive title. If the inputs use different languages, prefer the language that matches the majority of the body content.`
 
 /**
- * The list fields that a merge keeps from every page of the group. `instances` and `lenses` are the
- * lists of a mechanism page, and `also_from` is the list of other entry points of a source page
- * (ruling T18). A page without a field adds nothing, so a plain page merges as before.
- */
-const FIELDS_TO_UNION = ["sources", "tags", "related", "instances", "lenses", "also_from"] as const
-
-/**
  * Compute everything needed to merge a confirmed duplicate group:
  *   - LLM call to produce the merged canonical body
  *   - Deterministic frontmatter union (sources, tags, related, instances, lenses, also_from)
@@ -374,7 +368,7 @@ export async function mergeDuplicateGroup(
   //    the LLM output via mergeArrayFieldsIntoContent.
   let merged = llmOutput
   for (const page of req.group) {
-    merged = mergeArrayFieldsIntoContent(merged, page.content, [...FIELDS_TO_UNION])
+    merged = mergeArrayFieldsIntoContent(merged, page.content, [...UNION_FIELDS])
   }
 
   // 3. Stamp updated to today and force a sensible title.

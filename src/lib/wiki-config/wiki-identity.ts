@@ -122,7 +122,7 @@ function parseMechanismLibrary(
 /**
  * The `lint:` block. A missing block, or `lint:` with no value, gives the defaults.
  * A missing key takes its default. A value that is not a positive integer is an issue
- * that names the key.
+ * that names the key. `min_domain_pages` must not be greater than `max_domain_pages`.
  */
 function parseLint(raw: unknown, issues: ConfigIssue[]): LintThresholds {
   const lint: LintThresholds = { ...DEFAULT_LINT_THRESHOLDS }
@@ -140,6 +140,16 @@ function parseLint(raw: unknown, issues: ConfigIssue[]): LintThresholds {
     } else {
       issues.push({ path: childPath("lint", key), message: "must be a positive integer" })
     }
+  }
+  // Compare the resolved values, so a key that takes its default is compared too. A bad value is already reported.
+  const valid = (key: keyof LintThresholds): boolean => issues.every((issue) => issue.path !== childPath("lint", key))
+  if (valid("min_domain_pages") && valid("max_domain_pages") && lint.min_domain_pages > lint.max_domain_pages) {
+    // Point at a key that the file sets, so the user sees the line to change.
+    const at = hasOwn(raw, "min_domain_pages") ? "min_domain_pages" : "max_domain_pages"
+    issues.push({
+      path: childPath("lint", at),
+      message: `min_domain_pages (${lint.min_domain_pages}) must not be greater than max_domain_pages (${lint.max_domain_pages})`,
+    })
   }
   return lint
 }

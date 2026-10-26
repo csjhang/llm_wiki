@@ -9,6 +9,7 @@
  * Check ids: `domain-missing`, `domain-unknown`, `concept-cross-domain`, `mechanism-no-instance`,
  * `mirror-retired`, `map-missing-page`, `hypothesis-stale-draft`, `domain-too-large`,
  * `domain-too-small`. A hypothesis page counts under its `to_domain` for every check (ruling R19).
+ * A hypothesis page that lacks `from_domain` or `to_domain` gets `domain-missing` (ruling U10).
  */
 import { parseFrontmatter } from "@/lib/frontmatter"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
@@ -25,9 +26,14 @@ export interface StructurePage extends IndexedPage {
   status?: string
   /** The `updated` date, as written. */
   updated?: string
+  /** The `created` date, as written. A draft hypothesis without a readable `updated` date uses it. */
+  created?: string
   /** Slugs from the `instances` field of a mechanism page. Absent when the field is absent. */
   instances?: string[]
-  /** The `from_domain` of a hypothesis page. Null for any other page. */
+  /**
+   * The `from_domain` of a hypothesis page. Null for any other page, and for a hypothesis page without
+   * one. A hypothesis page where it is null or absent gets `domain-missing`.
+   */
   fromDomain?: string | null
 }
 
@@ -41,8 +47,9 @@ export interface StructureInput {
   /** Today, as `YYYY-MM-DD`. */
   today: string
   /**
-   * `domains.yaml` of the reading wiki (ruling U9). In a work wiki, a domain that this file lists
-   * is known. Null or absent when there is none. A reading wiki ignores it.
+   * `domains.yaml` of the reading wiki (ruling U9, refined). In a work wiki, a domain that this file lists
+   * is known as the `from_domain` or `to_domain` of a hypothesis page. The `domain` and the `also` list of
+   * every page must be in `domains`. Null or absent when there is none. A reading wiki ignores it.
    */
   libraryDomains?: DomainsConfig | null
 }
@@ -64,6 +71,8 @@ const RETIRED_TITLE_PREFIX = "🗄 已停用"
 
 const RAW_SOURCES_DIR = "raw/sources/"
 const HYPOTHESIS_TYPE = "hypothesis"
+/** The fields of a hypothesis page that may name a domain of the reading wiki. */
+const HYPOTHESIS_DOMAIN_FIELDS: readonly string[] = ["from_domain", "to_domain"]
 const SOURCE_TYPE = "source"
 const CROSS_DOMAIN_TYPES: readonly string[] = ["concept", "entity"]
 const MS_PER_DAY = 86_400_000
@@ -91,6 +100,8 @@ export function structurePageFromMarkdown(path: string, markdown: string): Struc
   if (status !== undefined) page.status = status
   const updated = text("updated")
   if (updated !== undefined) page.updated = updated
+  const created = text("created")
+  if (created !== undefined) page.created = created
   if (frontmatter !== null && frontmatter !== undefined && "instances" in frontmatter) page.instances = list("instances")
   page.fromDomain = base.type === HYPOTHESIS_TYPE ? (text("from_domain") ?? null) : null
   return page
@@ -100,6 +111,10 @@ export function structurePageFromMarkdown(path: string, markdown: string): Struc
 
 /** Run every check. The findings are sorted by check id, then by page path, so the output is stable. */
 export function checkStructure(input: StructureInput): StructureFinding[] {
+  if (utcDay(input.today) === null) {
+    // A caller bug: every age would be wrong. Do not guess.
+    throw new Error(`today must be a date in YYYY-MM-DD form, got "${input.today}"`)
+  }
   // Pages the checks look at: real pages under `wiki/`. The index files are made by the app.
   const pages = input.pages.filter((page) => isWikiPage(page.path))
   const findings: StructureFinding[] = [
@@ -119,46 +134,71 @@ function isWikiPage(path: string): boolean {
   return key.startsWith("wiki/") && !isDomainIndexPath(key) && !NON_PAGE_PATHS.has(key)
 }
 
-/** A page without `domain`. Mechanism pages apply to many domains, and hypothesis pages use `to_domain`. */
+/**
+ * A page without `domain`. Mechanism pages apply to many domains, so they have none. A hypothesis page
+ * has `from_domain` and `to_domain` instead, and a missing one is named (ruling U10).
+ */
 function checkDomainMissing(pages: StructurePage[]): StructureFinding[] {
-  return pages
-    .filter((page) => page.type !== MECHANISM_TYPE && page.type !== HYPOTHESIS_TYPE && !hasDomain(page))
-    .map((page) => ({
-      check: "domain-missing",
-      page: page.path,
-      message: "This page has no domain. Set domain to a path from domains.yaml.",
-    }))
+  const findings: StructureFinding[] = []
+  for (const page of pages) {
+    if (page.type === MECHANISM_TYPE) continue
+    if (page.type === HYPOTHESIS_TYPE) {
+      if (isBlank(page.fromDomain)) findings.push(missingHypothesisDomain(page, "from_domain"))
+      if (isBlank(page.domain)) findings.push(missingHypothesisDomain(page, "to_domain"))
+    } else if (isBlank(page.domain)) {
+      findings.push({
+        check: "domain-missing",
+        page: page.path,
+        message: "This page has no domain. Set domain to a path from domains.yaml.",
+      })
+    }
+  }
+  return findings
 }
 
-/** A domain, an `also` entry, or a hypothesis `from_domain` or `to_domain` that no domains file lists. */
+function missingHypothesisDomain(page: StructurePage, key: "from_domain" | "to_domain"): StructureFinding {
+  return {
+    check: "domain-missing",
+    page: page.path,
+    message: `This hypothesis has no ${key}. Set it to a path from domains.yaml.`,
+  }
+}
+
+/**
+ * A domain, an `also` entry, or a hypothesis `from_domain` or `to_domain` that no domains file lists.
+ * Ruling U9: in a work wiki, the domains of the reading wiki are known only as the `from_domain` and
+ * `to_domain` of a hypothesis. Every other field must name a domain of this wiki.
+ */
 function checkDomainUnknown(pages: StructurePage[], input: StructureInput): StructureFinding[] {
-  const known = new Set(Object.keys(input.domains.domains))
-  const useLibrary = input.identity.role === "work" && Boolean(input.libraryDomains)
-  if (useLibrary && input.libraryDomains) for (const name of Object.keys(input.libraryDomains.domains)) known.add(name)
-  const where = useLibrary
-    ? "It is in neither domains.yaml of this wiki nor domains.yaml of the reading wiki. Add it to domains.yaml, or fix the page."
-    : "Add it to domains.yaml, or fix the page."
+  const own = new Set(Object.keys(input.domains.domains))
+  const library =
+    input.identity.role === "work" && input.libraryDomains ? new Set(Object.keys(input.libraryDomains.domains)) : null
+  const isKnown = (domain: string, field: string): boolean =>
+    own.has(domain) || (library !== null && HYPOTHESIS_DOMAIN_FIELDS.includes(field) && library.has(domain))
 
   const findings: StructureFinding[] = []
   for (const page of pages) {
-    // The fields that hold a domain on this page, in reading order. A domain that two fields hold is reported once.
-    const uses = new Map<string, string[]>()
-    const note = (domain: string | null | undefined, field: string): void => {
-      if (typeof domain !== "string" || domain === "") return
-      const fields = uses.get(domain) ?? []
+    // The fields that name an unknown domain on this page, in reading order. A domain that two fields hold is reported once.
+    const unknown = new Map<string, string[]>()
+    const check = (domain: string | null | undefined, field: string): void => {
+      if (typeof domain !== "string" || domain === "" || isKnown(domain, field)) return
+      const fields = unknown.get(domain) ?? []
       if (!fields.includes(field)) fields.push(field)
-      uses.set(domain, fields)
+      unknown.set(domain, fields)
     }
     if (page.type === HYPOTHESIS_TYPE) {
-      note(page.fromDomain, "from_domain")
-      note(page.domain, "to_domain")
+      check(page.fromDomain, "from_domain")
+      check(page.domain, "to_domain")
     } else {
-      note(page.domain, "domain")
+      check(page.domain, "domain")
     }
-    for (const domain of page.also) note(domain, "also")
+    for (const domain of page.also) check(domain, "also")
 
-    for (const [domain, fields] of uses) {
-      if (known.has(domain)) continue
+    for (const [domain, fields] of unknown) {
+      const lookedInLibrary = library !== null && fields.some((field) => HYPOTHESIS_DOMAIN_FIELDS.includes(field))
+      const where = lookedInLibrary
+        ? "It is in neither domains.yaml of this wiki nor domains.yaml of the reading wiki. Add it to domains.yaml, or fix the page."
+        : "Add it to domains.yaml, or fix the page."
       findings.push({
         check: "domain-unknown",
         page: page.path,
@@ -174,24 +214,41 @@ function checkDomainUnknown(pages: StructurePage[], input: StructureInput): Stru
  * A concept or entity page whose sources are in two or more domains. A page lists the raw file names
  * in `sources`. A source page lists the raw file it summarizes in its own `sources`, so the raw
  * file name links the two. The domain of each source page is its `domain`.
+ *
+ * A name matches the whole raw name (`heptabase/<card-id>.md`). When the page gives a bare name
+ * (`<card-id>.md`) and no source page has that whole name, the name matches by base name, but only
+ * when exactly one source page has that base name.
  */
 function checkCrossDomain(pages: StructurePage[]): StructureFinding[] {
-  const domainsOfFile = new Map<string, Set<string>>()
+  const domainsOfName = new Map<string, Set<string>>()
+  const pagesOfBaseName = new Map<string, Set<StructurePage>>()
   for (const page of pages) {
-    if (page.type !== SOURCE_TYPE || !hasDomain(page)) continue
+    if (page.type !== SOURCE_TYPE) continue
     for (const file of page.sources) {
       const key = sourceKey(file)
-      const domains = domainsOfFile.get(key) ?? new Set<string>()
-      domains.add(page.domain as string)
-      domainsOfFile.set(key, domains)
+      const domains = domainsOfName.get(key) ?? new Set<string>()
+      if (hasDomain(page)) domains.add(page.domain as string)
+      domainsOfName.set(key, domains)
+      const base = key.slice(key.lastIndexOf("/") + 1)
+      pagesOfBaseName.set(base, (pagesOfBaseName.get(base) ?? new Set<StructurePage>()).add(page))
     }
+  }
+
+  const domainsOfReference = (reference: string): Iterable<string> => {
+    const key = sourceKey(reference)
+    const exact = domainsOfName.get(key)
+    if (exact) return exact
+    const candidates = key.includes("/") ? undefined : pagesOfBaseName.get(key)
+    if (candidates?.size !== 1) return []
+    const [only] = candidates
+    return hasDomain(only) ? [only.domain as string] : []
   }
 
   const findings: StructureFinding[] = []
   for (const page of pages) {
     if (!CROSS_DOMAIN_TYPES.includes(page.type)) continue
     const domains = new Set<string>()
-    for (const file of page.sources) for (const domain of domainsOfFile.get(sourceKey(file)) ?? []) domains.add(domain)
+    for (const file of page.sources) for (const domain of domainsOfReference(file)) domains.add(domain)
     if (domains.size < 2) continue
     const names = [...domains].sort(compareText)
     findings.push({
@@ -255,19 +312,33 @@ function checkCardMap(input: StructureInput): StructureFinding[] {
 /**
  * A hypothesis that has been a draft for more days than `draft_days`. Ruling R18: a draft
  * changes to `testing` when a row under "What to verify" links a page in `wiki/queries/`.
+ * The age counts from `updated`. When `updated` is missing or not a date, it counts from `created`.
+ * A draft with neither date is reported, because its age is unknown.
  */
 function checkStaleDrafts(pages: StructurePage[], input: StructureInput): StructureFinding[] {
   const limit = input.identity.lint.draft_days
   const findings: StructureFinding[] = []
   for (const page of pages) {
-    if (page.type !== HYPOTHESIS_TYPE || page.status !== "draft" || page.updated === undefined) continue
-    const age = daysBetween(page.updated, input.today)
+    if (page.type !== HYPOTHESIS_TYPE || page.status !== "draft") continue
+    const dated = [
+      { label: "updated", text: page.updated },
+      { label: "created", text: page.created },
+    ].find((candidate) => candidate.text !== undefined && utcDay(candidate.text) !== null)
+    if (!dated || dated.text === undefined) {
+      findings.push({
+        check: "hypothesis-stale-draft",
+        page: page.path,
+        message: "The date of this draft hypothesis is not readable. Set updated to a date in YYYY-MM-DD form.",
+      })
+      continue
+    }
+    const age = daysBetween(dated.text, input.today)
     if (age === null || age <= limit) continue
     findings.push({
       check: "hypothesis-stale-draft",
       page: page.path,
       message:
-        `This hypothesis has been a draft for ${age} days (updated ${page.updated.slice(0, 10)}). ` +
+        `This hypothesis has been a draft for ${age} days (${dated.label} ${dated.text.trim().slice(0, 10)}). ` +
         `To move it to testing, add a row under "What to verify" that links a page in wiki/queries/. ` +
         `If you cannot, update or remove the hypothesis.`,
     })
@@ -282,8 +353,9 @@ function daysBetween(from: string, to: string): number | null {
   return start === null || end === null ? null : Math.round((end - start) / MS_PER_DAY)
 }
 
+/** The UTC time of a `YYYY-MM-DD` date (a time after it is allowed). Null when the text is not a real date. */
 function utcDay(text: string): number | null {
-  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(text.trim())
+  const match = /^(\d{4})-(\d{2})-(\d{2})(?:$|[T\s])/.exec(text.trim())
   if (!match) return null
   const [year, month, day] = [Number(match[1]), Number(match[2]), Number(match[3])]
   const time = Date.UTC(year, month - 1, day)
@@ -327,7 +399,12 @@ function checkDomainSizes(pages: StructurePage[], input: StructureInput): Struct
 // --- helpers -----------------------------------------------------------
 
 function hasDomain(page: StructurePage): boolean {
-  return page.domain !== null && page.domain.trim() !== ""
+  return !isBlank(page.domain)
+}
+
+/** True for null, undefined, and text of white space only. */
+function isBlank(value: string | null | undefined): boolean {
+  return value === null || value === undefined || value.trim() === ""
 }
 
 function plural(count: number): string {

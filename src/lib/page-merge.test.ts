@@ -8,7 +8,7 @@
  * actual generation model.
  */
 import { describe, it, expect, vi } from "vitest"
-import { mergePageContent, stripMergeScaffolding } from "./page-merge"
+import { mergePageContent, stripMergeScaffolding, UNION_FIELDS } from "./page-merge"
 
 const PAGE = (fm: string, body: string) => `---\n${fm}\n---\n\n${body}`
 
@@ -576,5 +576,11 @@ describe("mergePageContent — lists of a mechanism wiki", () => {
     const out = await mergePageContent(incoming, existing, merger, baseOpts)
 
     expect(out).toBe(incoming)
+  })
+})
+
+describe("UNION_FIELDS", () => {
+  it("is the one list of frontmatter lists that a merge keeps (dedup.ts uses it too)", () => {
+    expect([...UNION_FIELDS]).toEqual(["sources", "tags", "related", "instances", "lenses", "also_from"])
   })
 })

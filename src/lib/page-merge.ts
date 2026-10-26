@@ -35,8 +35,9 @@ import { normalizeMalformedWikilinks } from "./ingest-sanitize"
  * a page rewritten from one source must keep the entries of the others. `also_from` lists the
  * other entry points of a source summary page. A page whose existing copy lacks one of these
  * fields is not touched (see `mergeArrayFieldsIntoContent`), so a plain wiki is unaffected.
+ * A confirmed duplicate merge (`dedup.ts`) keeps the same fields, so it imports this list (ruling T18).
  */
-const UNION_FIELDS = ["sources", "tags", "related", "instances", "lenses", "also_from"] as const
+export const UNION_FIELDS = ["sources", "tags", "related", "instances", "lenses", "also_from"] as const
 
 /**
  * Frontmatter scalar fields whose existing value MUST survive an

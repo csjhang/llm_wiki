@@ -8,6 +8,9 @@ import {
   rewriteIndexMd,
   type EntitySummary,
 } from "./dedup"
+import { readFileSync } from "node:fs"
+import { fileURLToPath } from "node:url"
+import { UNION_FIELDS } from "./page-merge"
 import { parseFrontmatterArray } from "./sources-merge"
 
 const PAGE = (fm: string, body: string) => `---\n${fm}\n---\n\n${body}`
@@ -447,6 +450,14 @@ describe("mergeDuplicateGroup", () => {
       { path: "wiki/entities/accumulibacter.md", content: pageA },
       { path: "wiki/entities/聚磷菌.md", content: pageB },
     ])
+  })
+
+  it("takes its list of unioned fields from page-merge.ts: there is one list", () => {
+    const source = readFileSync(fileURLToPath(new URL("./dedup.ts", import.meta.url)), "utf8")
+    expect(source).toMatch(/import\s*\{[^}]*\bUNION_FIELDS\b[^}]*\}\s*from\s*"\.\/page-merge"/)
+    expect(source).not.toMatch(/\bFIELDS_TO_UNION\b/)
+    expect(source).not.toMatch(/\[\s*"sources"\s*,\s*"tags"/)
+    expect([...UNION_FIELDS]).toContain("also_from")
   })
 
   it("keeps the instances and lenses of both mechanism pages in a merge", async () => {
