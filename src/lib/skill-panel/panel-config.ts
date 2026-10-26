@@ -7,6 +7,7 @@
  */
 import panelYaml from "../../../plugins/llm-wiki/panel.yaml?raw"
 import { parseFrontmatter } from "@/lib/frontmatter"
+import { UUID_PATTERN } from "@/lib/wiki-config/types"
 import type { ConfigIssue, ParseResult } from "@/lib/wiki-config/types"
 import {
   checkVersion,
@@ -38,6 +39,15 @@ export interface PanelEntry {
 
 const TOP_LEVEL_KEYS = ["version", "buttons"] as const
 const BUTTON_KEYS = ["skill", "label", "mode", "inputs", "args"] as const
+
+// The command goes to a terminal, so every word in it must be plain. These are
+// the only characters a word may have: letters, digits, ".", "_", "/", and "-".
+const SAFE_WORD = /^[A-Za-z0-9._/-]+$/
+
+/** True when the word has only safe characters and no `..` path segment. */
+function isSafeWord(word: string): boolean {
+  return SAFE_WORD.test(word) && !word.split("/").includes("..")
+}
 
 /**
  * Parse and validate the text of `panel.yaml`. Collects every issue before
@@ -71,9 +81,17 @@ function parseButtons(
     return []
   }
   const entries: PanelEntry[] = []
+  const seen = new Set<string>()
   raw.forEach((item, index) => {
-    const entry = parseButton(item, `buttons[${index}]`, skillDescriptions, issues)
-    if (entry) entries.push(entry)
+    const path = `buttons[${index}]`
+    const entry = parseButton(item, path, skillDescriptions, issues)
+    if (!entry) return
+    if (seen.has(entry.skill)) {
+      issues.push({ path: childPath(path, "skill"), message: `duplicate button for skill "${entry.skill}"` })
+      return
+    }
+    seen.add(entry.skill)
+    entries.push(entry)
   })
   return entries
 }
@@ -103,7 +121,7 @@ function parseButton(
 
   let label = ""
   if (typeof raw.label === "string" && raw.label.trim() !== "") {
-    label = raw.label
+    label = raw.label.trim()
   } else {
     issues.push({ path: childPath(path, "label"), message: "must be a non-empty string" })
   }
@@ -144,11 +162,19 @@ function parseInputs(raw: unknown, path: string, issues: ConfigIssue[]): PanelIn
   return inputs
 }
 
+/** Fixed arguments: words split on single spaces, each a safe word. A word may start with `--`, like `--yes`. */
 function parseArgs(raw: unknown, path: string, issues: ConfigIssue[]): string | undefined {
   if (raw === undefined || raw === null) return undefined
-  if (typeof raw === "string" && raw.trim() !== "" && !/[\r\n]/.test(raw)) return raw.trim()
-  issues.push({ path, message: "must be a non-empty string on one line" })
-  return undefined
+  const args = typeof raw === "string" ? raw.trim() : ""
+  if (args === "" || !args.split(" ").every(isSafeWord)) {
+    issues.push({
+      path,
+      message:
+        'must be words of letters, digits, ".", "_", "/", and "-", split by single spaces; a word may start with "--"',
+    })
+    return undefined
+  }
+  return args
 }
 
 /**
@@ -169,10 +195,25 @@ export function readSkillDescriptions(files: Record<string, string>): Record<str
   return descriptions
 }
 
+/** Check one input value. It goes into a terminal command, so a value that is not plain throws. */
+function checkInput(name: PanelInput, value: string): void {
+  const ok =
+    name === "whiteboard" ? UUID_PATTERN.test(value) : isSafeWord(value) && !value.startsWith("-")
+  if (!ok) {
+    const expected =
+      name === "whiteboard"
+        ? "a lowercase UUID"
+        : 'a path of letters, digits, ".", "_", "/", and "-" that does not start with "-" and has no ".." segment'
+    throw new Error(`the ${name} value must be ${expected}`)
+  }
+}
+
 /**
  * The slash command for a button: `/<skill> [args] [input values in the order
- * of the entry]`. A blank input is left out, so the skill asks for it. A value
- * with whitespace inside would change the command, so it throws.
+ * of the entry]`. A blank input is left out, so the skill asks for it. The
+ * command goes to a terminal, so each value must pass an allowlist: a
+ * `whiteboard` value is a lowercase UUID, and a `hypothesis` value is a plain
+ * relative path. Any other value throws.
  */
 export function commandFor(entry: PanelEntry, inputs: Record<string, string>): string {
   const parts = [`/${entry.skill}`]
@@ -180,7 +221,7 @@ export function commandFor(entry: PanelEntry, inputs: Record<string, string>): s
   for (const name of entry.inputs) {
     const value = (inputs[name] ?? "").trim()
     if (value === "") continue
-    if (/\s/.test(value)) throw new Error(`the ${name} value must not contain whitespace`)
+    checkInput(name, value)
     parts.push(value)
   }
   return parts.join(" ")

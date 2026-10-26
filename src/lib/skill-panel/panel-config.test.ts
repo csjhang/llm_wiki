@@ -75,9 +75,44 @@ describe("parsePanelYaml", () => {
     expect(pathsOf(parsePanelYaml(text, DESCRIPTIONS))).toEqual(["buttons[1].skill"])
   })
 
+  it("stores the trimmed label", () => {
+    const text = SAMPLE.replace("label: Sync", 'label: "  Sync  "')
+    expect(valueOf(parsePanelYaml(text, DESCRIPTIONS))[0].label).toBe("Sync")
+  })
+
+  it("rejects two buttons for the same skill", () => {
+    const text = `${SAMPLE}  - skill: wiki-lint
+    label: Lint again
+    mode: background
+`
+    expect(pathsOf(parsePanelYaml(text, DESCRIPTIONS))).toEqual(["buttons[3].skill"])
+  })
+
+  it("accepts args made of safe words split by single spaces", () => {
+    const text = SAMPLE.replace("args: --yes", 'args: "--yes --dry-run wiki/example.md"')
+    expect(valueOf(parsePanelYaml(text, DESCRIPTIONS))[0].args).toBe("--yes --dry-run wiki/example.md")
+  })
+
+  it.each([
+    ["a semicolon", "--yes;rm"],
+    ["a double quote", '--yes"'],
+    ["a single quote", "--yes'"],
+    ["a dollar sign", "--$HOME"],
+    ["a command substitution", "$(id)"],
+    ["a backtick", "`id`"],
+    ["an ampersand", "--yes&"],
+    ["a pipe", "--yes|cat"],
+    ["a redirect", "--yes>out"],
+    ["a double space", "--yes  --dry-run"],
+    ["a tab", "--yes\t--dry-run"],
+    ["a dot-dot segment", "../secret"],
+  ])("rejects args with %s", (_name, args) => {
+    const text = SAMPLE.replace("args: --yes", `args: ${JSON.stringify(args)}`)
+    expect(pathsOf(parsePanelYaml(text, DESCRIPTIONS))).toEqual(["buttons[0].args"])
+  })
+
   it("fills descriptions from SKILL.md", () => {
     // The text of panel.yaml carries no description. It comes from the map.
-    expect(SAMPLE).not.toContain("description")
     const entries = valueOf(parsePanelYaml(SAMPLE, { ...DESCRIPTIONS, "wiki-lint": "Other text." }))
     expect(entries.map((entry) => entry.description)).toEqual([
       "Sync description.",
@@ -187,8 +222,60 @@ describe("commandFor", () => {
     expect(commandFor(byName("wiki-fuse"), { whiteboard: "  " })).toBe("/wiki-fuse")
   })
 
-  it("refuses an input value with whitespace inside", () => {
-    expect(() => commandFor(byName("wiki-fuse"), { whiteboard: "a b" })).toThrow(/whiteboard/)
-    expect(() => commandFor(byName("wiki-fuse"), { whiteboard: "a\n/wiki-undo" })).toThrow(/whiteboard/)
+  it("refuses a whiteboard value that is not a lowercase UUID", () => {
+    const entry = byName("wiki-fuse")
+    const bad = [
+      "a b",
+      "a\n/wiki-undo",
+      `${WHITEBOARD_ID};rm`,
+      `"${WHITEBOARD_ID}"`,
+      `'${WHITEBOARD_ID}'`,
+      `$(${WHITEBOARD_ID})`,
+      `\`${WHITEBOARD_ID}\``,
+      `-${WHITEBOARD_ID}`,
+      "0000000A-0000-4000-8000-00000000000B",
+      "../etc/passwd",
+    ]
+    for (const value of bad) {
+      expect(() => commandFor(entry, { whiteboard: value }), value).toThrow(/whiteboard/)
+    }
+  })
+
+  describe("hypothesis value", () => {
+    const entry: PanelEntry = {
+      skill: "wiki-fuse",
+      label: "x",
+      mode: "conversation",
+      inputs: ["hypothesis"],
+      description: "d",
+    }
+
+    it("accepts a plain wiki path", () => {
+      expect(commandFor(entry, { hypothesis: "wiki/hypotheses/example_one-2.md" })).toBe(
+        "/wiki-fuse wiki/hypotheses/example_one-2.md",
+      )
+    })
+
+    it.each([
+      ["a semicolon", "wiki/a;rm"],
+      ["a double quote", 'wiki/a"'],
+      ["a single quote", "wiki/a'"],
+      ["a command substitution", "$(id)"],
+      ["a variable", "wiki/$HOME"],
+      ["a backtick", "`id`"],
+      ["an ampersand", "wiki/a&b"],
+      ["a pipe", "wiki/a|b"],
+      ["a leading dash", "-rf"],
+      ["a dot-dot segment", "wiki/../secret.md"],
+      ["a leading dot-dot segment", "../secret.md"],
+      ["a space", "wiki/a b"],
+      ["a newline", "wiki/a\n/wiki-undo"],
+    ])("refuses %s", (_name, value) => {
+      expect(() => commandFor(entry, { hypothesis: value }), value).toThrow(/hypothesis/)
+    })
+
+    it("allows dots inside a name", () => {
+      expect(commandFor(entry, { hypothesis: "wiki/a..b.md" })).toBe("/wiki-fuse wiki/a..b.md")
+    })
   })
 })
