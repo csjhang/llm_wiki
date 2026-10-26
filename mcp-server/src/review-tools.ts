@@ -264,6 +264,8 @@ export function formatReviews(response: ApiReviewsResponse): string {
     lines.push(`ID: ${review.id}`)
     lines.push(`Type: ${review.type}`)
     lines.push(`Resolved: ${review.resolved ? "yes" : "no"}`)
+    // Who closed the item: the user's choice (an option label or action), or the app's own cleanup (`auto-resolved`, `llm-judged`).
+    if (review.resolved && review.resolvedAction) lines.push(`Resolved action: ${review.resolvedAction}`)
     if (review.sourcePath) lines.push(`Source: ${review.sourcePath}`)
     if (review.affectedPages && review.affectedPages.length > 0) {
       lines.push(`Affected pages: ${review.affectedPages.join(", ")}`)

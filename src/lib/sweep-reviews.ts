@@ -19,7 +19,7 @@ import { useWikiStore } from "@/stores/wiki-store"
 import { streamChat } from "@/lib/llm-client"
 import type { FileNode } from "@/types/wiki"
 import { normalizePath } from "@/lib/path-utils"
-import { normalizeReviewTitle } from "@/lib/review-utils"
+import { LLM_RESOLVED_ACTION, normalizeReviewTitle, RULE_RESOLVED_ACTION } from "@/lib/review-utils"
 import { hasUsableLlm } from "@/lib/has-usable-llm"
 import { getTaskLlmConfig } from "@/lib/llm-task-routing"
 import { parseFrontmatter } from "@/lib/frontmatter"
@@ -386,7 +386,7 @@ export async function sweepResolvedReviews(
     if (item.type === "missing-page") {
       const names = extractCandidateNames(item)
       if (names.length > 0 && names.some((n) => pageExists(n, index))) {
-        store.resolveItem(item.id, "auto-resolved")
+        store.resolveItem(item.id, RULE_RESOLVED_ACTION)
         ruleResolved++
         resolvedByRule = true
       }
@@ -400,7 +400,7 @@ export async function sweepResolvedReviews(
           return base ? index.byId.has(base) : false
         })
         if (!allStillExist) {
-          store.resolveItem(item.id, "auto-resolved")
+          store.resolveItem(item.id, RULE_RESOLVED_ACTION)
           ruleResolved++
           resolvedByRule = true
         }
@@ -434,7 +434,7 @@ export async function sweepResolvedReviews(
       // or aborted between the LLM call starting and finishing.
       if (!signal?.aborted && matchesCurrentProject(projectPath)) {
         for (const id of resolvedIds) {
-          store.resolveItem(id, "llm-judged")
+          store.resolveItem(id, LLM_RESOLVED_ACTION)
           llmResolved++
         }
       }

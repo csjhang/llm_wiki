@@ -431,3 +431,43 @@ test("llm_wiki_reviews leaves id and title_prefix out when they are empty or not
   assert.equal(params.has("title_prefix"), false)
   assert.match(text, /No unresolved review items found\./)
 })
+
+// ---- final review, M6: say who closed a resolved item ----
+
+test("llm_wiki_reviews prints the resolved action of a resolved item", async () => {
+  const ctx = context(route({
+    ...baseRoutes,
+    "GET /api/v1/projects/current/reviews": () => json({
+      ok: true,
+      status: "all",
+      count: 3,
+      reviews: [
+        { id: "r1", type: "suggestion", title: "Lint (a): one", description: "d", options: [], resolved: true, resolvedAction: "llm-judged" },
+        { id: "r2", type: "suggestion", title: "Lint (a): two", description: "d", options: [], resolved: true, resolvedAction: "Dismiss" },
+        { id: "r3", type: "suggestion", title: "Lint (a): three", description: "d", options: [], resolved: false },
+      ],
+    }),
+  }))
+  const text = await reviewsTool(ctx, { status: "all" })
+  assert.match(text, /ID: r1\nType: suggestion\nResolved: yes\nResolved action: llm-judged\n/)
+  assert.match(text, /ID: r2\nType: suggestion\nResolved: yes\nResolved action: Dismiss\n/)
+})
+
+test("llm_wiki_reviews prints no resolved action for an open item, and none that the app did not send", async () => {
+  const ctx = context(route({
+    ...baseRoutes,
+    "GET /api/v1/projects/current/reviews": () => json({
+      ok: true,
+      status: "all",
+      count: 2,
+      reviews: [
+        // An open item has no action, also when the app sends a stale one.
+        { id: "r1", type: "suggestion", title: "Open", description: "d", options: [], resolved: false, resolvedAction: "Dismiss" },
+        { id: "r2", type: "suggestion", title: "Closed", description: "d", options: [], resolved: true },
+      ],
+    }),
+  }))
+  const text = await reviewsTool(ctx, { status: "all" })
+  assert.match(text, /ID: r1\nType: suggestion\nResolved: no\n/)
+  assert.doesNotMatch(text, /Resolved action:/)
+})
