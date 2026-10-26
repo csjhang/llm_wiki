@@ -401,15 +401,23 @@ describe("lint reminder", () => {
     expect(html).toContain("12 ingests since the last check. Consider running 健檢.")
   })
 
-  it("says it in Traditional Chinese for the zh bundle", () => {
+  it("says it in Simplified Chinese for the zh bundle, and names the button as the panel shows it", () => {
     const zh = i18n.getFixedT("zh")
 
-    expect(zh("skillPanel.lintReminder", { count: 12 })).toBe("已累積 12 次收錄，建議執行健檢")
+    // zh.json is Simplified (ruling W11). The button keeps the Traditional label of panel.yaml, so the text quotes it.
+    expect(zh("skillPanel.lintReminder", { count: 12 })).toBe("已累积 12 次收录，建议执行“健檢”")
+    expect(PANEL_ENTRIES.some((entry) => entry.label === "健檢")).toBe(true)
   })
 
-  it("has the text in every language bundle with the count", () => {
-    for (const lng of ["en", "it", "ru", "zh"]) {
-      expect(i18n.getFixedT(lng)("skillPanel.lintReminder", { count: 12 }), lng).toContain("12")
+  it("has the full text in every language bundle with the count", () => {
+    const expected = {
+      en: "12 ingests since the last check. Consider running 健檢.",
+      it: "12 elaborazioni dall'ultimo controllo. Valuta di eseguire 健檢.",
+      ru: "12 обработок с последней проверки. Рассмотрите запуск 健檢.",
+      zh: "已累积 12 次收录，建议执行“健檢”",
+    }
+    for (const [lng, text] of Object.entries(expected)) {
+      expect(i18n.getFixedT(lng)("skillPanel.lintReminder", { count: 12 }), lng).toBe(text)
     }
   })
 

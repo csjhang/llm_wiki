@@ -950,6 +950,7 @@
         "gitHistory": {
           "title": "Cronologia versioni (git)",
           "hint": "Ogni elaborazione diventa un commit git che puoi annullare.",
+          "nestedHint": "Questa wiki si trova in un altro repository git in {{path}}. Ogni elaborazione diventa un commit lì, limitato a questa cartella.",
           "failed": "Impossibile attivare la cronologia versioni. Controlla che git sia installato e che questa cartella possa essere un repository."
         },
         "history": {

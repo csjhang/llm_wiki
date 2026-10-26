@@ -17,6 +17,7 @@ function render(props: Partial<GitHistoryToggleProps> = {}): string {
       busy: false,
       disabled: false,
       error: null,
+      nestedRepo: null,
       onToggle: () => {},
       ...props,
     }),
@@ -56,6 +57,26 @@ describe("GitHistoryToggle", () => {
     expect(isDisabled(switchTag(render({ disabled: true })))).toBe(true)
   })
 
+  it("names the repository above the project in the help text before the history is on", () => {
+    const html = render({ enabled: false, nestedRepo: "/home/user/big-repo" })
+
+    expect(html).toContain("/home/user/big-repo")
+    expect(html).toContain("This wiki is inside another git repository at /home/user/big-repo.")
+    expect(html).toContain("limited to this wiki folder")
+    // The help text replaces the plain one: it stays one line.
+    expect(html).not.toContain("Each ingest becomes one git commit that you can undo.")
+    // Still unknown (the choice loads): the same text.
+    expect(render({ enabled: null, nestedRepo: "/home/user/big-repo" })).toContain("/home/user/big-repo")
+  })
+
+  it("shows the plain help text once the history is on, or when the project is not nested", () => {
+    expect(render({ enabled: true, nestedRepo: "/home/user/big-repo" })).not.toContain("/home/user/big-repo")
+    expect(render({ enabled: true, nestedRepo: "/home/user/big-repo" })).toContain(
+      "Each ingest becomes one git commit that you can undo.",
+    )
+    expect(render({ enabled: false, nestedRepo: null })).toContain("Each ingest becomes one git commit that you can undo.")
+  })
+
   it("shows an error", () => {
     const html = render({ error: "Version history could not be turned on." })
 
@@ -67,11 +88,14 @@ describe("GitHistoryToggle", () => {
   it("has its text in every language bundle", () => {
     for (const lng of ["en", "it", "ru", "zh"]) {
       const t = i18n.getFixedT(lng)
-      for (const key of ["title", "hint", "failed"]) {
+      for (const key of ["title", "hint", "nestedHint", "failed"]) {
         const text = t(`settings.sections.maintenance.gitHistory.${key}`)
         expect(text, `${lng} ${key}`).not.toBe(`settings.sections.maintenance.gitHistory.${key}`)
         expect(text.length, `${lng} ${key}`).toBeGreaterThan(0)
       }
+      // The nested-repository text names the repository.
+      const nested = t("settings.sections.maintenance.gitHistory.nestedHint", { path: "/home/user/big-repo" })
+      expect(nested, lng).toContain("/home/user/big-repo")
     }
   })
 })

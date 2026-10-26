@@ -950,6 +950,7 @@
         "gitHistory": {
           "title": "Version history (git)",
           "hint": "Each ingest becomes one git commit that you can undo.",
+          "nestedHint": "This wiki is inside another git repository at {{path}}. Each ingest becomes one commit there, limited to this wiki folder.",
           "failed": "Version history could not be turned on. Check that git is installed and that this folder can be a repository."
         },
         "history": {

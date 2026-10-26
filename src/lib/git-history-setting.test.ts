@@ -30,7 +30,7 @@ import {
   type GitHistoryDeps,
   type GitHistoryMode,
 } from "./git-history"
-import { loadGitHistoryEnabled, setGitHistoryEnabled } from "./git-history-setting"
+import { loadGitHistoryEnabled, nestedRepoTopLevel, setGitHistoryEnabled } from "./git-history-setting"
 
 const PROJECT_ID = "project-1"
 const PROJECT_PATH = "/wiki"
@@ -178,5 +178,38 @@ describe("loadGitHistoryEnabled", () => {
     expect(await loadGitHistoryEnabled(PROJECT_ID, makeDeps("off").deps)).toBe(false)
     // Nothing stored yet: the first ingest will ask.
     expect(await loadGitHistoryEnabled(PROJECT_ID, makeDeps("ask").deps)).toBe(false)
+  })
+})
+
+describe("nestedRepoTopLevel", () => {
+  it("gives the top folder of the repository above the project", async () => {
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: false, topLevel: "/big" })
+
+    expect(await nestedRepoTopLevel(PROJECT_PATH)).toBe("/big")
+    expect(gitInfo).toHaveBeenCalledWith(PROJECT_PATH)
+  })
+
+  it("is null when the project is the top of its repository, has none, or git is missing", async () => {
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: true, topLevel: PROJECT_PATH })
+    expect(await nestedRepoTopLevel(PROJECT_PATH)).toBeNull()
+
+    vi.mocked(gitInfo).mockResolvedValue(gitState(true, false, false))
+    expect(await nestedRepoTopLevel(PROJECT_PATH)).toBeNull()
+
+    vi.mocked(gitInfo).mockResolvedValue(gitState(false, false, false))
+    expect(await nestedRepoTopLevel(PROJECT_PATH)).toBeNull()
+
+    // A nested repository that git does not name cannot be shown.
+    vi.mocked(gitInfo).mockResolvedValue({ available: true, isRepo: true, isRoot: false, topLevel: null })
+    expect(await nestedRepoTopLevel(PROJECT_PATH)).toBeNull()
+  })
+
+  it("is null, and logs, when git fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    vi.mocked(gitInfo).mockRejectedValue(new Error("boom"))
+
+    expect(await nestedRepoTopLevel(PROJECT_PATH)).toBeNull()
+    expect(warn).toHaveBeenCalledTimes(1)
+    warn.mockRestore()
   })
 })

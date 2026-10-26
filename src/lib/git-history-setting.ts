@@ -6,6 +6,7 @@
  * history on goes through `resolveGitHistory`, which starts the repository when the project has
  * none, exactly as the first ingest does.
  */
+import { gitInfo } from "@/commands/git"
 import {
   defaultGitHistoryDeps,
   resetGitHistoryCache,
@@ -45,4 +46,20 @@ export async function setGitHistoryEnabled(
   await deps.saveMode(projectId, previous)
   resetGitHistoryCache(projectId)
   return false
+}
+
+/**
+ * The top folder of the git repository that holds the project, when that repository is above the project
+ * (the nested case that the first-ingest question names). Turning the history on records each ingest in that
+ * repository, so the switch shows the path before it is turned on. `null` when the project is the top of its
+ * repository, has none, git is missing, or git fails (the failure is logged).
+ */
+export async function nestedRepoTopLevel(projectPath: string): Promise<string | null> {
+  try {
+    const info = await gitInfo(projectPath)
+    return info.available && info.isRepo && !info.isRoot ? info.topLevel : null
+  } catch (error) {
+    console.warn("[git-history] could not read the repository of the project:", error)
+    return null
+  }
 }

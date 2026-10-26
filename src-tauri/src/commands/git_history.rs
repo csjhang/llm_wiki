@@ -3617,32 +3617,62 @@ mod tests {
         fs::create_dir_all(dir.join("wiki")).unwrap();
     }
 
+    /// Count the ingests of `project` since `since`, with a marker file for `wiki-tool` when there is a `since`.
+    /// The count must be `expected`, a number fixed in the test, so the check holds when node is missing.
+    /// When node runs, the count must also be the `ingestsSince` of the committed bundle.
+    fn assert_ingest_count(name: &str, project: &Path, since: Option<&str>, expected: u32) {
+        match since {
+            Some(sha) => write(
+                project,
+                ".llm-wiki/semantic-lint.json",
+                &format!("{{\"commit\":\"{sha}\",\"at\":\"2026-10-01T00:00:00.000Z\"}}"),
+            ),
+            // A marker of an earlier call must not reach the bundle.
+            None => {
+                let _ = fs::remove_file(project.join(".llm-wiki/semantic-lint.json"));
+            }
+        }
+        let ours = git_count_subjects_inner(&path_str(project), since, "ingest:").unwrap();
+        assert_eq!(ours, expected, "{name}: the fixed count");
+        match wiki_tool_ingests_since(project) {
+            Some(theirs) => {
+                eprintln!("parity {name}: ours={ours} wiki-tool={theirs} expected={expected}");
+                assert_eq!(ours, theirs, "{name}: the number of wiki-tool");
+            }
+            None => eprintln!(
+                "parity {name}: ours={ours} expected={expected} (node is not installed: the bundle was not run)"
+            ),
+        }
+    }
+
     #[test]
     fn count_subjects_gives_the_number_of_wiki_tool_changed_domains() {
-        if Command::new("node").arg("--version").output().is_err() {
-            eprintln!("skipped: node is not installed, so the wiki-tool bundle cannot run");
-            return;
-        }
-        // Each case: the marker to write (if any) as a function of the commit shas, oldest first.
+        // Each case: the marker to write (if any) as a function of the commit shas, oldest first, and the count.
+        // The counts were taken from `wiki-tool lint changed-domains` once. Four commits have an `ingest:` subject:
+        // the ones at 1, 3, 5, and 7.
         type Marker = Box<dyn Fn(&[String]) -> String>;
-        let cases: Vec<(&str, Option<Marker>)> = vec![
-            ("no marker", None),
-            ("full marker", Some(Box::new(|shas| shas[2].clone()))),
+        let cases: Vec<(&str, Option<Marker>, u32)> = vec![
+            ("no marker", None, 4),
+            ("full marker", Some(Box::new(|shas| shas[2].clone())), 3),
             (
                 "short marker",
                 Some(Box::new(|shas| shas[1][..7].to_string())),
+                3,
             ),
             (
                 "upper case marker",
                 Some(Box::new(|shas| shas[1].to_uppercase())),
+                3,
             ),
             (
                 "marker at HEAD",
                 Some(Box::new(|shas| shas[shas.len() - 1].clone())),
+                0,
             ),
             (
                 "marker not in history",
                 Some(Box::new(|_| "deadbeefdeadbeef".to_string())),
+                4,
             ),
         ];
         let subjects = [
@@ -3656,7 +3686,7 @@ mod tests {
             "ingest: fourth (1 pages)",
         ];
 
-        for (name, marker) in cases {
+        for (name, marker, expected) in cases {
             let dir = temp_dir();
             init_repo_with_identity(&dir);
             make_mechanism_wiki(&dir);
@@ -3666,29 +3696,13 @@ mod tests {
                 shas.push(commit_file(&dir, "wiki/a.md", subject));
             }
             let since = marker.map(|pick| pick(&shas));
-            if let Some(sha) = &since {
-                write(
-                    &dir,
-                    ".llm-wiki/semantic-lint.json",
-                    &format!("{{\"commit\":\"{sha}\",\"at\":\"2026-10-01T00:00:00.000Z\"}}"),
-                );
-            }
-
-            let ours =
-                git_count_subjects_inner(&path_str(&dir), since.as_deref(), "ingest:").unwrap();
-            let theirs = wiki_tool_ingests_since(&dir).expect("node ran a moment ago");
-            assert_eq!(ours, theirs, "{name}");
+            assert_ingest_count(name, &dir, since.as_deref(), expected);
         }
     }
 
     #[test]
     fn count_subjects_gives_the_number_of_wiki_tool_for_other_histories() {
-        if Command::new("node").arg("--version").output().is_err() {
-            eprintln!("skipped: node is not installed, so the wiki-tool bundle cannot run");
-            return;
-        }
-
-        // The marker is a commit that is no ancestor of HEAD.
+        // The marker is a commit that is no ancestor of HEAD: every ingest counts.
         let dir = temp_dir();
         init_repo_with_identity(&dir);
         make_mechanism_wiki(&dir);
@@ -3697,26 +3711,13 @@ mod tests {
         let stray = commit_file(&dir, "wiki/a.md", "ingest: second (1 pages)");
         git(&dir, &["reset", "--hard", "-q", "HEAD~1"]);
         commit_file(&dir, "wiki/b.md", "ingest: other (1 pages)");
-        write(
-            &dir,
-            ".llm-wiki/semantic-lint.json",
-            &format!("{{\"commit\":\"{stray}\",\"at\":\"2026-10-01T00:00:00.000Z\"}}"),
-        );
-        assert_eq!(
-            git_count_subjects_inner(&path_str(&dir), Some(&stray), "ingest:").unwrap(),
-            wiki_tool_ingests_since(&dir).unwrap(),
-            "marker is no ancestor of HEAD"
-        );
+        assert_ingest_count("marker is no ancestor of HEAD", &dir, Some(&stray), 2);
 
         // No commit yet.
         let empty = temp_dir();
         init_repo_with_identity(&empty);
         make_mechanism_wiki(&empty);
-        assert_eq!(
-            git_count_subjects_inner(&path_str(&empty), None, "ingest:").unwrap(),
-            wiki_tool_ingests_since(&empty).unwrap(),
-            "no commit"
-        );
+        assert_ingest_count("no commit", &empty, None, 0);
 
         // The wiki is a folder of a bigger repository.
         let root = temp_dir();
@@ -3744,19 +3745,7 @@ mod tests {
             "ingest: another folder again (1 pages)",
         );
         commit_file(&root, "wiki-p/wiki/a.md", "ingest: second (1 pages)");
-        write(
-            &project,
-            ".llm-wiki/semantic-lint.json",
-            &format!("{{\"commit\":\"{marker}\",\"at\":\"2026-10-01T00:00:00.000Z\"}}"),
-        );
-        assert_eq!(
-            git_count_subjects_inner(&path_str(&project), Some(&marker), "ingest:").unwrap(),
-            wiki_tool_ingests_since(&project).unwrap(),
-            "nested project"
-        );
-        assert_eq!(
-            git_count_subjects_inner(&path_str(&project), None, "ingest:").unwrap(),
-            2
-        );
+        assert_ingest_count("nested project, with a marker", &project, Some(&marker), 1);
+        assert_ingest_count("nested project, no marker", &project, None, 2);
     }
 }

@@ -10,7 +10,7 @@ import { useCallback, useEffect, useState } from "react"
 import { GitBranch } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { Label } from "@/components/ui/label"
-import { loadGitHistoryEnabled, setGitHistoryEnabled } from "@/lib/git-history-setting"
+import { loadGitHistoryEnabled, nestedRepoTopLevel, setGitHistoryEnabled } from "@/lib/git-history-setting"
 import { useWikiStore } from "@/stores/wiki-store"
 
 export interface GitHistoryToggleProps {
@@ -21,13 +21,19 @@ export interface GitHistoryToggleProps {
   /** No project is open. */
   disabled: boolean
   error: string | null
+  /** The top folder of a repository above the project. The help text names it until the history is on. */
+  nestedRepo: string | null
   onToggle(next: boolean): void
 }
 
 /** The switch, its label, and its help text. It keeps no state. */
-export function GitHistoryToggle({ enabled, busy, disabled, error, onToggle }: GitHistoryToggleProps) {
+export function GitHistoryToggle({ enabled, busy, disabled, error, nestedRepo, onToggle }: GitHistoryToggleProps) {
   const { t } = useTranslation()
   const on = enabled === true
+  const hint =
+    !on && nestedRepo !== null
+      ? t("settings.sections.maintenance.gitHistory.nestedHint", { path: nestedRepo })
+      : t("settings.sections.maintenance.gitHistory.hint")
   return (
     <div className="space-y-2 rounded-lg border border-border/60 bg-muted/20 p-4">
       <div className="flex items-center justify-between gap-4">
@@ -36,7 +42,7 @@ export function GitHistoryToggle({ enabled, busy, disabled, error, onToggle }: G
             <GitBranch className="h-4 w-4 text-muted-foreground" />
             {t("settings.sections.maintenance.gitHistory.title")}
           </Label>
-          <p className="mt-1 text-xs text-muted-foreground">{t("settings.sections.maintenance.gitHistory.hint")}</p>
+          <p className="mt-1 text-xs text-muted-foreground">{hint}</p>
         </div>
         <button
           id="git-history-enabled"
@@ -70,14 +76,19 @@ export function GitHistorySetting() {
   const [enabled, setEnabled] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [nestedRepo, setNestedRepo] = useState<string | null>(null)
 
   // Another project has its own choice.
   useEffect(() => {
     setEnabled(null)
     setBusy(false)
     setError(null)
-    if (projectId === null) return
+    setNestedRepo(null)
+    if (projectId === null || projectPath === null) return
     let cancelled = false
+    void nestedRepoTopLevel(projectPath).then((topLevel) => {
+      if (!cancelled) setNestedRepo(topLevel)
+    })
     void loadGitHistoryEnabled(projectId)
       .then((on) => {
         if (!cancelled) setEnabled(on)
@@ -89,7 +100,7 @@ export function GitHistorySetting() {
     return () => {
       cancelled = true
     }
-  }, [projectId])
+  }, [projectId, projectPath])
 
   const handleToggle = useCallback(
     async (next: boolean) => {
@@ -117,6 +128,7 @@ export function GitHistorySetting() {
       busy={busy}
       disabled={projectId === null}
       error={error}
+      nestedRepo={nestedRepo}
       onToggle={(next) => void handleToggle(next)}
     />
   )
