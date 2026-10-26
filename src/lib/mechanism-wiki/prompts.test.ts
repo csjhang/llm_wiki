@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest"
 import { MECHANISM_TEMPLATE_FILES } from "@/lib/mechanism-template"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
 import { MECHANISM_SECTIONS } from "@/lib/wiki-config/section-headings"
+import { DEFAULT_LINT_THRESHOLDS } from "@/lib/wiki-config/wiki-identity"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
 import { extractLensPromptText } from "./context"
 import type { LensDoc, MechanismContext } from "./context"
@@ -52,8 +53,8 @@ function templateFile(path: string): string {
   return text
 }
 
-const READING: WikiIdentity = { version: 1, id: "reading", role: "reading", mechanism_library: null }
-const WORK: WikiIdentity = { version: 1, id: "work", role: "work", mechanism_library: "../reading" }
+const READING: WikiIdentity = { version: 1, id: "reading", role: "reading", mechanism_library: null, lint: DEFAULT_LINT_THRESHOLDS }
+const WORK: WikiIdentity = { version: 1, id: "work", role: "work", mechanism_library: "../reading", lint: DEFAULT_LINT_THRESHOLDS }
 
 function makeCtx(overrides: Partial<MechanismContext> = {}): MechanismContext {
   return {

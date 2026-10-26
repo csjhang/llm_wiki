@@ -9,6 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTempProject, fileExists, readFileRaw, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
 import { useReviewStore } from "@/stores/review-store"
 import { useWikiStore } from "@/stores/wiki-store"
+import { DEFAULT_LINT_THRESHOLDS } from "@/lib/wiki-config/wiki-identity"
 import type { MechanismContext } from "./context"
 import { loadMechanismContext } from "./context"
 
@@ -66,7 +67,7 @@ import {
 function fakeContext(domains: Record<string, string>): MechanismContext {
   return {
     projectPath: "/unused",
-    identity: { version: 1, id: "reading", role: "reading", mechanism_library: null },
+    identity: { version: 1, id: "reading", role: "reading", mechanism_library: null, lint: DEFAULT_LINT_THRESHOLDS },
     identityStatus: "ok",
     domains: {
       version: 1,

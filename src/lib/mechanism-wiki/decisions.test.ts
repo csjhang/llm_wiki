@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
+import { DEFAULT_LINT_THRESHOLDS } from "@/lib/wiki-config/wiki-identity"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
 import type { LensDoc, MechanismContext } from "./context"
 import { parseAnalysisDecisions } from "./decisions"
@@ -20,7 +21,7 @@ const DOMAINS: DomainsConfig = {
   },
 }
 
-const READING: WikiIdentity = { version: 1, id: "reading", role: "reading", mechanism_library: null }
+const READING: WikiIdentity = { version: 1, id: "reading", role: "reading", mechanism_library: null, lint: DEFAULT_LINT_THRESHOLDS }
 
 function lensDoc(id: string): LensDoc {
   return { id, text: `# ${id}`, promptText: `# ${id}` }

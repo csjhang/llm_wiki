@@ -12,7 +12,7 @@ import { isAbsolutePath, normalizePath } from "@/lib/path-utils"
 import { domainParent, KNOWN_LENSES, parseDomainsYaml } from "@/lib/wiki-config/domains"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
 import type { ConfigIssue } from "@/lib/wiki-config/types"
-import { parseWikiYaml } from "@/lib/wiki-config/wiki-identity"
+import { DEFAULT_LINT_THRESHOLDS, parseWikiYaml } from "@/lib/wiki-config/wiki-identity"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
 import { hasOwn } from "@/lib/wiki-config/yaml-util"
 import type { FileNode } from "@/types/wiki"
@@ -238,7 +238,7 @@ async function readAll(
 // --- config ------------------------------------------------------------
 
 function defaultIdentity(): WikiIdentity {
-  return { version: 1, id: "reading", role: "reading", mechanism_library: null }
+  return { version: 1, id: "reading", role: "reading", mechanism_library: null, lint: { ...DEFAULT_LINT_THRESHOLDS } }
 }
 
 function fileIssue(file: string, issue: ConfigIssue): ConfigIssue {

@@ -1,5 +1,5 @@
 import type { ConfigIssue, ParseResult } from "./types"
-import { checkVersion, loadYamlMapping, reportUnknownKeys } from "./yaml-util"
+import { checkVersion, childPath, hasOwn, isRecord, loadYamlMapping, reportUnknownKeys } from "./yaml-util"
 
 /**
  * `wiki.yaml` says what a wiki is. It is wiki-level config, not Heptabase config,
@@ -9,17 +9,43 @@ import { checkVersion, loadYamlMapping, reportUnknownKeys } from "./yaml-util"
 export const WIKI_ROLES = ["reading", "work"] as const
 export type WikiRole = (typeof WIKI_ROLES)[number]
 
+/**
+ * The thresholds of the lint checks. They live under `lint:` in `wiki.yaml`. Every key is
+ * optional and takes its default. Each value is a positive integer.
+ */
+export interface LintThresholds {
+  /** A draft hypothesis page that was not updated for more days than this is stale. */
+  draft_days: number
+  /** A domain with more pages than this is too large. */
+  max_domain_pages: number
+  /** A domain with fewer pages than this is too small. */
+  min_domain_pages: number
+  /** The semantic lint reminder starts after this many ingests since the last semantic lint. */
+  semantic_reminder_ingests: number
+}
+
+export const DEFAULT_LINT_THRESHOLDS: Readonly<LintThresholds> = {
+  draft_days: 30,
+  max_domain_pages: 200,
+  min_domain_pages: 3,
+  semantic_reminder_ingests: 10,
+}
+
+const LINT_KEYS = Object.keys(DEFAULT_LINT_THRESHOLDS) as (keyof LintThresholds)[]
+
 export interface WikiIdentity {
   version: 1
   id: string
   role: WikiRole
   /** Path to the reading wiki. Null in a reading wiki. Required in a work wiki. */
   mechanism_library: string | null
+  /** The lint thresholds with the defaults filled in. */
+  lint: LintThresholds
 }
 
 const WIKI_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
-const TOP_LEVEL_KEYS = ["version", "id", "role", "mechanism_library"] as const
+const TOP_LEVEL_KEYS = ["version", "id", "role", "mechanism_library", "lint"] as const
 
 /**
  * Parse and validate the text of `wiki.yaml`. Collects every issue before
@@ -36,11 +62,12 @@ export function parseWikiYaml(text: string): ParseResult<WikiIdentity> {
   const id = parseId(root.id, issues)
   const role = parseRole(root.role, issues)
   const mechanismLibrary = parseMechanismLibrary(root.mechanism_library, role, issues)
+  const lint = parseLint(root.lint, issues)
 
   if (issues.length > 0 || role === null) return { ok: false, issues }
   return {
     ok: true,
-    value: { version: 1, id, role, mechanism_library: mechanismLibrary },
+    value: { version: 1, id, role, mechanism_library: mechanismLibrary, lint },
     issues: [],
   }
 }
@@ -90,4 +117,29 @@ function parseMechanismLibrary(
     return null
   }
   return isPath ? raw : null
+}
+
+/**
+ * The `lint:` block. A missing block, or `lint:` with no value, gives the defaults.
+ * A missing key takes its default. A value that is not a positive integer is an issue
+ * that names the key.
+ */
+function parseLint(raw: unknown, issues: ConfigIssue[]): LintThresholds {
+  const lint: LintThresholds = { ...DEFAULT_LINT_THRESHOLDS }
+  if (raw === undefined || raw === null) return lint
+  if (!isRecord(raw)) {
+    issues.push({ path: "lint", message: `must be a mapping with the optional keys ${LINT_KEYS.join(", ")}` })
+    return lint
+  }
+  reportUnknownKeys(raw, LINT_KEYS, "lint", issues)
+  for (const key of LINT_KEYS) {
+    if (!hasOwn(raw, key)) continue
+    const value = raw[key]
+    if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) {
+      lint[key] = value
+    } else {
+      issues.push({ path: childPath("lint", key), message: "must be a positive integer" })
+    }
+  }
+  return lint
 }

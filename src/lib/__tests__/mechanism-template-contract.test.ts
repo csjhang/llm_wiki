@@ -13,7 +13,7 @@ import { describe, expect, it } from "vitest"
 import { findLongSentences } from "@/test-helpers/ste-check"
 import { KNOWN_LENSES, parseDomainsYaml } from "@/lib/wiki-config/domains"
 import { parseHeptabaseYaml } from "@/lib/wiki-config/heptabase-config"
-import { parseWikiYaml } from "@/lib/wiki-config/wiki-identity"
+import { DEFAULT_LINT_THRESHOLDS, parseWikiYaml } from "@/lib/wiki-config/wiki-identity"
 import {
   HYPOTHESIS_SECTIONS,
   MECHANISM_SECTIONS,
@@ -365,7 +365,7 @@ describe("mechanism template: config files", () => {
     expect(result.ok).toBe(true)
     if (!result.ok) return
     // The template is a reading wiki. A work wiki sets role: work and a library path.
-    expect(result.value).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null })
+    expect(result.value).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null, lint: DEFAULT_LINT_THRESHOLDS })
   })
 
   it("heptabase example holds Heptabase settings only: wiki identity lives in wiki.yaml", () => {

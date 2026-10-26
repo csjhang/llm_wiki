@@ -3311,12 +3311,20 @@ function stringifyScalar(v) {
 * The Heptabase `wiki` property value comes from `id`.
 */
 const WIKI_ROLES = ["reading", "work"];
+const DEFAULT_LINT_THRESHOLDS = {
+	draft_days: 30,
+	max_domain_pages: 200,
+	min_domain_pages: 3,
+	semantic_reminder_ingests: 10
+};
+const LINT_KEYS = Object.keys(DEFAULT_LINT_THRESHOLDS);
 const WIKI_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const TOP_LEVEL_KEYS$1 = [
 	"version",
 	"id",
 	"role",
-	"mechanism_library"
+	"mechanism_library",
+	"lint"
 ];
 /**
 * Parse and validate the text of `wiki.yaml`. Collects every issue before
@@ -3335,6 +3343,7 @@ function parseWikiYaml(text) {
 	const id = parseId(root.id, issues);
 	const role = parseRole(root.role, issues);
 	const mechanismLibrary = parseMechanismLibrary(root.mechanism_library, role, issues);
+	const lint = parseLint(root.lint, issues);
 	if (issues.length > 0 || role === null) return {
 		ok: false,
 		issues
@@ -3345,7 +3354,8 @@ function parseWikiYaml(text) {
 			version: 1,
 			id,
 			role,
-			mechanism_library: mechanismLibrary
+			mechanism_library: mechanismLibrary,
+			lint
 		},
 		issues: []
 	};
@@ -3397,6 +3407,33 @@ function parseMechanismLibrary(raw, role, issues) {
 		return null;
 	}
 	return isPath ? raw : null;
+}
+/**
+* The `lint:` block. A missing block, or `lint:` with no value, gives the defaults.
+* A missing key takes its default. A value that is not a positive integer is an issue
+* that names the key.
+*/
+function parseLint(raw, issues) {
+	const lint = { ...DEFAULT_LINT_THRESHOLDS };
+	if (raw === void 0 || raw === null) return lint;
+	if (!isRecord(raw)) {
+		issues.push({
+			path: "lint",
+			message: `must be a mapping with the optional keys ${LINT_KEYS.join(", ")}`
+		});
+		return lint;
+	}
+	reportUnknownKeys(raw, LINT_KEYS, "lint", issues);
+	for (const key of LINT_KEYS) {
+		if (!hasOwn(raw, key)) continue;
+		const value = raw[key];
+		if (typeof value === "number" && Number.isSafeInteger(value) && value > 0) lint[key] = value;
+		else issues.push({
+			path: childPath("lint", key),
+			message: "must be a positive integer"
+		});
+	}
+	return lint;
 }
 
 //#endregion

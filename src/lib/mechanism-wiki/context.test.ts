@@ -3,6 +3,7 @@ import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest"
 import type { FileNode } from "@/types/wiki"
+import { DEFAULT_LINT_THRESHOLDS } from "@/lib/wiki-config/wiki-identity"
 import { materializeSampleWiki } from "@/test-helpers/sample-wiki"
 
 /** In-memory project tree. Keys are absolute paths with "/" separators. */
@@ -109,7 +110,7 @@ describe("loadMechanismContext", () => {
 
     expect(ctx.configIssues).toEqual([])
     expect(ctx.projectPath).toBe(PROJECT)
-    expect(ctx.identity).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null })
+    expect(ctx.identity).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null, lint: DEFAULT_LINT_THRESHOLDS })
     expect(ctx.identityStatus).toBe("ok")
     expect(ctx.mechanismLibraryPath).toBe(PROJECT)
     expect(Object.keys(ctx.domains.domains).sort()).toEqual([
@@ -233,7 +234,7 @@ describe("loadMechanismContext", () => {
 
     const ctx = await loadMechanismContext(PROJECT)
 
-    expect(ctx!.identity).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null })
+    expect(ctx!.identity).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null, lint: DEFAULT_LINT_THRESHOLDS })
     expect(ctx!.identityStatus).toBe("missing")
     expect(ctx!.mechanismLibraryPath).toBe(PROJECT)
     expect(ctx!.configIssues).toHaveLength(1)
@@ -246,7 +247,7 @@ describe("loadMechanismContext", () => {
 
     const ctx = await loadMechanismContext(PROJECT)
 
-    expect(ctx!.identity).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null })
+    expect(ctx!.identity).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null, lint: DEFAULT_LINT_THRESHOLDS })
     expect(ctx!.identityStatus).toBe("invalid")
     expect(ctx!.configIssues).toEqual([{ path: "wiki.yaml", message: "could not read the file" }])
     expect(canWriteMechanismPages(ctx!)).toBe(false)
@@ -257,7 +258,7 @@ describe("loadMechanismContext", () => {
 
     const ctx = await loadMechanismContext(PROJECT)
 
-    expect(ctx!.identity).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null })
+    expect(ctx!.identity).toEqual({ version: 1, id: "reading", role: "reading", mechanism_library: null, lint: DEFAULT_LINT_THRESHOLDS })
     expect(ctx!.identityStatus).toBe("invalid")
     expect(ctx!.configIssues.length).toBeGreaterThanOrEqual(2)
     for (const issue of ctx!.configIssues) expect(issue.path.startsWith("wiki.yaml")).toBe(true)

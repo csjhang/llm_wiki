@@ -33,6 +33,7 @@ describe("parseWikiYaml", () => {
       id: "reading",
       role: "reading",
       mechanism_library: null,
+      lint: { draft_days: 30, max_domain_pages: 200, min_domain_pages: 3, semantic_reminder_ingests: 10 },
     })
   })
 
@@ -42,6 +43,7 @@ describe("parseWikiYaml", () => {
       id: "reading",
       role: "reading",
       mechanism_library: null,
+      lint: { draft_days: 30, max_domain_pages: 200, min_domain_pages: 3, semantic_reminder_ingests: 10 },
     })
   })
 
@@ -52,6 +54,7 @@ describe("parseWikiYaml", () => {
       id: "work",
       role: "work",
       mechanism_library: "../reading-wiki",
+      lint: { draft_days: 30, max_domain_pages: 200, min_domain_pages: 3, semantic_reminder_ingests: 10 },
     })
   })
 
@@ -109,8 +112,8 @@ describe("parseWikiYaml", () => {
   })
 
   it("reports every problem together", () => {
-    const text = 'version: 3\nid: "Bad Id"\nrole: other\nmechanism_library: 7\nlint: {}\n'
-    expect(pathsOf(parseWikiYaml(text))).toEqual(["version", "lint", "id", "role", "mechanism_library"])
+    const text = 'version: 3\nid: "Bad Id"\nrole: other\nmechanism_library: 7\nextra: {}\nlint:\n  draft_days: 0\n'
+    expect(pathsOf(parseWikiYaml(text))).toEqual(["version", "extra", "id", "role", "mechanism_library", "lint.draft_days"])
   })
 
   it("reports duplicate keys", () => {
@@ -126,5 +129,65 @@ describe("parseWikiYaml", () => {
     for (const text of ["id: [unclosed\n", "", "- a\n"]) {
       expect(pathsOf(parseWikiYaml(text)), JSON.stringify(text)).toEqual([""])
     }
+  })
+
+  describe("lint thresholds", () => {
+    const DEFAULTS = { draft_days: 30, max_domain_pages: 200, min_domain_pages: 3, semantic_reminder_ingests: 10 }
+
+    it("gives the defaults when there is no lint block", () => {
+      expect(valueOf(parseWikiYaml(build())).lint).toEqual(DEFAULTS)
+    })
+
+    it("gives the defaults for an empty lint block", () => {
+      expect(valueOf(parseWikiYaml(build() + "lint:\n")).lint).toEqual(DEFAULTS)
+      expect(valueOf(parseWikiYaml(build() + "lint: {}\n")).lint).toEqual(DEFAULTS)
+    })
+
+    it("reads the keys that the file sets and defaults the others", () => {
+      const text = build() + "lint:\n  draft_days: 14\n  min_domain_pages: 5\n"
+      expect(valueOf(parseWikiYaml(text)).lint).toEqual({ ...DEFAULTS, draft_days: 14, min_domain_pages: 5 })
+    })
+
+    it("reads all four keys", () => {
+      const text =
+        build() + "lint:\n  draft_days: 7\n  max_domain_pages: 50\n  min_domain_pages: 1\n  semantic_reminder_ingests: 4\n"
+      expect(valueOf(parseWikiYaml(text)).lint).toEqual({
+        draft_days: 7,
+        max_domain_pages: 50,
+        min_domain_pages: 1,
+        semantic_reminder_ingests: 4,
+      })
+    })
+
+    it("names the key of a value that is not a positive integer", () => {
+      for (const key of ["draft_days", "max_domain_pages", "min_domain_pages", "semantic_reminder_ingests"]) {
+        for (const value of ["0", "-3", "1.5", '"10"', "null", "[10]", ".inf", "true"]) {
+          const result = parseWikiYaml(build() + `lint:\n  ${key}: ${value}\n`)
+          expect(pathsOf(result), `${key}: ${value}`).toEqual([`lint.${key}`])
+          if (result.ok) throw new Error("expected issues")
+          expect(result.issues[0].message).toContain("positive integer")
+        }
+      }
+    })
+
+    it("reports every bad key together", () => {
+      const text = build() + "lint:\n  draft_days: 0\n  max_domain_pages: x\n"
+      expect(pathsOf(parseWikiYaml(text))).toEqual(["lint.draft_days", "lint.max_domain_pages"])
+    })
+
+    it("rejects an unknown key inside lint", () => {
+      expect(pathsOf(parseWikiYaml(build() + "lint:\n  draft_day: 3\n"))).toEqual(["lint.draft_day"])
+    })
+
+    it("rejects a lint block that is not a mapping", () => {
+      for (const value of ["3", "[a]", '"text"']) {
+        expect(pathsOf(parseWikiYaml(build() + `lint: ${value}\n`)), value).toEqual(["lint"])
+      }
+    })
+
+    it("accepts a lint block in a work wiki", () => {
+      const text = build({ id: "work", role: "work", library: "../reading" }) + "lint:\n  draft_days: 60\n"
+      expect(valueOf(parseWikiYaml(text)).lint.draft_days).toBe(60)
+    })
   })
 })

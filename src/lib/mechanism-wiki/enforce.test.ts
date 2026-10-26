@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
+import { DEFAULT_LINT_THRESHOLDS } from "@/lib/wiki-config/wiki-identity"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
 import { parseFileBlocks } from "@/lib/ingest"
 import type { LensDoc, MechanismContext } from "./context"
@@ -23,8 +24,8 @@ const DOMAINS: DomainsConfig = {
   },
 }
 
-const READING: WikiIdentity = { version: 1, id: "reading", role: "reading", mechanism_library: null }
-const WORK: WikiIdentity = { version: 1, id: "work", role: "work", mechanism_library: "../reading" }
+const READING: WikiIdentity = { version: 1, id: "reading", role: "reading", mechanism_library: null, lint: DEFAULT_LINT_THRESHOLDS }
+const WORK: WikiIdentity = { version: 1, id: "work", role: "work", mechanism_library: "../reading", lint: DEFAULT_LINT_THRESHOLDS }
 
 function lensDoc(id: string): LensDoc {
   return { id, text: `# ${id}`, promptText: `# ${id}` }
