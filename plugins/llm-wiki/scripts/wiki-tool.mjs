@@ -4049,7 +4049,9 @@ function cardHash(body, properties) {
 * to a card names the time the card had when it was planned (`cardUpdatedAt`): the skill checks the card again right
 * before it writes. Two safety rules keep a
 * read error from looking like a deleted wiki: an unreadable `wiki/` folder stops the command, and a
-* plan that would retire most of the cards retires none.
+* plan that would retire most of the cards retires none. The user can confirm such a plan: with `--allow-mass-retire`
+* the retires are planned and `notes` names their count instead of a problem. `notes` is in the output only when it
+* has an entry. The skill passes the flag only after the user said yes (ruling U6).
 */
 const OPTION_SPEC$5 = {
 	values: [
@@ -4057,7 +4059,8 @@ const OPTION_SPEC$5 = {
 		"database",
 		"now"
 	],
-	lists: ["mirror-cards"]
+	lists: ["mirror-cards"],
+	flags: ["allow-mass-retire"]
 };
 const NEEDS_MIRROR_LIST = "pass every page of list_cards for the mirror tag with --mirror-cards";
 /**
@@ -4136,14 +4139,16 @@ function planDown(args) {
 		options,
 		properties: config.heptabase.properties,
 		wikiId: config.wiki.id,
-		syncedOn: { start: `${now.toISOString().slice(0, 10)}T00:00:00.000Z` }
+		syncedOn: { start: `${now.toISOString().slice(0, 10)}T00:00:00.000Z` },
+		allowMassRetire: parsed.flags["allow-mass-retire"]
 	});
 	writeOutbox(project, plan.actions);
 	return {
 		ok: true,
 		pass: plan.pass,
 		actions: plan.actions,
-		problems: plan.problems
+		problems: plan.problems,
+		...plan.notes.length > 0 ? { notes: plan.notes } : {}
 	};
 }
 /** The text a `create`, `update`, `relink`, or `retire` action sends to its card. A retire sends the title as a heading too. */
@@ -4225,31 +4230,41 @@ function planPages(input) {
 		else if (plan.main) actions.push(plan.main);
 		if (plan.place) actions.push(plan.place);
 	}
-	const refusal = refuseMassRetire(input, actions);
-	if (refusal) problems.push({
-		page: "wiki/",
-		problem: refusal
-	});
+	const notes = [];
+	const mass = massRetire(input, actions);
+	if (mass !== null) if (input.allowMassRetire) notes.push(`retiring ${mass.retires} of ${mass.active} mirror cards, as --allow-mass-retire says`);
+	else {
+		dropRetires(actions);
+		problems.push({
+			page: "wiki/",
+			problem: `refusing to retire ${mass.retires} of ${mass.active} mirror cards; check the wiki folder`
+		});
+	}
 	const pending = actions.some((action) => action.op === "create" || action.op === "update" || action.op === "retire");
 	if (!pending) actions.push(...relinks);
 	actions.sort((a, b) => compareText$1(a.page, b.page) || OP_ORDER.indexOf(a.op) - OP_ORDER.indexOf(b.op));
 	return {
 		pass: !pending && relinks.length > 0 ? 2 : 1,
 		actions,
-		problems
+		problems,
+		notes
 	};
 }
 /**
-* A wiki folder that cannot be read right is the likely cause of many pages that seem deleted. When the plan
-* would retire at least 5 cards and more than half of the active ones, it retires none of them and says so.
-* Returns the problem, or null when the plan is fine.
+* A wiki folder that cannot be read right is the likely cause of many pages that seem deleted. A plan that would retire at
+* least 5 cards and more than half of the active ones is a mass retire: the counts, or null when the plan is fine.
 */
-function refuseMassRetire(input, actions) {
+function massRetire(input, actions) {
 	const retires = actions.filter((action) => action.op === "retire").length;
 	const active = Object.values(input.map.pages).filter((entry) => entry.status === "active").length;
-	if (retires < MASS_RETIRE_MINIMUM || retires * 2 <= active) return null;
+	return retires < MASS_RETIRE_MINIMUM || retires * 2 <= active ? null : {
+		retires,
+		active
+	};
+}
+/** Remove every retire from the planned actions. */
+function dropRetires(actions) {
 	for (let index = actions.length - 1; index >= 0; index -= 1) if (actions[index].op === "retire") actions.splice(index, 1);
-	return `refusing to retire ${retires} of ${active} mirror cards; check the wiki folder`;
 }
 /** A mapped page whose file is not there (or is not a wiki page any more). */
 function planGone(input, path, entry) {

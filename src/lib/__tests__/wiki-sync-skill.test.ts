@@ -137,6 +137,20 @@ describe("wiki-sync skill", () => {
     expect(skill).toMatch(/maps wiki pages to Heptabase cards/)
   })
 
+  it("plans a mass retire again with --allow-mass-retire only after the user says yes", () => {
+    const down = skill.slice(skill.indexOf("## Down (wiki to Heptabase)"), skill.indexOf("### Record events"))
+    const step = down.slice(down.indexOf("\n8. "), down.indexOf("\n9. "))
+    expect(step).toContain("`refusing to retire`")
+    expect(step).toContain("--allow-mass-retire")
+    expect(step).toMatch(/Show the user the count/)
+    expect(step).toMatch(/Ask the user/)
+    expect(step).toMatch(/Only after a yes/)
+    expect(step).toContain("Do not retire a card by hand.")
+    // The first plan never carries the flag.
+    expect(down.slice(down.indexOf("4. Run the plan:"), down.indexOf("\n5. "))).not.toContain("--allow-mass-retire")
+    expect(down).toMatch(/`notes`/)
+  })
+
   it("keeps sentences short", () => {
     expect(findLongSentences("SKILL.md", skill)).toEqual([])
     expect(findLongSentences("mcp-steps.md", steps)).toEqual([])

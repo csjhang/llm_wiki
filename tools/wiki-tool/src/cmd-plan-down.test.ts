@@ -29,6 +29,7 @@ interface PlanOutput {
   pass: 1 | 2
   actions: DownAction[]
   problems: unknown[]
+  notes?: string[]
 }
 
 /** Run plan-down with exactly the given options. */
@@ -1405,6 +1406,43 @@ describe("hepta plan-down", () => {
       expect(result.output.problems).toEqual([
         { page: "wiki/", problem: "refusing to retire 6 of 10 mirror cards; check the wiki folder" },
       ])
+    })
+
+    it("still refuses without --allow-mass-retire, and says nothing about notes", async () => {
+      const project = await projectWithPages(10, 6)
+      const result = await plan(project, [])
+      expect(result.output.actions.filter((action) => action.op === "retire")).toEqual([])
+      expect(result.output.problems).toHaveLength(1)
+      expect("notes" in result.output).toBe(false)
+    })
+
+    it("plans the retires with --allow-mass-retire and names the count in a note", async () => {
+      const project = await projectWithPages(10, 6)
+      const result = await plan(project, ["--allow-mass-retire"])
+      expect(result.exitCode).toBe(0)
+      expect(result.output.actions.filter((action) => action.op === "retire").map((action) => action.page)).toEqual(PAGES.slice(0, 6))
+      expect(result.output.problems).toEqual([])
+      expect(result.output.notes).toEqual(["retiring 6 of 10 mirror cards, as --allow-mass-retire says"])
+      // The text of each retire is written, as for any other retire.
+      expect(existsSync(join(project, `.llm-wiki/hepta/outbox/${contentHash(PAGES[0])}.md`))).toBe(true)
+    })
+
+    it("adds no note with --allow-mass-retire when the rule does not apply", async () => {
+      const half = await plan(await projectWithPages(10, 5), ["--allow-mass-retire"])
+      expect(half.output.actions.filter((action) => action.op === "retire")).toHaveLength(5)
+      expect(half.output.problems).toEqual([])
+      expect("notes" in half.output).toBe(false)
+
+      const few = await plan(await projectWithPages(4, 4), ["--allow-mass-retire"])
+      expect(few.output.actions.filter((action) => action.op === "retire")).toHaveLength(4)
+      expect("notes" in few.output).toBe(false)
+    })
+
+    it("takes the flag with no value", async () => {
+      const project = await projectWithPages(10, 6)
+      const result = await plan(project, ["--allow-mass-retire=yes"])
+      expect(result.exitCode).toBe(2)
+      expect(result.output).toEqual({ ok: false, problems: ["option takes no value: --allow-mass-retire"] })
     })
 
     it("retires exactly half of the cards, and fewer than five", async () => {
