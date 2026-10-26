@@ -12,17 +12,21 @@ import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { CONFIG_INVALID_CHECK } from "@/lib/mechanism-wiki/lint-structure"
 import { isAllowedApiReviewAction } from "@/lib/review-option-actions"
+import { LLM_RESOLVED_ACTION, RULE_RESOLVED_ACTION } from "@/lib/review-utils"
+import { MECHANISM_SECTIONS } from "@/lib/wiki-config/section-headings"
 import { DEFAULT_LINT_THRESHOLDS } from "@/lib/wiki-config/wiki-identity"
 import { apiReviewTypes, fillPlaceholders, jsonBlocks, OPTION_PROBLEM, readRepoFile, wikiToolCommands } from "@/test-helpers/skill-contract"
 import { findLongSentences } from "@/test-helpers/ste-check"
 import { runCli } from "../../../tools/wiki-tool/src/cli"
 import { LINT_GROUP } from "../../../tools/wiki-tool/src/lint"
+import { DEFAULT_MAX_CHARS } from "../../../tools/wiki-tool/src/lint/batch"
 import {
   BUSINESS,
   commit,
   conceptPage,
   hypothesisPage,
   HARDWARE,
+  head,
   makeRepo,
   mechanismPage,
   PHYSICS,
@@ -74,7 +78,7 @@ describe("wiki-lint skill: the command lines", () => {
   it("gives each command only options that it takes", async () => {
     const { project } = markedProject()
     for (const command of commands) {
-      const args = command.args.map((word) => fillPlaceholders(word, { "<project>": project, "<domain>": HARDWARE }))
+      const args = command.args.map((word) => fillPlaceholders(word, { "<project>": project, "<domain>": HARDWARE, "<noted commit>": head(project) }))
       const result = await runCli([command.group, command.command, ...args])
       expect(JSON.stringify(result.output), command.line).not.toMatch(OPTION_PROBLEM)
     }
@@ -85,7 +89,9 @@ describe("wiki-lint skill: the command lines", () => {
     const { project } = markedProject()
     const result = await runLint("batch", project, "--domain", HARDWARE, "--max-chars", "60000")
     expect(result.exitCode).toBe(0)
-    expect(skill).toContain("It stays under 60000 characters.")
+    // The skill names the default of the tool, not a number of its own.
+    expect(skill).toContain(`It holds at most ${DEFAULT_MAX_CHARS} characters.`)
+    expect(DEFAULT_MAX_CHARS).toBe(60_000)
   })
 
   it("calls no other group of wiki-tool and no Heptabase tool", () => {
@@ -117,6 +123,7 @@ describe("wiki-lint skill: the output keys that it names", () => {
     expect(structure.exitCode).toBe(0)
     expect(structure.output.findings.map((finding) => finding.check)).toContain("config-invalid")
     expect(CONFIG_INVALID_CHECK).toBe("config-invalid")
+    expect(structure.output.findings.map((finding) => finding.check)).toContain(CONFIG_INVALID_CHECK)
     named(CONFIG_INVALID_CHECK)
     expect((await runLint("changed-domains", project)).exitCode).toBe(2)
     expect((await runLint("batch", project, "--domain", HARDWARE)).exitCode).toBe(2)
@@ -196,6 +203,23 @@ describe("wiki-lint skill: the output keys that it names", () => {
     expect(marked.output.since).toBe(result.output.commit)
   })
 
+  // Final review, M5.
+  it("mark --commit marks the commit that the skill noted, also after a commit came in during the lint", async () => {
+    const { project } = markedProject()
+    const noted = head(project)
+    const arrived = commit(project, "ingest: third (1 pages)", { "wiki/concepts/c.md": conceptPage(PHYSICS) })
+    const result = await runLint<{ commit: string }>("mark", project, "--commit", noted)
+    expect(result.exitCode).toBe(0)
+    expect(result.output.commit).toBe(noted)
+    // The pages of the commit that came in are changes at the next lint.
+    const next = await runLint<{ since: string; domains: string[] }>("changed-domains", project)
+    expect(next.output.since).toBe(noted)
+    expect(next.output.domains).toEqual([PHYSICS])
+    expect(head(project)).toBe(arrived)
+    expect(skill).toContain("With `--commit <sha>`, it marks that commit.")
+    expect(skill).toContain("The commit must be `HEAD` or one of its ancestors. If it is not, `mark` exits with 2 and writes nothing.")
+  })
+
   it("the reminder uses the key and the default that wiki.yaml has", () => {
     expect(DEFAULT_LINT_THRESHOLDS.semantic_reminder_ingests).toBe(10)
     expect(skill).toContain("`lint.semantic_reminder_ingests`")
@@ -220,7 +244,7 @@ describe("wiki-lint skill: the order of the steps (ruling U11)", () => {
     expect(section("### Step 1")).toContain("Run `lint structure`.")
     expect(section("### Step 2")).toContain("Run `lint changed-domains`.")
     expect(section("### Step 3")).toContain("Run `lint batch` for the domain.")
-    expect(section("### Step 5")).toContain("Run `lint mark` only as Rule 8 and Rule 9 allow.")
+    expect(section("### Step 5")).toContain("Run `lint mark --commit \"<noted commit>\"` only as Rule 8 allows.")
     expect(skill.indexOf("## Filing a finding")).toBeLessThan(skill.indexOf("## Steps"))
     // Only Step 5 runs the command.
     expect(section("### Step 1")).not.toContain("lint mark")
@@ -228,22 +252,44 @@ describe("wiki-lint skill: the order of the steps (ruling U11)", () => {
     expect(section("### Step 4")).not.toContain("lint mark")
   })
 
-  it("marks only when every finding was filed, and prints the findings otherwise", () => {
+  it("states the rule of the marker once, in Rule 8, and points to it", () => {
     const rules = section("## Rules")
     const rule = rules.split("\n").find((line) => line.startsWith("8. ")) ?? ""
-    expect(rule).toContain("Run `lint mark` only when every finding was filed, or when there was none.")
-    expect(rule).toContain("If the app does not run, or a call fails, print the findings.")
-    expect(rule).toContain("Do not run `lint mark`.")
+    expect(rule).toContain("Run `lint mark` only when the lint reached Step 5, the app ran, and every finding was filed.")
+    expect(rule).toContain("An item that exists already counts as filed.")
+    // Zero findings: nothing is left to file with the app up; with the app down no marker is written, also for zero findings.
+    expect(rule).toContain("With no finding, nothing is left to file, so `lint mark` runs.")
+    expect(rule).toContain("If the app does not run, run no `lint mark`, also when there is no finding.")
+    expect(rule).toContain("print every finding that was not filed")
+    expect(rule).toContain("Exit code 2 is one cause of a stop.")
     expect(rule).toContain("Tell the user to run the skill again with the app open.")
-    const head = rules.split("\n").find((line) => line.startsWith("9. ")) ?? ""
-    expect(head).toContain("Run `lint mark` only when `HEAD` is still the commit that you noted in Step 2.")
-    expect(section("### Step 2")).toContain("Run `git -C \"<project>\" rev-parse HEAD`. Note the commit.")
-    expect(section("### Step 5")).toContain("Print each finding that was not filed.")
+    // The other places point to Rule 8 and do not state the rule again.
+    for (const text of [section("## Command lines"), section("### Step 1"), section("### Step 2"), section("## Requirements")]) {
+      expect(text).toContain("Rule 8")
+    }
+    expect(section("## Command lines")).toContain("Then stop the lint as Rule 8 says.")
+    expect(skill.match(/A marker after findings that were not filed/g)).toHaveLength(1)
+    expect(skill.match(/Do not run `lint mark`/g)).toBeNull()
   })
 
-  it("makes no more llm_wiki calls after one fails, and keeps the findings for the report", () => {
+  it("marks the commit that was noted in Step 2, not a newer HEAD (Rule 9)", () => {
+    const rules = section("## Rules")
+    const rule = rules.split("\n").find((line) => line.startsWith("9. ")) ?? ""
+    expect(rule).toContain("Mark the commit that you noted in Step 2, with `--commit`. Never mark a newer `HEAD`.")
+    expect(rule).toContain("The next lint reads its changes.")
+    expect(section("### Step 2")).toContain("Run `git -C \"<project>\" rev-parse HEAD`. Note the commit as the noted commit.")
+    const step5 = section("### Step 5")
+    expect(step5).toContain("Print each finding that was not filed.")
+    expect(step5).toContain("If `lint mark` exits with 2, show the problems. Say that no marker was written.")
+    // The old stop for a moved HEAD is gone: Step 5 does not read HEAD again.
+    expect(step5).not.toContain("rev-parse")
+    expect(skill).not.toContain("HEAD moved")
+  })
+
+  it("makes no more llm_wiki calls after one fails, shows the text of the call, and keeps the findings for the report", () => {
     const filing = section("## Filing a finding")
     expect(filing).toContain("If `llm_wiki_status` fails, or any `llm_wiki_*` call fails, make no more `llm_wiki_*` calls.")
+    expect(filing).toContain("Show the text of the failed call to the user.")
     expect(filing).toContain("Keep every finding that is not filed in a list")
     expect(section("## Report")).toContain("The findings that were not filed, in full")
   })
@@ -332,13 +378,36 @@ describe("wiki-lint skill: calls to the llm_wiki MCP and the review items", () =
     const filing = section("## Filing a finding")
     expect(filing).toContain("The prefix ends in a space. Keep the space.")
     expect(filing).toContain("For layer 3, the prefix is `Lint (mechanisms): `.")
-    expect(filing).toContain("Skip a finding when an item states it already.")
+    expect(filing).toContain("Skip a finding when an item states it already")
     expect(skill).toContain("Never list the items and search the list for one item.")
     expect(filing.indexOf("title_prefix")).toBeLessThan(filing.indexOf("If `llm_wiki_status` fails"))
   })
 
-  it("writes the items in the output language of the wiki", () => {
-    expect(section("## Rules")).toContain("in the output language of the wiki. Read it from the line `Output language:` in `purpose.md`.")
+  it("writes the items in the output language of the wiki, and in English when the wiki gives none, without a question", () => {
+    const rule = section("## Rules").split("\n").find((line) => line.startsWith("7. ")) ?? ""
+    expect(rule).toContain("in the output language of the wiki. Read it from the line `Output language:` in `purpose.md`.")
+    expect(rule).toContain("If the line is missing or empty, write in English. Do not ask.")
+  })
+
+  it("names LLM_WIKI_API_TOKEN, which llm_wiki_add_review always needs", () => {
+    expect(section("## Requirements")).toContain("`LLM_WIKI_API_TOKEN` in the environment of the `llm_wiki` MCP.")
+    expect(section("## Requirements")).toContain("Adding a review item always needs it.")
+    // The MCP tool says the same, so the skill and the tool agree on the name.
+    expect(readRepoFile("mcp-server/src/review-tools.ts")).toContain("Adding a review item needs LLM_WIKI_API_TOKEN")
+  })
+
+  // Final review, M6: the sweep of the app closes some items by itself. The skill must not read those as decisions.
+  it("skips a finding only for an open item or an item that the user resolved, not for one that the app closed", () => {
+    const filing = section("## Filing a finding")
+    expect(LLM_RESOLVED_ACTION).toBe("llm-judged")
+    expect(RULE_RESOLVED_ACTION).toBe("auto-resolved")
+    expect(filing).toContain("Skip a finding when an item states it already and the user decides about it.")
+    expect(filing).toContain("`Resolved action`")
+    expect(filing).toContain(`The app closes some items by itself, with the action \`${LLM_RESOLVED_ACTION}\` or \`${RULE_RESOLVED_ACTION}\`.`)
+    expect(filing).toContain("Such an item does not state the finding.")
+    // The same title would merge into the closed item, so the finding gets a new title.
+    expect(filing).toContain("File that finding with a new title.")
+    expect(filing).toContain("The old title would merge into the closed item, and the finding would stay closed.")
   })
 })
 
@@ -360,8 +429,33 @@ describe("wiki-lint skill: the checks of layer 2 and layer 3", () => {
     expect(step4).toContain("Read `schema/page-types/mechanism.md`.")
   })
 
+  it("ties each check of layer 3 to mechanism.md: the failure section by its key and its three headings, the parts and the flows", () => {
+    const step4 = section("### Step 4")
+    const rules = readRepoFile("templates/mechanism-wiki/schema/page-types/mechanism.md")
+    const failure = MECHANISM_SECTIONS.find((candidate) => candidate.key === "failure")
+    expect(failure).toBeDefined()
+    expect(step4).toContain("the Failure conditions section (key `failure`)")
+    for (const heading of [failure?.en, failure?.zhHant, failure?.zhHans]) {
+      expect(step4, String(heading)).toContain(`\`${heading}\``)
+      expect(rules, String(heading)).toContain(`| \`failure\` |`)
+      expect(rules, String(heading)).toContain(String(heading))
+    }
+    // A condition that one instance has is no condition of the mechanism: mechanism.md says so in its Do not list.
+    expect(rules).toContain("Write a failure condition that only one instance has.")
+    expect(step4).toContain("holds only a condition that one instance has")
+    // The parts and the flows are sections of mechanism.md, and the check of two mechanisms compares them.
+    for (const key of ["parts", "flows"]) {
+      const section = MECHANISM_SECTIONS.find((candidate) => candidate.key === key)
+      expect(rules, key).toContain(`| \`${key}\` | ${section?.en} |`)
+    }
+    expect(step4).toContain("compare the one-line statement, the parts, and the flows of each mechanism")
+    expect(rules).toContain("Write the title, then one line that states the mechanism.")
+  })
+
   it("is a file with a name, a description, and short sentences", () => {
     expect(skill).toMatch(/^---\nname: wiki-lint\ndescription: Use this skill to .+\n---\n/)
+    // The description is what makes an agent pick the skill: it says "lint", as the name and the user do.
+    expect(skill).toMatch(/^description: .*\blint\b/m)
     expect(findLongSentences("SKILL.md", skill)).toEqual([])
   })
 })

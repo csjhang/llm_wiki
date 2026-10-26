@@ -1,6 +1,6 @@
 ---
 name: wiki-lint
-description: Use this skill to check the meaning of a mechanism wiki. It reads the pages of each domain that changed, and then the mechanism pages. It files each problem as a review item in the app. It never edits a page.
+description: Use this skill to run the semantic lint of a mechanism wiki. It reads the pages of each domain that changed, and then the mechanism pages. It files each problem as a review item in the app. It never edits a page.
 ---
 
 # wiki-lint
@@ -23,7 +23,8 @@ The app can run this skill in the background, where nobody can answer a question
 - Node 20 or later.
 - git. Version history must be on for the wiki.
 - A mechanism wiki. The project folder has `domains.yaml`.
-- The `llm_wiki` MCP and the running app. The skill files the findings through them. Without them, the skill prints the findings and writes no marker.
+- The `llm_wiki` MCP and the running app. The skill files the findings through them. Rule 8 says what happens without them.
+- `LLM_WIKI_API_TOKEN` in the environment of the `llm_wiki` MCP. Adding a review item always needs it. The token is in Settings > API + MCP of the app.
 
 The skill never calls Heptabase.
 
@@ -46,18 +47,18 @@ node "<plugin dir>/scripts/wiki-tool.mjs" lint <command> --project "<project>" .
 - `<command>` is `structure`, `changed-domains`, `batch`, or `mark`.
 - The command prints one JSON object on one line.
 - Exit code 0 means ok.
-- Exit code 2 is a handled problem. The JSON has `"ok": false` and a list `problems`. Show every problem to the user as it is. Then stop the lint. Do not run `lint mark`.
+- Exit code 2 is a handled problem. The JSON has `"ok": false` and a list `problems`. Show every problem to the user as it is. Then stop the lint as Rule 8 says.
 - Exit code 1 is an unexpected error. Show the message to the user. Stop.
 - Put a path and a domain in double quotes.
 - Only `mark` writes a file. It writes `.llm-wiki/semantic-lint.json`. Never commit that file.
 
-The four commands:
+The four commands. The skill always gives `--commit` to `mark`:
 
 ```
 node "<plugin dir>/scripts/wiki-tool.mjs" lint structure --project "<project>"
 node "<plugin dir>/scripts/wiki-tool.mjs" lint changed-domains --project "<project>"
 node "<plugin dir>/scripts/wiki-tool.mjs" lint batch --project "<project>" --domain "<domain>"
-node "<plugin dir>/scripts/wiki-tool.mjs" lint mark --project "<project>"
+node "<plugin dir>/scripts/wiki-tool.mjs" lint mark --project "<project>" --commit "<noted commit>"
 ```
 
 - `structure` gives `findings`. Each finding has `check`, `page`, and `message`, and can have `domains`. `page` is `null` for a finding about a domain. A broken config file gives a `config-invalid` finding.
@@ -69,8 +70,8 @@ node "<plugin dir>/scripts/wiki-tool.mjs" lint mark --project "<project>"
 - `changed-domains` counts commits only. Changes that are not committed do not count.
 - `batch` gives `batches`, a list of lists of page paths. It gives `notes` when it has one.
 - The pages of a domain are the pages with that `domain` and the hypothesis pages with that `to_domain`. A page that names the domain only in `also` is not one. A mechanism page is not one.
-- A batch holds pages of one type. It stays under 60000 characters. Add `--max-chars <number>` to set another limit. A page above the limit is a batch alone, and `notes` names it.
-- `mark` gives `commit` and `at`.
+- A batch holds pages of one type. It holds at most 60000 characters. Add `--max-chars <number>` to set another limit. A page above the limit is a batch alone, and `notes` names it.
+- `mark` gives `commit` and `at`. Without `--commit`, it marks `HEAD`. With `--commit <sha>`, it marks that commit. The commit must be `HEAD` or one of its ancestors. If it is not, `mark` exits with 2 and writes nothing.
 - `changed-domains` and `batch` exit with 2 when a config file is not valid, because the list of domains is not reliable. `structure` then shows `config-invalid` findings.
 
 ## MCP rules
@@ -88,9 +89,9 @@ node "<plugin dir>/scripts/wiki-tool.mjs" lint mark --project "<project>"
 4. File one review item for each finding. Never put two findings in one item.
 5. File a finding only when you can name the pages and quote the lines that show it. Never file a doubt.
 6. Never file what layer 1 reports.
-7. Write the description, and the short finding in the title, in the output language of the wiki. Read it from the line `Output language:` in `purpose.md`. Keep the other words of the title as the forms below write them.
-8. Run `lint mark` only when every finding was filed, or when there was none. If the app does not run, or a call fails, print the findings. Do not run `lint mark`. Tell the user to run the skill again with the app open. A marker after findings that were not filed would hide those domains from the next run.
-9. Run `lint mark` only when `HEAD` is still the commit that you noted in Step 2. A new commit can bring pages that you did not read.
+7. Write the description, and the short finding in the title, in the output language of the wiki. Read it from the line `Output language:` in `purpose.md`. If the line is missing or empty, write in English. Do not ask. Keep the other words of the title as the forms below write them.
+8. Run `lint mark` only when the lint reached Step 5, the app ran, and every finding was filed. An item that exists already counts as filed. With no finding, nothing is left to file, so `lint mark` runs. If the app does not run, run no `lint mark`, also when there is no finding. If an `llm_wiki_*` call fails, or the lint stops before Step 5 for any cause, print every finding that was not filed. Exit code 2 is one cause of a stop. Run no `lint mark`. Tell the user to run the skill again with the app open. A marker after findings that were not filed would hide those domains from the next run.
+9. Mark the commit that you noted in Step 2, with `--commit`. Never mark a newer `HEAD`. A commit can come in during the lint, and you did not read its pages. The next lint reads its changes.
 10. Ask the user no question.
 
 ## Filing a finding
@@ -150,10 +151,13 @@ Before you file the findings of a domain, or the findings of layer 3, look for i
 ```
 
 2. The prefix ends in a space. Keep the space.
-3. Skip a finding when an item states it already. This holds for an open item and for a dismissed item. A dismissed item is a decision of the user. Two items state the same finding when they name the same pages and the same problem, also when the words of the titles differ.
-4. If this call fails, do what the next paragraph says.
+3. Skip a finding when an item states it already and the user decides about it. This holds for an open item (`Resolved: no`). It holds for an item that the user resolved, for example with Dismiss. A dismissal is a decision of the user.
+4. For a resolved item, read `Resolved action`. The app closes some items by itself, with the action `llm-judged` or `auto-resolved`. The user did not decide about those. Such an item does not state the finding.
+5. File that finding with a new title. Write ` [<the first 7 characters of the noted commit>]` after the short finding. The old title would merge into the closed item, and the finding would stay closed.
+6. Two items state the same finding when they name the same pages and the same problem, also when the words of the titles differ.
+7. If this call fails, do what the next paragraph says.
 
-If `llm_wiki_status` fails, or any `llm_wiki_*` call fails, make no more `llm_wiki_*` calls. Keep every finding that is not filed in a list, with its type, title, description, and pages. Go on with the steps. Print the list in the report.
+If `llm_wiki_status` fails, or any `llm_wiki_*` call fails, make no more `llm_wiki_*` calls. Show the text of the failed call to the user. Keep every finding that is not filed in a list, with its type, title, description, and pages. Go on with the steps. Print the list in the report.
 
 ## Steps
 
@@ -161,7 +165,7 @@ If `llm_wiki_status` fails, or any `llm_wiki_*` call fails, make no more `llm_wi
 
 1. Find the project folder. Use the current folder if it contains `wiki/` and `raw/`. Otherwise stop. Tell the user to run the skill in the project folder.
 2. Read `wiki.yaml`. Note the `role` of the wiki, and `lint.semantic_reminder_ingests`. If the key is missing, the value is 10.
-3. Call `llm_wiki_status`. A missing tool or a failed call means that the app is not running. Then tell the user that the skill will print the findings and will write no marker.
+3. Call `llm_wiki_status`. A missing tool or a failed call means that the app is not running. Then tell the user that Rule 8 applies: the skill prints the findings and writes no marker.
 4. Run `lint structure`.
 5. If the exit code is 2, show the problems. A project without `domains.yaml` is not a mechanism wiki. Stop.
 6. Show the findings to the user, grouped by check id. For each id, give the count and then each page with its message. For a finding with no page, give its `domains`. If there is no finding, say so.
@@ -169,9 +173,9 @@ If `llm_wiki_status` fails, or any `llm_wiki_*` call fails, make no more `llm_wi
 
 ### Step 2: Find the domains
 
-1. Run `git -C "<project>" rev-parse HEAD`. Note the commit. Rule 9 uses it.
+1. Run `git -C "<project>" rev-parse HEAD`. Note the commit as the noted commit. Step 5 marks it, as Rule 9 says.
 2. Run `lint changed-domains`.
-3. If the exit code is 2, a config file is not valid. Show the problems. Tell the user to fix the file that the `config-invalid` findings name. Stop. Do not run `lint mark`.
+3. If the exit code is 2, a config file is not valid. Show the problems. Tell the user to fix the file that the `config-invalid` findings name. Stop as Rule 8 says.
 4. Tell the user `since`, or that there is no marker. Show `note` if there is one. Tell the user the domains and `mechanismsChanged`.
 5. Tell the user `ingestsSince`. If it is at least `lint.semantic_reminder_ingests`, say that this lint is overdue.
 6. If the user wants every domain, tell the user to delete `.llm-wiki/semantic-lint.json` and run the skill again. Without a marker, the skill lints every domain. Never delete the file yourself.
@@ -202,15 +206,16 @@ Do these steps for each domain of `domains`, in the order of the list. In a work
    - Domain detail in a mechanism: an industry name, a vendor name, a product name, or a number that belongs to one domain. Also an instance that the page explains instead of listing.
    - Two mechanisms that are the same: compare the one-line statement, the parts, and the flows of each mechanism with the others.
    - An instance that does not fit: the first section of the instance page does not match the parts and the flows of the mechanism.
-   - A missing failure condition: the section has no line, or it holds only a condition that one instance has.
+   - A missing failure condition: the Failure conditions section (key `failure`) has no line, or it holds only a condition that one instance has. The heading is `Failure conditions`, `失效條件`, or `失效条件`, by the output language of the page.
 7. File each finding as "Filing a finding" says. Use `confirm` for two mechanisms that may be the same. Use `suggestion` for the others. For two mechanisms, give both pages in `affectedPages`. For an instance that does not fit, give the mechanism page and the instance page.
 
 ### Step 5: Mark and report
 
-1. Run `git -C "<project>" rev-parse HEAD` again.
-2. Run `lint mark` only as Rule 8 and Rule 9 allow.
-3. If you did not run it, say why. Print each finding that was not filed. If a commit came in during the lint, tell the user that too.
-4. Report as the next section says.
+1. Run `lint mark --commit "<noted commit>"` only as Rule 8 allows.
+2. If `lint mark` exits with 2, show the problems. Say that no marker was written.
+3. If you did not run it, say why. Print each finding that was not filed.
+4. If a commit came in during the lint, tell the user that the next lint reads its changes.
+5. Report as the next section says.
 
 ## Report
 
