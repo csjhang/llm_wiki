@@ -579,6 +579,11 @@ function* unresolvedSets(slugs: readonly string[]): Generator<Set<string>> {
 
 // --- properties --------------------------------------------------------
 
+/** What to tell the user about a select value that is not an option of its property. The skills `wiki-sync` and `wiki-recut` rely on it. */
+export function missingOptionMessage(value: string, propertyName: string): string {
+  return `add the option "${value}" to the "${propertyName}" property in Heptabase`
+}
+
 /** One message for each select value that is not an option of its property. Empty without a database. */
 function missingOptions(properties: readonly PropertyEdit[], options: OptionIndex | null): string[] {
   if (!options) return []
@@ -586,7 +591,7 @@ function missingOptions(properties: readonly PropertyEdit[], options: OptionInde
   for (const edit of properties) {
     const property = edit.type === "select" ? options.get(edit.propertyId) : undefined
     if (!property || property.options.has(String(edit.value))) continue
-    const message = `add the option "${String(edit.value)}" to the "${property.name}" property in Heptabase`
+    const message = missingOptionMessage(String(edit.value), property.name)
     if (!messages.includes(message)) messages.push(message)
   }
   return messages

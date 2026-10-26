@@ -16,7 +16,8 @@ import type { CommandResult } from "../io"
 import { compareText, readWikiPages } from "../mirror-pages"
 import { libraryOnlyDomains, loadLintProject, notMechanismWiki, ownDomains, parseLintArgs } from "./project"
 
-const DEFAULT_MAX_CHARS = 60_000
+/** The size limit of a batch when `--max-chars` is not given. The skill `wiki-lint` names it. */
+export const DEFAULT_MAX_CHARS = 60_000
 
 export function lintBatch(args: string[]): CommandResult {
   const parsed = parseLintArgs(args, ["domain", "max-chars"], ["domain"])

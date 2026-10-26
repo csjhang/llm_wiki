@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, it, expect } from "vitest"
-import { parseWikiYaml, type WikiIdentity, type WikiParseResult } from "./wiki-identity"
+import { defaultIdentity, parseWikiYaml, type WikiIdentity, type WikiParseResult } from "./wiki-identity"
 import type { ConfigIssue } from "./types"
 
 function valueOf(result: WikiParseResult): WikiIdentity {
@@ -261,5 +261,28 @@ describe("parseWikiYaml", () => {
       const text = build({ id: "work", role: "work", library: "../reading" }) + "lint:\n  draft_days: 60\n"
       expect(valueOf(parseWikiYaml(text)).lint.draft_days).toBe(60)
     })
+  })
+})
+
+// Final review, M8: the app and the wiki-tool CLI share one default identity.
+describe("defaultIdentity", () => {
+  it("is a reading wiki with the id reading and the default thresholds", () => {
+    expect(defaultIdentity()).toEqual({
+      version: 1,
+      id: "reading",
+      role: "reading",
+      mechanism_library: null,
+      lint: { draft_days: 30, max_domain_pages: 200, min_domain_pages: 3, semantic_reminder_ingests: 10 },
+    })
+  })
+
+  it("is what the template wiki.yaml gives", () => {
+    expect(defaultIdentity()).toEqual(valueOf(parseWikiYaml(TEMPLATE)))
+  })
+
+  it("gives a new object each time, so a caller cannot change the default of another", () => {
+    const first = defaultIdentity()
+    first.lint.draft_days = 1
+    expect(defaultIdentity().lint.draft_days).toBe(30)
   })
 })

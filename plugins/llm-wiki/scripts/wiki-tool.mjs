@@ -3156,6 +3156,32 @@ function renderHeptabaseYaml(draft) {
 }
 
 //#endregion
+//#region src/lib/mechanism-wiki/mirror-rules.ts
+/**
+* What the Heptabase mirror sync decides about a wiki page, in one pure module.
+*
+* The `wiki-tool` CLI (`hepta plan-down`) decides which pages get a card. The structural lint of the app
+* (`lint-structure.ts`) must know the same rule: a retired card whose page is back and mirrored again gets
+* its card back at the next sync, so the lint must not tell the user to delete that card. Both import this
+* file, so the rule has one copy. It imports nothing: the `wiki-tool` bundle may use it.
+*/
+/** Title prefix of a card whose page is gone. The tool puts it before the title. */
+const RETIRED_TITLE_PREFIX = "🗄 已停用｜";
+/** Page types that are always synced. A `concept` is synced when it has two sources. */
+const ALWAYS_SYNCED_TYPES = [
+	"mechanism",
+	"hypothesis",
+	"comparison"
+];
+const MIN_CONCEPT_SOURCES = 2;
+/** True for a page that is mirrored: mechanism, hypothesis, comparison, or a concept with two sources. */
+function isSyncable(page) {
+	if (ALWAYS_SYNCED_TYPES.includes(page.type)) return true;
+	if (page.type !== "concept") return false;
+	return new Set(page.sources.map((name) => name.trim()).filter((name) => name !== "")).size >= MIN_CONCEPT_SOURCES;
+}
+
+//#endregion
 //#region tools/wiki-tool/src/hepta-files.ts
 /**
 * Where wiki-tool keeps the text of the cards it sends, under `<project>/.llm-wiki/hepta/` (git-ignored).
@@ -3304,6 +3330,266 @@ function stringifyScalar(v) {
 }
 
 //#endregion
+//#region src/lib/wiki-page-types.ts
+const GENERATION_WIKI_TYPES = [
+	"source",
+	"entity",
+	"concept",
+	"comparison",
+	"query",
+	"synthesis",
+	"thesis",
+	"methodology",
+	"finding",
+	"mechanism",
+	"hypothesis"
+];
+/** Types that only a mechanism wiki lists. Other wikis keep the upstream type list. */
+const MECHANISM_WIKI_TYPES = ["mechanism", "hypothesis"];
+/** `GENERATION_WIKI_TYPES` without the mechanism wiki types. */
+const BASE_GENERATION_WIKI_TYPES = GENERATION_WIKI_TYPES.filter((type) => !MECHANISM_WIKI_TYPES.includes(type));
+const WIKI_TYPE_DIRS = [
+	{
+		dir: "entities",
+		type: "entity"
+	},
+	{
+		dir: "concepts",
+		type: "concept"
+	},
+	{
+		dir: "sources",
+		type: "source"
+	},
+	{
+		dir: "queries",
+		type: "query"
+	},
+	{
+		dir: "comparisons",
+		type: "comparison"
+	},
+	{
+		dir: "synthesis",
+		type: "synthesis"
+	},
+	{
+		dir: "findings",
+		type: "finding"
+	},
+	{
+		dir: "standards",
+		type: "standard"
+	},
+	{
+		dir: "playbooks",
+		type: "playbook"
+	},
+	{
+		dir: "thesis",
+		type: "thesis"
+	},
+	{
+		dir: "methodology",
+		type: "methodology"
+	},
+	{
+		dir: "mechanisms",
+		type: "mechanism"
+	},
+	{
+		dir: "hypotheses",
+		type: "hypothesis"
+	}
+];
+function inferWikiTypeFromPath(path, fileName) {
+	const normalized = path.replace(/\\/g, "/").toLowerCase();
+	for (const { dir, type } of WIKI_TYPE_DIRS) if (normalized.includes(`/wiki/${dir}/`) || normalized.includes(`/${dir}/`) || normalized.startsWith(`wiki/${dir}/`)) return type;
+	if ((fileName ?? normalized.split("/").pop() ?? "").toLowerCase() === "overview.md" || normalized.includes("/overview.md")) return "overview";
+	const customDir = normalized.match(/(?:^|\/)wiki\/([^/.][^/]*)\/[^/]+\.md$/)?.[1];
+	if (customDir) return customDir;
+	return null;
+}
+
+//#endregion
+//#region src/lib/mechanism-wiki/domain-index-render.ts
+/**
+* Domain-first index of a mechanism wiki: the text of the index files.
+*
+* `wiki/index.md` lists the domain tree with page counts. `wiki/indexes/<domain>.md`
+* lists the pages of one domain, and `wiki/indexes/_mechanisms.md` lists the
+* mechanism pages. Everything here is pure: the same pages give the same bytes,
+* and nothing reads a file. It imports no Tauri code, so the `wiki-tool` CLI can
+* reuse it. The file reading and writing is in `domain-index.ts`.
+*/
+/** The folder of the index files, with a trailing slash. */
+const DOMAIN_INDEX_DIR = "wiki/indexes/";
+/** The root index. */
+const ROOT_INDEX_PATH = "wiki/index.md";
+/** The mechanism index. */
+const MECHANISM_INDEX_FILE = "_mechanisms.md";
+const MECHANISM_INDEX_PATH = `${DOMAIN_INDEX_DIR}${MECHANISM_INDEX_FILE}`;
+const MECHANISM_TYPE = "mechanism";
+/** The types that a domain index groups, in the order of its groups, with the heading of each group. */
+const DOMAIN_INDEX_GROUPS = [
+	{
+		type: "source",
+		heading: "Source"
+	},
+	{
+		type: "entity",
+		heading: "Entity"
+	},
+	{
+		type: "concept",
+		heading: "Concept"
+	},
+	{
+		type: "comparison",
+		heading: "Comparison"
+	},
+	{
+		type: "query",
+		heading: "Query"
+	},
+	{
+		type: "hypothesis",
+		heading: "Hypothesis"
+	}
+];
+/** Shown for a page that has no type at all. */
+const NO_TYPE_LABEL = "no type";
+/** File name of a domain index: the domain with `/` replaced by `--`. */
+function domainIndexFileName(domain) {
+	return `${domain.replace(/\//g, "--")}.md`;
+}
+/** `wiki/indexes/hardware--async-circuits.md` for `hardware/async-circuits`. */
+function domainIndexPath(domain) {
+	return `${DOMAIN_INDEX_DIR}${domainIndexFileName(domain)}`;
+}
+/** True for a file in `wiki/indexes/`. These files are made by the app, so they are never pages. */
+function isDomainIndexPath(relativePath) {
+	return relativePath.replace(/\\/g, "/").toLowerCase().startsWith(DOMAIN_INDEX_DIR);
+}
+/** The files of `wiki/` that the app writes and keeps, besides `wiki/indexes/`. They are no pages of the wiki. Lower case. */
+const APP_OWN_PAGES = new Set([
+	ROOT_INDEX_PATH,
+	"wiki/log.md",
+	"wiki/overview.md"
+]);
+/**
+* True for a path under `wiki/` that is not a page of the wiki: one of `APP_OWN_PAGES`, or a file in
+* `wiki/indexes/`. The case of the path does not matter. This is the one list that the app and the
+* `wiki-tool` CLI use when they scan `wiki/`.
+*/
+function isAppOwnPath(relativePath) {
+	return APP_OWN_PAGES.has(relativePath.replace(/\\/g, "/").toLowerCase()) || isDomainIndexPath(relativePath);
+}
+/** The page that `markdown` is, at `path`. A byte order mark before the frontmatter is ignored. */
+function indexedPageFromMarkdown(path, markdown) {
+	const normalized = path.replace(/\\/g, "/");
+	const slug = fileStem$1(normalized);
+	const { frontmatter, body } = parseFrontmatter(withoutBom(markdown));
+	const field = (key) => {
+		const value = frontmatter?.[key];
+		if (typeof value !== "string") return null;
+		const trimmed = value.trim();
+		return trimmed === "" ? null : trimmed;
+	};
+	const type = field("type") ?? inferWikiTypeFromPath(normalized) ?? "";
+	const heading = /^#[ \t]+(.+)$/m.exec(body)?.[1];
+	return {
+		path: normalized,
+		slug,
+		type,
+		title: oneLine$1(field("title") ?? "") || oneLine$1(heading ?? "") || slug,
+		domain: type === "hypothesis" ? field("to_domain") : field("domain")
+	};
+}
+/** The text without a byte order mark. The `wiki-tool` CLI reads pages the same way. */
+function withoutBom(text) {
+	return text.replace(/^\uFEFF/, "");
+}
+function fileStem$1(path) {
+	const name = path.slice(path.lastIndexOf("/") + 1);
+	return name.toLowerCase().endsWith(".md") ? name.slice(0, -3) : name;
+}
+/** Collapse every run of white space to one space, so a title stays on one line. */
+function oneLine$1(text) {
+	return text.replace(/\s+/g, " ").trim();
+}
+/**
+* `wiki/index.md`: a line for each domain of `domains.yaml` (sorted by path) with its
+* page count, then the mechanisms, then the pages that no listed domain holds.
+*/
+function renderRootIndex(pages, domains, options = {}) {
+	const listed = Object.keys(domains.domains).sort(compareText$1);
+	const counts = new Map(listed.map((domain) => [domain, 0]));
+	const unassigned = [];
+	let mechanisms = 0;
+	for (const page of pages) if (page.type === "mechanism") mechanisms += 1;
+	else if (page.domain !== null && counts.has(page.domain) && groupsPage(page)) counts.set(page.domain, (counts.get(page.domain) ?? 0) + 1);
+	else unassigned.push(page);
+	const sortedUnassigned = [...unassigned].sort(compareBySlug);
+	const shown = options.maxUnassigned === void 0 ? sortedUnassigned : sortedUnassigned.slice(0, options.maxUnassigned);
+	const hidden = sortedUnassigned.length - shown.length;
+	return [
+		"# Wiki Index",
+		"",
+		...listed.map((domain) => `- [${domain}](indexes/${domainIndexFileName(domain)}) — ${counts.get(domain)} pages`),
+		`- [Mechanisms](indexes/${MECHANISM_INDEX_FILE}) — ${mechanisms} pages`,
+		`- Unassigned — ${unassigned.length} pages`,
+		...shown.map((page) => `  - [[${page.slug}]]${typeNote(page)}`),
+		...hidden > 0 ? [`  - … ${hidden} more unassigned pages`] : [],
+		""
+	].join("\n");
+}
+/**
+* The index of one domain: its pages in a group for each type, with the groups in a
+* fixed order and the pages sorted by title. A domain without pages is a heading only.
+*/
+function renderDomainIndex(domain, pages) {
+	const own = pages.filter((page) => page.domain === domain && groupsPage(page));
+	const lines = [`# ${domain}`];
+	for (const group of DOMAIN_INDEX_GROUPS) {
+		const members = own.filter((page) => page.type === group.type).sort(comparePages);
+		if (members.length === 0) continue;
+		lines.push("", `## ${group.heading}`, "", ...members.map(pageLine));
+	}
+	return `${lines.join("\n")}\n`;
+}
+/** The mechanism index: a line for each page of type `mechanism`, sorted by title. */
+function renderMechanismIndex(pages) {
+	const mechanisms = pages.filter((page) => page.type === MECHANISM_TYPE).sort(comparePages);
+	const lines = ["# Mechanisms"];
+	if (mechanisms.length > 0) lines.push("", ...mechanisms.map(pageLine));
+	return `${lines.join("\n")}\n`;
+}
+/** True when a domain index has a group for the type of the page. */
+function groupsPage(page) {
+	return DOMAIN_INDEX_GROUPS.some((group) => group.type === page.type);
+}
+function pageLine(page) {
+	return `- [[${page.slug}]] — ${page.title}`;
+}
+/** The type of an unassigned page in parentheses, when the page's type is not one that the domain index groups. */
+function typeNote(page) {
+	return groupsPage(page) ? "" : ` (${page.type === "" ? NO_TYPE_LABEL : page.type})`;
+}
+/** UTF-16 code unit order. Unlike `localeCompare`, it gives the same result on every machine. */
+function compareText$1(a, b) {
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+/** By slug, then path: the order of the unassigned list, which shows slugs only. */
+function compareBySlug(a, b) {
+	return compareText$1(a.slug, b.slug) || compareText$1(a.path, b.path);
+}
+/** By title without case, then by title, slug, and path, so that no two pages tie. */
+function comparePages(a, b) {
+	return compareText$1(a.title.toLowerCase(), b.title.toLowerCase()) || compareText$1(a.title, b.title) || compareText$1(a.slug, b.slug) || compareText$1(a.path, b.path);
+}
+
+//#endregion
 //#region src/lib/wiki-config/wiki-identity.ts
 /**
 * `wiki.yaml` says what a wiki is. It is wiki-level config, not Heptabase config,
@@ -3317,6 +3603,19 @@ const DEFAULT_LINT_THRESHOLDS = {
 	min_domain_pages: 3,
 	semantic_reminder_ingests: 10
 };
+/**
+* The identity of a wiki without a usable `wiki.yaml`: a reading wiki with the id "reading" and the default
+* thresholds. The app and the `wiki-tool` CLI both use it. Every call gives a new object.
+*/
+function defaultIdentity() {
+	return {
+		version: 1,
+		id: "reading",
+		role: "reading",
+		mechanism_library: null,
+		lint: { ...DEFAULT_LINT_THRESHOLDS }
+	};
+}
 const LINT_KEYS = Object.keys(DEFAULT_LINT_THRESHOLDS);
 const WIKI_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const TOP_LEVEL_KEYS$1 = [
@@ -3343,10 +3642,11 @@ function parseWikiYaml(text) {
 	const id = parseId(root.id, issues);
 	const role = parseRole(root.role, issues);
 	const mechanismLibrary = parseMechanismLibrary(root.mechanism_library, role, issues);
-	const lint = parseLint(root.lint, issues);
+	const lintIssues = [];
+	const lint = parseLint(root.lint, lintIssues);
 	if (issues.length > 0 || role === null) return {
 		ok: false,
-		issues
+		issues: [...issues, ...lintIssues]
 	};
 	return {
 		ok: true,
@@ -3357,7 +3657,7 @@ function parseWikiYaml(text) {
 			mechanism_library: mechanismLibrary,
 			lint
 		},
-		issues: []
+		issues: lintIssues
 	};
 }
 function parseId(raw, issues) {
@@ -3411,7 +3711,10 @@ function parseMechanismLibrary(raw, role, issues) {
 /**
 * The `lint:` block. A missing block, or `lint:` with no value, gives the defaults.
 * A missing key takes its default. A value that is not a positive integer is an issue
-* that names the key. `min_domain_pages` must not be greater than `max_domain_pages`.
+* that names the key, and the key takes its default. `min_domain_pages` must not be greater
+* than `max_domain_pages`: when it is, the issue names the key that the file sets and both
+* keys take their defaults. The issues go to `issues`; the result is always a usable set
+* of thresholds, so a typo in a threshold never invalidates `wiki.yaml`.
 */
 function parseLint(raw, issues) {
 	const lint = { ...DEFAULT_LINT_THRESHOLDS };
@@ -3440,6 +3743,8 @@ function parseLint(raw, issues) {
 			path: childPath("lint", at),
 			message: `min_domain_pages (${lint.min_domain_pages}) must not be greater than max_domain_pages (${lint.max_domain_pages})`
 		});
+		lint.min_domain_pages = DEFAULT_LINT_THRESHOLDS.min_domain_pages;
+		lint.max_domain_pages = DEFAULT_LINT_THRESHOLDS.max_domain_pages;
 	}
 	return lint;
 }
@@ -3718,52 +4023,36 @@ function replaceUnsupportedBlocks(text) {
 * does not bring the hash. Reading is limited to the project config files, `<project>/wiki/`,
 * and the snapshot files the card map names, and every path goes through resolveInProject.
 */
-/** Title prefix of a card whose page is gone. */
-const RETIRED_TITLE_PREFIX$1 = "🗄 已停用｜";
 /** Body of a card whose page is gone. No replacement is known. */
 const RETIRED_BODY = "此頁已從 wiki 移除。";
-/** Page types that are always synced. A `concept` is synced when it has two sources. */
-const ALWAYS_SYNCED_TYPES = [
-	"mechanism",
-	"hypothesis",
-	"comparison"
-];
-const MIN_CONCEPT_SOURCES = 2;
-/** Pages that the app maintains; they are never synced. Lower case. */
-const SKIPPED_PAGES = new Set([
-	"wiki/index.md",
-	"wiki/log.md",
-	"wiki/overview.md"
-]);
-const SKIPPED_DIRECTORY = "wiki/indexes";
 /** Orders text by code unit, the same on every machine. */
-function compareText$1(a, b) {
+function compareText(a, b) {
 	return a < b ? -1 : a > b ? 1 : 0;
 }
-function oneLine$1(text) {
+function oneLine(text) {
 	return text.replace(/\s+/g, " ").trim();
 }
 /** The file stem of a page path: `event-driven` for `wiki/mechanisms/event-driven.md`. */
 function slugOfPath(path) {
-	return fileStem$1(path);
+	return fileStem(path);
 }
-function fileStem$1(path) {
+function fileStem(path) {
 	const name = posix.basename(path);
 	return name.toLowerCase().endsWith(".md") ? name.slice(0, -3) : name;
 }
 function parseWikiPage(path, markdown) {
-	const text = markdown.replace(/^\uFEFF/, "");
+	const text = withoutBom(markdown);
 	const { frontmatter, body } = parseFrontmatter(text);
 	const field = (key) => {
 		const value = frontmatter?.[key];
 		return typeof value === "string" ? value.trim() : "";
 	};
-	const slug = fileStem$1(path);
+	const slug = fileStem(path);
 	const heading = /^#[ \t]+(.+)$/m.exec(body)?.[1] ?? "";
 	return {
 		path,
 		slug,
-		title: oneLine$1(field("title")) || oneLine$1(heading) || slug,
+		title: oneLine(field("title")) || oneLine(heading) || slug,
 		type: field("type"),
 		sources: sourceNames(frontmatter?.sources),
 		hasFrontmatter: frontmatter !== null,
@@ -3773,11 +4062,6 @@ function parseWikiPage(path, markdown) {
 }
 function sourceNames(value) {
 	return [...new Set((Array.isArray(value) ? value : typeof value === "string" ? [value] : []).map((item) => item.trim()).filter((item) => item !== ""))];
-}
-/** True for a page that is mirrored: mechanism, hypothesis, comparison, or a concept with two sources. */
-function isSyncable(page) {
-	if (ALWAYS_SYNCED_TYPES.includes(page.type)) return true;
-	return page.type === "concept" && page.sources.length >= MIN_CONCEPT_SOURCES;
 }
 /** The page at a project-relative path, or null when the file cannot be read. */
 function readWikiPage(project, path) {
@@ -3806,7 +4090,7 @@ function readWikiPages(project, options = {}) {
 		throw error;
 	}
 	collectMarkdown(project, "wiki", visited, paths);
-	return paths.sort(compareText$1).map((path) => loadWikiPage(project, path));
+	return paths.sort(compareText).map((path) => loadWikiPage(project, path));
 }
 function errorCode(error) {
 	return error instanceof Error ? error.code : void 0;
@@ -3825,12 +4109,12 @@ function collectMarkdown(project, directory, visited, found) {
 			throw error;
 		}
 		if (stats.isDirectory()) {
-			if (path.toLowerCase() === SKIPPED_DIRECTORY) continue;
+			if (isAppOwnPath(`${path}/`)) continue;
 			const real = realpathSync(absolute);
 			if (visited.has(real)) continue;
 			visited.add(real);
 			collectMarkdown(project, path, visited, found);
-		} else if (stats.isFile() && entry.name.toLowerCase().endsWith(".md") && !SKIPPED_PAGES.has(path.toLowerCase())) found.push(path);
+		} else if (stats.isFile() && entry.name.toLowerCase().endsWith(".md") && !isAppOwnPath(path)) found.push(path);
 	}
 }
 /**
@@ -3876,7 +4160,7 @@ function sourceCardsOf(page, cardsByName) {
 /** The source cards of the footer, by the file name of their snapshot. */
 function sourceCardsByName(project, map) {
 	const byName = /* @__PURE__ */ new Map();
-	for (const cardId of Object.keys(map.sources).sort(compareText$1)) {
+	for (const cardId of Object.keys(map.sources).sort(compareText)) {
 		const rawPath = map.sources[cardId].raw_path;
 		const name = posix.basename(rawPath);
 		if (!byName.has(name)) byName.set(name, {
@@ -3891,9 +4175,9 @@ function snapshotTitle(project, rawPath) {
 	try {
 		const { frontmatter } = parseFrontmatter(readFileSync(resolveInProject(project, rawPath), "utf8"));
 		const title = frontmatter?.title;
-		if (typeof title === "string" && oneLine$1(title) !== "") return oneLine$1(title);
+		if (typeof title === "string" && oneLine(title) !== "") return oneLine(title);
 	} catch {}
-	return fileStem$1(rawPath);
+	return fileStem(rawPath);
 }
 /**
 * heptabase.yaml and wiki.yaml of a project. Every issue of a parser becomes a problem, and a
@@ -4041,6 +4325,11 @@ function cardHash(body, properties) {
 * its card now is another one. The hash covers the body (title, text, links, footer) and the
 * property values, but not the sync date.
 *
+* A retired card that the user deleted by hand is not in the mirror list any more. With the whole list in hand, its page
+* gets a `forget` action and nothing else, whether the page exists or not: the skill makes no MCP call and tells
+* `hepta record` with a `forgotten` event, which drops the entry from the map. Without that, the lint would name the
+* card for ever, and a page that is back and mirrored would be stopped by a card that is gone.
+*
 * A mirror card that the user edited is never overwritten: its page gets a `skip-edited`, whether
 * the page changed or not, until `hepta record` saves the edit as feedback. The edit check needs the whole list
 * of the mirror tag, so `--mirror-cards` is required once a card is mapped, and a list that is a failed result or
@@ -4093,7 +4382,8 @@ const OP_ORDER = [
 	"relink",
 	"retire",
 	"skip-edited",
-	"place"
+	"place",
+	"forget"
 ];
 function planDown(args) {
 	const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC$5);
@@ -4213,13 +4503,18 @@ function checkConfiguredProperties(config, options, problems) {
 function planPages(input) {
 	const pageByPath = new Map(input.pages.map((page) => [page.path, page]));
 	const renderer = createRenderer(input.project, input.map, input.pages);
-	const paths = [...new Set([...pageByPath.keys(), ...Object.keys(input.map.pages)])].sort(compareText$1);
+	const paths = [...new Set([...pageByPath.keys(), ...Object.keys(input.map.pages)])].sort(compareText);
 	const actions = [];
 	const relinks = [];
 	const problems = [];
 	for (const path of paths) {
 		const page = pageByPath.get(path);
 		const entry = input.map.pages[path];
+		const forget = forgetGoneCard(input, path, entry);
+		if (forget) {
+			actions.push(forget);
+			continue;
+		}
 		const plan = page ? planPage(input, renderer, page, entry) : planGone(input, path, entry);
 		for (const message of [...plan.blockers, ...plan.notes]) problems.push({
 			page: path,
@@ -4242,7 +4537,7 @@ function planPages(input) {
 	}
 	const pending = actions.some((action) => action.op === "create" || action.op === "update" || action.op === "retire");
 	if (!pending) actions.push(...relinks);
-	actions.sort((a, b) => compareText$1(a.page, b.page) || OP_ORDER.indexOf(a.op) - OP_ORDER.indexOf(b.op));
+	actions.sort((a, b) => compareText(a.page, b.page) || OP_ORDER.indexOf(a.op) - OP_ORDER.indexOf(b.op));
 	return {
 		pass: !pending && relinks.length > 0 ? 2 : 1,
 		actions,
@@ -4265,6 +4560,19 @@ function massRetire(input, actions) {
 /** Remove every retire from the planned actions. */
 function dropRetires(actions) {
 	for (let index = actions.length - 1; index >= 0; index -= 1) if (actions[index].op === "retire") actions.splice(index, 1);
+}
+/**
+* A retired entry whose card is not in the whole mirror list: the user deleted the card, or took it out of the tag.
+* Nothing is left to do for the card, so the entry goes. Without a list nobody looked, so nothing is judged. A card that
+* waits for setup is not in the tag yet, so it is never judged gone.
+*/
+function forgetGoneCard(input, path, entry) {
+	if (!entry || entry.status !== "retired" || entry.setup_pending || !input.listed || input.cards.has(entry.card_id)) return void 0;
+	return {
+		op: "forget",
+		page: path,
+		cardId: entry.card_id
+	};
 }
 /** A mapped page whose file is not there (or is not a wiki page any more). */
 function planGone(input, path, entry) {
@@ -4348,12 +4656,12 @@ function create(input, renderer, page) {
 	};
 }
 function retire(input, path, entry, title) {
-	const base = title.startsWith("🗄 已停用｜") ? title.slice(RETIRED_TITLE_PREFIX$1.length) : title;
+	const base = title.startsWith("🗄 已停用｜") ? title.slice(RETIRED_TITLE_PREFIX.length) : title;
 	return {
 		op: "retire",
 		page: path,
 		cardId: entry.card_id,
-		title: `${RETIRED_TITLE_PREFIX$1}${base}`,
+		title: `${RETIRED_TITLE_PREFIX}${base}`,
 		body: RETIRED_BODY,
 		bodyFile: outboxFile(path),
 		contentHash: contentHash(RETIRED_BODY),
@@ -4447,6 +4755,10 @@ function* unresolvedSets(slugs) {
 		yield new Set(slugs.filter((other) => other !== slug));
 	}
 }
+/** What to tell the user about a select value that is not an option of its property. The skills `wiki-sync` and `wiki-recut` rely on it. */
+function missingOptionMessage(value, propertyName) {
+	return `add the option "${value}" to the "${propertyName}" property in Heptabase`;
+}
 /** One message for each select value that is not an option of its property. Empty without a database. */
 function missingOptions(properties, options) {
 	if (!options) return [];
@@ -4454,7 +4766,7 @@ function missingOptions(properties, options) {
 	for (const edit of properties) {
 		const property = edit.type === "select" ? options.get(edit.propertyId) : void 0;
 		if (!property || property.options.has(String(edit.value))) continue;
-		const message = `add the option "${String(edit.value)}" to the "${property.name}" property in Heptabase`;
+		const message = missingOptionMessage(String(edit.value), property.name);
 		if (!messages.includes(message)) messages.push(message);
 	}
 	return messages;
@@ -4746,6 +5058,7 @@ function readContentFiles(paths, cardId, problems) {
 *   {"type":"relinked","page","cardUpdatedAt"[,"contentHash"]}
 *   {"type":"placed","page","whiteboardId"}
 *   {"type":"retired","page","cardUpdatedAt"}
+*   {"type":"forgotten","page"}                                    (a `forget` action: no Heptabase call)
 *   {"type":"feedback","page","cardId","cardUpdatedAt"}          (with one --content file for each page of read_object)
 *   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or "this-wiki")
 *
@@ -4772,6 +5085,10 @@ function readContentFiles(paths, cardId, problems) {
 * text the note holds the whole card. Either way the event records the time of that edit (`cardUpdatedAt`, the
 * `updatedAt` of the card) in the map, so plan-down reports one edit once.
 *
+* A `forgotten` event drops the map entry of a retired page whose card is gone from the mirror tag (the user deleted it).
+* It is for the `forget` action of plan-down and takes a retired entry only: the card of an active page is not gone.
+* A page that is mirrored again later gets a new card at the next plan.
+*
 * An `up-decision` event keeps the user's answer to a question of `plan-up` (an `ask` action): `skip` leaves the
 * card out, `this-wiki` makes it a source of this wiki. `plan-up` plans no question for the card while the answer is
 * in the map and the card has no snapshot.
@@ -4793,6 +5110,7 @@ const HANDLERS = {
 	"setup-done": recordSetupDone,
 	placed: recordPlaced,
 	retired: recordRetired,
+	forgotten: recordForgotten,
 	feedback: recordFeedback,
 	"up-decision": recordUpDecision
 };
@@ -5092,6 +5410,24 @@ function recordRetired(context) {
 		card_updated_at: cardUpdatedAt,
 		status: "retired"
 	}, bodyFile);
+}
+/** The card of a retired page is gone. The entry leaves the map; the wiki page and the snapshots stay. */
+function recordForgotten(context) {
+	const fields = new Fields(context.event, context.project);
+	const page = fields.page();
+	const problems = fields.problems;
+	const existing = page === "" ? null : mappedPage(context.map, page, problems);
+	refuseWhileWaiting(existing, page, problems);
+	if (existing && existing.status !== "retired") problems.push(`${page} is not retired, so its card cannot be forgotten`);
+	if (problems.length > 0 || !existing) return fail(problems);
+	delete context.map.pages[page];
+	saveCardMap(context.project, context.map);
+	return {
+		ok: true,
+		event: "forgotten",
+		page,
+		entry: existing
+	};
 }
 function recordFeedback(context) {
 	const fields = new Fields(context.event, context.project);
@@ -6990,7 +7326,7 @@ function resolveCards(placed, wikis, problems) {
 					...card,
 					status: retired ? "retired" : "mirror",
 					wiki: first.wiki.id,
-					pages: pages.sort(compareText$1)
+					pages: pages.sort(compareText)
 				};
 			}
 		}
@@ -7042,255 +7378,15 @@ const FUSE_GROUP = {
 };
 
 //#endregion
-//#region src/lib/wiki-page-types.ts
-const GENERATION_WIKI_TYPES = [
-	"source",
-	"entity",
-	"concept",
-	"comparison",
-	"query",
-	"synthesis",
-	"thesis",
-	"methodology",
-	"finding",
-	"mechanism",
-	"hypothesis"
-];
-/** Types that only a mechanism wiki lists. Other wikis keep the upstream type list. */
-const MECHANISM_WIKI_TYPES = ["mechanism", "hypothesis"];
-/** `GENERATION_WIKI_TYPES` without the mechanism wiki types. */
-const BASE_GENERATION_WIKI_TYPES = GENERATION_WIKI_TYPES.filter((type) => !MECHANISM_WIKI_TYPES.includes(type));
-const WIKI_TYPE_DIRS = [
-	{
-		dir: "entities",
-		type: "entity"
-	},
-	{
-		dir: "concepts",
-		type: "concept"
-	},
-	{
-		dir: "sources",
-		type: "source"
-	},
-	{
-		dir: "queries",
-		type: "query"
-	},
-	{
-		dir: "comparisons",
-		type: "comparison"
-	},
-	{
-		dir: "synthesis",
-		type: "synthesis"
-	},
-	{
-		dir: "findings",
-		type: "finding"
-	},
-	{
-		dir: "standards",
-		type: "standard"
-	},
-	{
-		dir: "playbooks",
-		type: "playbook"
-	},
-	{
-		dir: "thesis",
-		type: "thesis"
-	},
-	{
-		dir: "methodology",
-		type: "methodology"
-	},
-	{
-		dir: "mechanisms",
-		type: "mechanism"
-	},
-	{
-		dir: "hypotheses",
-		type: "hypothesis"
-	}
-];
-function inferWikiTypeFromPath(path, fileName) {
-	const normalized = path.replace(/\\/g, "/").toLowerCase();
-	for (const { dir, type } of WIKI_TYPE_DIRS) if (normalized.includes(`/wiki/${dir}/`) || normalized.includes(`/${dir}/`) || normalized.startsWith(`wiki/${dir}/`)) return type;
-	if ((fileName ?? normalized.split("/").pop() ?? "").toLowerCase() === "overview.md" || normalized.includes("/overview.md")) return "overview";
-	const customDir = normalized.match(/(?:^|\/)wiki\/([^/.][^/]*)\/[^/]+\.md$/)?.[1];
-	if (customDir) return customDir;
-	return null;
-}
-
-//#endregion
-//#region src/lib/mechanism-wiki/domain-index-render.ts
-/**
-* Domain-first index of a mechanism wiki: the text of the index files.
-*
-* `wiki/index.md` lists the domain tree with page counts. `wiki/indexes/<domain>.md`
-* lists the pages of one domain, and `wiki/indexes/_mechanisms.md` lists the
-* mechanism pages. Everything here is pure: the same pages give the same bytes,
-* and nothing reads a file. It imports no Tauri code, so the `wiki-tool` CLI can
-* reuse it. The file reading and writing is in `domain-index.ts`.
-*/
-/** The folder of the index files, with a trailing slash. */
-const DOMAIN_INDEX_DIR = "wiki/indexes/";
-/** The root index. */
-const ROOT_INDEX_PATH = "wiki/index.md";
-/** The mechanism index. */
-const MECHANISM_INDEX_FILE = "_mechanisms.md";
-const MECHANISM_INDEX_PATH = `${DOMAIN_INDEX_DIR}${MECHANISM_INDEX_FILE}`;
-const MECHANISM_TYPE = "mechanism";
-/** The types that a domain index groups, in the order of its groups, with the heading of each group. */
-const DOMAIN_INDEX_GROUPS = [
-	{
-		type: "source",
-		heading: "Source"
-	},
-	{
-		type: "entity",
-		heading: "Entity"
-	},
-	{
-		type: "concept",
-		heading: "Concept"
-	},
-	{
-		type: "comparison",
-		heading: "Comparison"
-	},
-	{
-		type: "query",
-		heading: "Query"
-	},
-	{
-		type: "hypothesis",
-		heading: "Hypothesis"
-	}
-];
-/** Shown for a page that has no type at all. */
-const NO_TYPE_LABEL = "no type";
-/** File name of a domain index: the domain with `/` replaced by `--`. */
-function domainIndexFileName(domain) {
-	return `${domain.replace(/\//g, "--")}.md`;
-}
-/** `wiki/indexes/hardware--async-circuits.md` for `hardware/async-circuits`. */
-function domainIndexPath(domain) {
-	return `${DOMAIN_INDEX_DIR}${domainIndexFileName(domain)}`;
-}
-/** True for a file in `wiki/indexes/`. These files are made by the app, so they are never pages. */
-function isDomainIndexPath(relativePath) {
-	return relativePath.replace(/\\/g, "/").toLowerCase().startsWith(DOMAIN_INDEX_DIR);
-}
-/** The page that `markdown` is, at `path`. */
-function indexedPageFromMarkdown(path, markdown) {
-	const normalized = path.replace(/\\/g, "/");
-	const slug = fileStem(normalized);
-	const { frontmatter, body } = parseFrontmatter(markdown);
-	const field = (key) => {
-		const value = frontmatter?.[key];
-		if (typeof value !== "string") return null;
-		const trimmed = value.trim();
-		return trimmed === "" ? null : trimmed;
-	};
-	const type = field("type") ?? inferWikiTypeFromPath(normalized) ?? "";
-	const heading = /^#[ \t]+(.+)$/m.exec(body)?.[1];
-	return {
-		path: normalized,
-		slug,
-		type,
-		title: oneLine(field("title") ?? "") || oneLine(heading ?? "") || slug,
-		domain: type === "hypothesis" ? field("to_domain") : field("domain")
-	};
-}
-function fileStem(path) {
-	const name = path.slice(path.lastIndexOf("/") + 1);
-	return name.toLowerCase().endsWith(".md") ? name.slice(0, -3) : name;
-}
-/** Collapse every run of white space to one space, so a title stays on one line. */
-function oneLine(text) {
-	return text.replace(/\s+/g, " ").trim();
-}
-/**
-* `wiki/index.md`: a line for each domain of `domains.yaml` (sorted by path) with its
-* page count, then the mechanisms, then the pages that no listed domain holds.
-*/
-function renderRootIndex(pages, domains, options = {}) {
-	const listed = Object.keys(domains.domains).sort(compareText);
-	const counts = new Map(listed.map((domain) => [domain, 0]));
-	const unassigned = [];
-	let mechanisms = 0;
-	for (const page of pages) if (page.type === "mechanism") mechanisms += 1;
-	else if (page.domain !== null && counts.has(page.domain) && groupsPage(page)) counts.set(page.domain, (counts.get(page.domain) ?? 0) + 1);
-	else unassigned.push(page);
-	const sortedUnassigned = [...unassigned].sort(compareBySlug);
-	const shown = options.maxUnassigned === void 0 ? sortedUnassigned : sortedUnassigned.slice(0, options.maxUnassigned);
-	const hidden = sortedUnassigned.length - shown.length;
-	return [
-		"# Wiki Index",
-		"",
-		...listed.map((domain) => `- [${domain}](indexes/${domainIndexFileName(domain)}) — ${counts.get(domain)} pages`),
-		`- [Mechanisms](indexes/${MECHANISM_INDEX_FILE}) — ${mechanisms} pages`,
-		`- Unassigned — ${unassigned.length} pages`,
-		...shown.map((page) => `  - [[${page.slug}]]${typeNote(page)}`),
-		...hidden > 0 ? [`  - … ${hidden} more unassigned pages`] : [],
-		""
-	].join("\n");
-}
-/**
-* The index of one domain: its pages in a group for each type, with the groups in a
-* fixed order and the pages sorted by title. A domain without pages is a heading only.
-*/
-function renderDomainIndex(domain, pages) {
-	const own = pages.filter((page) => page.domain === domain && groupsPage(page));
-	const lines = [`# ${domain}`];
-	for (const group of DOMAIN_INDEX_GROUPS) {
-		const members = own.filter((page) => page.type === group.type).sort(comparePages);
-		if (members.length === 0) continue;
-		lines.push("", `## ${group.heading}`, "", ...members.map(pageLine));
-	}
-	return `${lines.join("\n")}\n`;
-}
-/** The mechanism index: a line for each page of type `mechanism`, sorted by title. */
-function renderMechanismIndex(pages) {
-	const mechanisms = pages.filter((page) => page.type === MECHANISM_TYPE).sort(comparePages);
-	const lines = ["# Mechanisms"];
-	if (mechanisms.length > 0) lines.push("", ...mechanisms.map(pageLine));
-	return `${lines.join("\n")}\n`;
-}
-/** True when a domain index has a group for the type of the page. */
-function groupsPage(page) {
-	return DOMAIN_INDEX_GROUPS.some((group) => group.type === page.type);
-}
-function pageLine(page) {
-	return `- [[${page.slug}]] — ${page.title}`;
-}
-/** The type of an unassigned page in parentheses, when the page's type is not one that the domain index groups. */
-function typeNote(page) {
-	return groupsPage(page) ? "" : ` (${page.type === "" ? NO_TYPE_LABEL : page.type})`;
-}
-/** UTF-16 code unit order. Unlike `localeCompare`, it gives the same result on every machine. */
-function compareText(a, b) {
-	return a < b ? -1 : a > b ? 1 : 0;
-}
-/** By slug, then path: the order of the unassigned list, which shows slugs only. */
-function compareBySlug(a, b) {
-	return compareText(a.slug, b.slug) || compareText(a.path, b.path);
-}
-/** By title without case, then by title, slug, and path, so that no two pages tie. */
-function comparePages(a, b) {
-	return compareText(a.title.toLowerCase(), b.title.toLowerCase()) || compareText(a.title, b.title) || compareText(a.slug, b.slug) || compareText(a.path, b.path);
-}
-
-//#endregion
 //#region src/lib/mechanism-wiki/lint-structure.ts
 /**
 * Layer-1 lint of a mechanism wiki: structural checks that need no model.
 *
 * `checkStructure` takes the pages, the domain files, the identity, the card map, and today's
 * date. It returns a list of findings and changes nothing. It is pure: no file access, no Tauri,
-* no store. The `wiki-tool` CLI bundles this file, so it may import only pure modules.
+* no store. It throws an `Error` when `today` is not a real date in `YYYY-MM-DD` form: that is a bug of the
+* caller, and every age would be wrong. The caller passes `localDate()`. The `wiki-tool` CLI bundles this
+* file, so it may import only pure modules.
 * The index module `domain-index.ts` reads files, so it is not imported here.
 *
 * Check ids: `domain-missing`, `domain-unknown`, `concept-cross-domain`, `mechanism-no-instance`,
@@ -7299,6 +7395,8 @@ function comparePages(a, b) {
 * for every check (ruling R19).
 * A hypothesis page that lacks `from_domain` or `to_domain` gets `domain-missing` (ruling U10).
 */
+/** The check id of a config file problem (ruling U14). The skill `wiki-lint` names it. */
+const CONFIG_INVALID_CHECK = "config-invalid";
 /** Starts the text of a problem in a file of the reading wiki. */
 const LIBRARY_PROBLEM_PREFIX = "reading wiki ";
 /**
@@ -7312,16 +7410,9 @@ function configProblemText(issue, source) {
 }
 function classifyProblem(problem) {
 	const library = problem.startsWith(LIBRARY_PROBLEM_PREFIX);
-	return /^domains\.yaml(?:$|[:\s])/.test(library ? problem.slice(13) : problem) ? library ? "library-domains" : "domains" : "other";
+	if (/^domains\.yaml(?:$|[:\s])/.test(library ? problem.slice(13) : problem)) return library ? "library-domains" : "domains";
+	return !library && /^wiki\.yaml:lint(?:$|[.:\s])/.test(problem) ? "threshold" : "other";
 }
-/** Files of `wiki/` that are not pages. The app keeps them. */
-const NON_PAGE_PATHS$1 = new Set([
-	"wiki/index.md",
-	"wiki/log.md",
-	"wiki/overview.md"
-]);
-/** Shown in the title of a retired mirror card. The tool puts the full prefix before the title. */
-const RETIRED_TITLE_PREFIX = "🗄 已停用";
 const RAW_SOURCES_DIR = "raw/sources/";
 const HYPOTHESIS_TYPE$1 = "hypothesis";
 /** The fields of a hypothesis page that may name a domain of the reading wiki. */
@@ -7329,8 +7420,9 @@ const HYPOTHESIS_DOMAIN_FIELDS = ["from_domain", "to_domain"];
 const SOURCE_TYPE = "source";
 const CROSS_DOMAIN_TYPES = ["concept", "entity"];
 const MS_PER_DAY = 864e5;
-/** The page that `markdown` is, at `path`, with the fields that the checks read. */
-function structurePageFromMarkdown(path, markdown) {
+/** The page that `markdown` is, at `path`, with the fields that the checks read. A byte order mark before the frontmatter is ignored. */
+function structurePageFromMarkdown(path, rawMarkdown) {
+	const markdown = withoutBom(rawMarkdown);
 	const base = indexedPageFromMarkdown(path, markdown);
 	const { frontmatter } = parseFrontmatter(markdown);
 	const text = (key) => {
@@ -7356,6 +7448,10 @@ function structurePageFromMarkdown(path, markdown) {
 	if (created !== void 0) page.created = created;
 	if (frontmatter !== null && frontmatter !== void 0 && "instances" in frontmatter) page.instances = list("instances");
 	page.fromDomain = base.type === HYPOTHESIS_TYPE$1 ? text("from_domain") ?? null : null;
+	page.mirrored = isSyncable({
+		type: text("type") ?? "",
+		sources: page.sources
+	});
 	return page;
 }
 /**
@@ -7404,16 +7500,15 @@ function checkStructure(input) {
 	].sort(compareFindings);
 }
 function isWikiPage(path) {
-	const key = path.replace(/\\/g, "/").toLowerCase();
-	return key.startsWith("wiki/") && !isDomainIndexPath(key) && !NON_PAGE_PATHS$1.has(key);
+	return path.replace(/\\/g, "/").toLowerCase().startsWith("wiki/") && !isAppOwnPath(path);
 }
 /** One finding for each config problem. The text of the problem is in the message. */
 function checkConfigProblems(problems, kinds) {
 	return problems.map((problem, index) => {
 		const kind = kinds[index];
-		const consequence = kind === "domains" ? "The domain checks are skipped until you fix the file." : kind === "library-domains" ? "The domains of the reading wiki are not checked until you fix the file." : "Fix the file.";
+		const consequence = kind === "domains" ? "The domain checks are skipped until you fix the file." : kind === "library-domains" ? "The domains of the reading wiki are not checked until you fix the file." : kind === "threshold" ? "The default value of the threshold is used until you fix the file." : "Fix the file.";
 		return {
-			check: "config-invalid",
+			check: CONFIG_INVALID_CHECK,
 			page: null,
 			message: `A config file has a problem: ${problem.replace(/[.\s]+$/, "")}. ${consequence}`
 		};
@@ -7520,7 +7615,7 @@ function checkCrossDomain(pages) {
 		const domains = /* @__PURE__ */ new Set();
 		for (const file of page.sources) for (const domain of domainsOfReference(file)) domains.add(domain);
 		if (domains.size < 2) continue;
-		const names = [...domains].sort(compareText);
+		const names = [...domains].sort(compareText$1);
 		findings.push({
 			check: "concept-cross-domain",
 			page: page.path,
@@ -7546,21 +7641,28 @@ function checkMechanismInstances(pages, identity) {
 		message: "This mechanism has no instance. Add an instance page under Known instances, or remove the mechanism."
 	}));
 }
-/** A retired card is left in Heptabase for the user to delete. An active entry needs its page. */
+/**
+* A retired card is left in Heptabase for the user to delete. An active entry needs its page.
+*
+* A retired entry whose page file exists again is not reported when the sync mirrors the page (`mirrored`): the
+* next sync updates that card and makes it active, so the user must not delete it. When the user deleted a
+* retired card, the next sync drops the entry (`hepta plan-down` plans `forget`), and this finding ends.
+*/
 function checkCardMap(input) {
 	if (input.cardMap === null) return [];
-	const titles = new Map(input.pages.map((page) => [normalizePath(page.path), page.title]));
+	const byPath = new Map(input.pages.map((page) => [normalizePath(page.path), page]));
 	const findings = [];
 	for (const [rawPath, entry] of Object.entries(input.cardMap.pages)) {
 		const path = normalizePath(rawPath);
 		if (entry.status === "retired") {
-			const title = titles.get(path);
+			const page = byPath.get(path);
+			if (page?.mirrored === true) continue;
 			findings.push({
 				check: "mirror-retired",
 				page: path,
-				message: `The card of ${path}${title === void 0 ? "" : ` ("${title}")`} is retired. Card id: ${entry.card_id}. Find the card in the mirror tag by this id or by the "${RETIRED_TITLE_PREFIX}" title prefix. Delete it by hand.`
+				message: `The card of ${path}${page === void 0 ? "" : ` ("${page.title}")`} is retired. Card id: ${entry.card_id}. Find the card in the mirror tag by this id or by the "${RETIRED_TITLE_PREFIX}" title prefix. Delete it by hand. The next wiki-sync then drops the entry from the card map.`
 			});
-		} else if (entry.status === "active" && !titles.has(path)) findings.push({
+		} else if (entry.status === "active" && !byPath.has(path)) findings.push({
 			check: "map-missing-page",
 			page: path,
 			message: `The card map lists ${path} (card id: ${entry.card_id}) as active, but the page is not in the wiki. Restore the page, or let the next mirror sync retire the card.`
@@ -7626,24 +7728,35 @@ function utcDay(text) {
 /**
 * The page count of each domain of `domains.yaml`, with zero for a domain that has no page.
 * A page counts once, under its `domain` (a hypothesis: its `to_domain`), never under `also`.
+*
+* `domain-too-large` uses the pages of the domain itself: splitting it into child domains is the cure. `domain-too-small`
+* adds the pages of every listed domain below it (`<domain>/...`), so a parent whose pages are all in its children is
+* not reported as empty. A domain of the wiki that `domains.yaml` does not list has no count.
 */
 function checkDomainSizes(pages, input) {
 	const { max_domain_pages: max, min_domain_pages: min } = input.identity.lint;
 	const counts = new Map(Object.keys(input.domains.domains).map((domain) => [domain, 0]));
 	for (const page of pages) if (page.domain !== null && counts.has(page.domain)) counts.set(page.domain, (counts.get(page.domain) ?? 0) + 1);
 	const findings = [];
-	for (const [domain, count] of counts) if (count > max) findings.push({
-		check: "domain-too-large",
-		page: null,
-		message: `Domain "${domain}" has ${plural(count)}. The limit is ${max}. Split it into sub-domains.`,
-		domains: [domain]
-	});
-	else if (count < min) findings.push({
-		check: "domain-too-small",
-		page: null,
-		message: `Domain "${domain}" has ${plural(count)}. The minimum is ${min}. Add pages, or merge it into a parent domain.`,
-		domains: [domain]
-	});
+	for (const [domain, count] of counts) {
+		if (count > max) {
+			findings.push({
+				check: "domain-too-large",
+				page: null,
+				message: `Domain "${domain}" has ${plural(count)}. The limit is ${max}. Split it into sub-domains.`,
+				domains: [domain]
+			});
+			continue;
+		}
+		const children = [...counts].filter(([other]) => other.startsWith(`${domain}/`));
+		const total = children.reduce((sum, [, childCount]) => sum + childCount, count);
+		if (total < min) findings.push({
+			check: "domain-too-small",
+			page: null,
+			message: `Domain "${domain}" has ${plural(total)}${children.length > 0 ? " with its child domains" : ""}. The minimum is ${min}. Add pages, or merge it into a parent domain.`,
+			domains: [domain]
+		});
+	}
 	return findings;
 }
 function hasDomain(page) {
@@ -7661,7 +7774,7 @@ function normalizePath(path) {
 }
 /** By check id, then page path (a finding without a page first), then the domains, then the message. */
 function compareFindings(a, b) {
-	return compareText(a.check, b.check) || compareText(a.page ?? "", b.page ?? "") || compareText((a.domains ?? []).join("\n"), (b.domains ?? []).join("\n")) || compareText(a.message, b.message);
+	return compareText$1(a.check, b.check) || compareText$1(a.page ?? "", b.page ?? "") || compareText$1((a.domains ?? []).join("\n"), (b.domains ?? []).join("\n")) || compareText$1(a.message, b.message);
 }
 
 //#endregion
@@ -7678,12 +7791,6 @@ const DOMAINS_FILE$1 = "domains.yaml";
 const WIKI_FILE = "wiki.yaml";
 const UNREADABLE_MESSAGE = "could not read the file";
 const MISSING_WIKI_MESSAGE = "the file is missing; treating this wiki as a reading wiki with id \"reading\"";
-/** The pages that the app keeps in `wiki/`. They are no pages of the wiki. */
-const NON_PAGE_PATHS = new Set([
-	"wiki/index.md",
-	"wiki/log.md",
-	"wiki/overview.md"
-]);
 /** True when the project has a `domains.yaml`: it is a mechanism wiki. */
 function isMechanismWiki(project) {
 	return existsSync(join(resolve(project), DOMAINS_FILE$1));
@@ -7731,16 +7838,6 @@ function loadLintProject(project) {
 		blockingProblems
 	};
 }
-/** The lint thresholds and the role of a wiki without `wiki.yaml`. */
-function defaultIdentity() {
-	return {
-		version: 1,
-		id: "reading",
-		role: "reading",
-		mechanism_library: null,
-		lint: { ...DEFAULT_LINT_THRESHOLDS }
-	};
-}
 /** The text of a file without a byte order mark. Null when the file is missing; undefined when it cannot be read. */
 function readText(path) {
 	if (!existsSync(path)) return null;
@@ -7779,7 +7876,7 @@ function readIdentity(root) {
 	if (parsed.ok) return {
 		identity: parsed.value,
 		status: "ok",
-		issues: []
+		issues: parsed.issues.map((issue) => fileIssue(WIKI_FILE, issue))
 	};
 	return {
 		identity: defaultIdentity(),
@@ -7828,7 +7925,7 @@ function libraryOnlyDomains(project) {
 /** True for the path of a page of the wiki: a file under `wiki/` that is not one of the pages of the app. */
 function isPagePath(path) {
 	const key = path.replace(/\\/g, "/").toLowerCase();
-	return key.startsWith("wiki/") && key.endsWith(".md") && !isDomainIndexPath(key) && !NON_PAGE_PATHS.has(key);
+	return key.startsWith("wiki/") && key.endsWith(".md") && !isAppOwnPath(key);
 }
 /**
 * Parse the options of a lint command. `--project` is required and must be a folder. A problem comes back as the
@@ -7880,6 +7977,7 @@ function notMechanismWiki(project) {
 * of its own, and `notes` names it. A domain that no domain list holds, in this wiki or (in a work wiki) in the
 * reading wiki, is a handled problem.
 */
+/** The size limit of a batch when `--max-chars` is not given. The skill `wiki-lint` names it. */
 const DEFAULT_MAX_CHARS = 6e4;
 function lintBatch(args) {
 	const parsed = parseLintArgs(args, ["domain", "max-chars"], ["domain"]);
@@ -7908,7 +8006,7 @@ function lintBatch(args) {
 	const pages = readWikiPages(project, { allowMissingWiki: true }).map((page) => ({
 		page: structurePageFromMarkdown(page.path, page.markdown),
 		size: page.markdown.length
-	})).filter(({ page }) => page.domain === domain && page.type !== "mechanism").sort((a, b) => compareText$1(a.page.type, b.page.type) || compareText$1(a.page.path, b.page.path));
+	})).filter(({ page }) => page.domain === domain && page.type !== "mechanism").sort((a, b) => compareText(a.page.type, b.page.type) || compareText(a.page.path, b.page.path));
 	const batches = [];
 	const notes = [];
 	let current = [];
@@ -7938,13 +8036,42 @@ function lintBatch(args) {
 /**
 * The marker file of the semantic lint: `.llm-wiki/semantic-lint.json`, `{ "commit": "<sha>", "at": "<ISO time>" }`.
 *
-* `lint mark` writes it with the sha of `HEAD`. `lint changed-domains` reads it. The folder `.llm-wiki/` is never
+* `lint mark` writes it with the sha of `HEAD`, or of the commit that `--commit` names. `lint changed-domains` reads it. The folder `.llm-wiki/` is never
 * committed.
 */
 /** The marker file, relative to the project folder. */
 const MARKER_FILE = ".llm-wiki/semantic-lint.json";
 /** A sha as the marker keeps it: 7 to 64 hex digits. Anything else could be read by git as an option or a name. */
 const SHA_PATTERN = /^[0-9a-f]{7,64}$/i;
+/** True for text that can be the sha of a commit: 7 to 64 hex digits. */
+function isCommitSha(text) {
+	return SHA_PATTERN.test(text);
+}
+/** The full sha of `commit` when the repository has that commit, else null. `commit` must be `isCommitSha`. */
+function resolveCommit(project, commit) {
+	const found = readGit(project, [
+		"rev-parse",
+		"--verify",
+		"--quiet",
+		`${commit}^{commit}`
+	]);
+	return found.status === 0 ? found.stdout.trim() : null;
+}
+/**
+* The full sha of `commit` when it is a commit of the repository that is an ancestor of `HEAD` (or `HEAD` itself), else
+* null. `commit` must be `isCommitSha`. The commit may be unknown (the history was rewritten and the object is gone),
+* or known and on another line of history.
+*/
+function ancestorOfHead(project, commit) {
+	const sha = resolveCommit(project, commit);
+	if (sha === null) return null;
+	return readGit(project, [
+		"merge-base",
+		"--is-ancestor",
+		sha,
+		"HEAD"
+	]).status === 0 ? sha : null;
+}
 /**
 * The commit of the marker of a project. A missing file is "none". A file that cannot be read, is not JSON, or
 * has no usable `commit` is "bad", with the reason. The sha is not checked against the repository.
@@ -8032,7 +8159,7 @@ function lintChangedDomains(args) {
 	let note;
 	let since = null;
 	if (head !== null && marker.kind === "commit") {
-		since = usableMarkerCommit(project, marker.commit);
+		since = ancestorOfHead(project, marker.commit);
 		if (since === null) note = `The marker commit ${marker.commit} is not in the history of HEAD (the history was rewritten, or the marker is not a commit). Every domain is listed.`;
 	} else if (marker.kind === "bad") note = `The marker file .llm-wiki/semantic-lint.json cannot be used: ${marker.reason}. Every domain is listed.`;
 	const touched = /* @__PURE__ */ new Set();
@@ -8071,26 +8198,6 @@ function orderedDomains(config, touched, everyOwnDomain) {
 function domainsOfPage(path, markdown) {
 	const page = structurePageFromMarkdown(path, markdown);
 	return [...page.domain === null ? [] : [page.domain], ...page.also];
-}
-/**
-* The full sha of the marker commit when it is an ancestor of `HEAD`, else null. The commit may be unknown
-* (the history was rewritten and the object is gone), or known and on another line of history.
-*/
-function usableMarkerCommit(project, commit) {
-	const found = readGit(project, [
-		"rev-parse",
-		"--verify",
-		"--quiet",
-		`${commit}^{commit}`
-	]);
-	if (found.status !== 0) return null;
-	const sha = found.stdout.trim();
-	return readGit(project, [
-		"merge-base",
-		"--is-ancestor",
-		sha,
-		"HEAD"
-	]).status === 0 ? sha : null;
 }
 /**
 * The files under `wiki/` that differ between `since` and `HEAD`, with the paths relative to the project folder.
@@ -8145,27 +8252,44 @@ function countIngests(project, since) {
 //#endregion
 //#region tools/wiki-tool/src/lint/mark.ts
 /**
-* `wiki-tool lint mark` - record that the semantic lint has seen the wiki as it is at `HEAD`.
+* `wiki-tool lint mark` - record that the semantic lint has seen the wiki as it is at a commit.
 *
-* `--project P` writes `.llm-wiki/semantic-lint.json` as `{ "commit": "<sha of HEAD>", "at": "<ISO time>" }` and gives
-* `{ ok: true, commit, at }`. `lint changed-domains` reads the marker (see marker.ts). The marker is never
-* committed. A project that is not a mechanism wiki (no `domains.yaml`), a project that is not a git repository, and
-* a repository with no commit give exit 2 and no marker.
+* `--project P [--commit SHA]` writes `.llm-wiki/semantic-lint.json` as `{ "commit": "<sha>", "at": "<ISO time>" }` and
+* gives `{ ok: true, commit, at }`. The commit is `HEAD`, or the commit that `--commit` names (a sha of 7 to 64 hex
+* digits). That commit must be an ancestor of `HEAD` or `HEAD` itself, else the command refuses and writes nothing. The
+* app can commit an ingest at any time during a long lint: the skill notes `HEAD` when it starts and marks that commit,
+* so what came after it counts as changed at the next lint. `lint changed-domains` reads the marker (see marker.ts).
+* The marker is never committed. A project that is not a mechanism wiki (no `domains.yaml`), a project that is not a git
+* repository, and a repository with no commit give exit 2 and no marker.
 */
 function lintMark(args) {
-	const parsed = parseLintArgs(args);
+	const parsed = parseLintArgs(args, ["commit"]);
 	if (!parsed.ok) return parsed.result;
-	const { project } = parsed;
+	const { project, values } = parsed;
 	if (!isMechanismWiki(project)) return notMechanismWiki(project);
 	if (!isGitWorkTree(project)) return {
 		ok: false,
 		problems: [`not inside a git work tree: ${project}`]
 	};
-	const commit = headCommit(project);
-	if (commit === null) return {
+	const head = headCommit(project);
+	if (head === null) return {
 		ok: false,
 		problems: ["the repository has no commit yet; commit the wiki first"]
 	};
+	let commit = head;
+	const wanted = values.commit;
+	if (wanted !== void 0) {
+		if (!isCommitSha(wanted)) return {
+			ok: false,
+			problems: [`--commit must be the sha of a commit (7 to 64 hex digits): ${JSON.stringify(wanted)}`]
+		};
+		const found = ancestorOfHead(project, wanted);
+		if (found === null) return {
+			ok: false,
+			problems: [`--commit ${wanted} is not ${resolveCommit(project, wanted) === null ? "a commit of this repository" : "an ancestor of HEAD, so it cannot be a baseline"}`]
+		};
+		commit = found;
+	}
 	const at = (/* @__PURE__ */ new Date()).toISOString();
 	writeMarker(project, commit, at);
 	return {
@@ -8263,15 +8387,43 @@ function realPathOrParent(path) {
 	}
 }
 /**
-* Why a recut must not write the project file `relativePath`, or null when it may. The file is outside the project once
-* links are followed, or its path cannot be resolved (a link loop, no permission): the text names the cause and the path.
+* Why a recut must not write or remove the project file `relativePath`, or null when it may. The text names the cause:
+* the file is outside the project once links are followed, its path cannot be resolved (a link loop, no permission), or
+* the file or a folder in its path is a link that stays inside the project. A write through such a link would replace
+* the link with a regular file, so a recut treats these paths as it treats a page (see `read-pages.ts`).
 */
 function insideProblem(project, relativePath) {
 	try {
 		const real = realPathOrParent(resolveInProject(project, relativePath));
-		return isInsideRoot(realProjectRoot(project), real) ? null : `the file is outside the project (it is ${real})`;
+		if (!isInsideRoot(realProjectRoot(project), real)) return `the file is outside the project (it is ${real})`;
 	} catch (error) {
 		return `the path cannot be resolved (${error instanceof Error ? error.message : String(error)})`;
+	}
+	return linkProblem(project, relativePath);
+}
+/** A link in the path, from the project folder down: "the file is a link" or "a folder in its path is a link". */
+function linkProblem(project, relativePath) {
+	const names = relativePath.replace(/\\/g, "/").split("/").filter((name) => name !== "" && name !== ".");
+	let current = resolve(project);
+	for (const [index, name] of names.entries()) {
+		current = join(current, name);
+		try {
+			if (lstatSync(current).isSymbolicLink()) return index === names.length - 1 ? "the file is a link" : "a folder in its path is a link";
+		} catch (error) {
+			const code = error instanceof Error ? error.code : void 0;
+			if (code === "ENOENT" || code === "ENOTDIR") return null;
+			return `the path cannot be resolved (${error instanceof Error ? error.message : String(error)})`;
+		}
+	}
+	return null;
+}
+/** True when something is at `path`, also a link that leads nowhere or loops. `existsSync` follows the link and says false. */
+function lexists(path) {
+	try {
+		lstatSync(path);
+		return true;
+	} catch {
+		return false;
 	}
 }
 
@@ -8284,7 +8436,7 @@ function insideProblem(project, relativePath) {
 * (`recordDismissedPairs` in `src/lib/mechanism-wiki/fusion-candidates.ts`). When a recut gives a domain another name,
 * its pairs follow, so that a skipped candidate stays skipped. The file is local state and never committed. A file
 * that is missing, is not JSON, or is not a list is left alone, and so is an entry that is not a pair. A file that is a
-* link that leads out of the project, or that cannot be resolved, is never written: the function throws.
+* link, that is in a folder that is a link, or whose path cannot be resolved (a loop) is never written: the function throws.
 */
 const FUSION_DISMISSED_FILE = ".llm-wiki/fusion-dismissed.json";
 function isPair(value) {
@@ -8298,7 +8450,7 @@ function isPair(value) {
 */
 function remapDismissedPairs(project, map) {
 	const path = resolveInProject(project, FUSION_DISMISSED_FILE);
-	if (!existsSync(path)) return false;
+	if (!lexists(path)) return false;
 	const problem = insideProblem(project, FUSION_DISMISSED_FILE);
 	if (problem !== null) throw new Error(problem);
 	let entries;
@@ -8899,6 +9051,7 @@ function recutPage(path, markdown) {
 		key: "also",
 		value: item.trim()
 	});
+	const relation = indexed.type === "hypothesis" ? frontmatter?.relation : void 0;
 	return {
 		path: indexed.path,
 		slug: indexed.slug,
@@ -8906,6 +9059,7 @@ function recutPage(path, markdown) {
 		type: indexed.type,
 		domain: indexed.domain,
 		refs,
+		relation: typeof relation === "string" && relation.trim() !== "" ? relation.trim() : null,
 		markdown
 	};
 }
@@ -9232,6 +9386,17 @@ function generated(name, text, whiteboards) {
 		whiteboards: [...whiteboards]
 	};
 }
+/**
+* The note for a reading wiki (ruling U21). A work wiki whose `mechanism_library` is this wiki names the domains of
+* this wiki in the `from_domain` and `to_domain` of its hypothesis pages, and a recut here cannot change those pages.
+* The note lists each domain that gets another name, with its new name (a split: the new domains, as a choice). Null
+* when no name changes, which no recut does.
+*/
+function libraryNote(plan, changes) {
+	const pairs = plan.op === "split" ? [[plan.from, plan.into.map((entry) => entry.domain)]] : plan.op === "merge" ? plan.from.filter((domain) => domain !== plan.into.domain).map((domain) => [domain, [plan.into.domain]]) : [...changes.renames].map(([old, now]) => [old, [now]]);
+	if (pairs.length === 0) return null;
+	return `This is a reading wiki. A work wiki whose mechanism_library is this wiki keeps the old names in the from_domain and to_domain of its hypothesis pages. Those pages need the new names: ${pairs.map(([old, now]) => `${old} → ${now.join(" or ")}`).join("; ")}. Until then, fuse check and the lint of that work wiki report them.`;
+}
 /** The subject of the commit without its prefix and its count: `rename <from> → <to>`. */
 function planTitle(plan) {
 	if (plan.op === "split") return `split ${plan.from} → ${plan.into.map((entry) => entry.domain).join("+")}`;
@@ -9239,26 +9404,49 @@ function planTitle(plan) {
 	return `${plan.op} ${plan.from} → ${plan.to}`;
 }
 /**
-* Pairs of pages with the same slug that a merge brings into one domain: the pages of the merged domains and of the
-* target, from two different domains. The two paths of a pair are in path order, and so are the pairs.
+* Pairs of pages with the same name that a merge brings into one domain: the pages of the merged domains and of the
+* target, from two different domains. Two such pages never share a slug in one folder, because ingest gives the
+* second one the suffix `--<domain>` (`enforce.ts`, rule 5). So the name of a page is its slug without that suffix
+* (`baseName`). Two pages that have the same slug count too, as before. The two paths of a pair are in path order,
+* and so are the pairs.
 */
 function findMergeCandidates(plan, pages) {
 	if (plan.op !== "merge") return [];
 	const joined = new Set([...plan.from, plan.into.domain]);
 	const bySlug = /* @__PURE__ */ new Map();
+	const byBaseName = /* @__PURE__ */ new Map();
+	const add = (groups, key, page) => {
+		groups.set(key, [...groups.get(key) ?? [], page]);
+	};
 	for (const page of pages) {
 		if (page.domain === null || !joined.has(page.domain) || page.type === "mechanism") continue;
-		bySlug.set(page.slug, [...bySlug.get(page.slug) ?? [], page]);
+		add(bySlug, page.slug, page);
+		add(byBaseName, baseName(page), page);
 	}
-	const pairs = [];
-	for (const group of bySlug.values()) {
-		const sorted = [...group].sort((x, y) => compareText$1(x.path, y.path));
-		for (let first = 0; first < sorted.length; first += 1) for (let second = first + 1; second < sorted.length; second += 1) if (sorted[first].domain !== sorted[second].domain) pairs.push({
-			a: sorted[first].path,
-			b: sorted[second].path
-		});
+	const pairs = /* @__PURE__ */ new Map();
+	for (const group of [...bySlug.values(), ...byBaseName.values()]) {
+		const sorted = [...group].sort((x, y) => compareText(x.path, y.path));
+		for (let first = 0; first < sorted.length; first += 1) for (let second = first + 1; second < sorted.length; second += 1) {
+			if (sorted[first].domain === sorted[second].domain) continue;
+			pairs.set(`${sorted[first].path}\n${sorted[second].path}`, {
+				a: sorted[first].path,
+				b: sorted[second].path
+			});
+		}
 	}
-	return pairs.sort((x, y) => compareText$1(x.a, y.a) || compareText$1(x.b, y.b));
+	return [...pairs.values()].sort((x, y) => compareText(x.a, y.a) || compareText(x.b, y.b));
+}
+/**
+* The slug of `page` without the suffix that ingest adds to keep two domains apart: `--<domain with / as -->`, else
+* `--<last segment of the domain>`. The whole form comes first, because the short form is the end of it. The suffix
+* must be that of the domain of the page itself, and it must leave a name.
+*/
+function baseName(page) {
+	if (page.domain === null) return page.slug;
+	const whole = `--${page.domain.replace(/\//g, "--")}`;
+	const short = `--${page.domain.split("/").pop()}`;
+	for (const suffix of [whole, short]) if (page.slug.length > suffix.length && page.slug.endsWith(suffix)) return page.slug.slice(0, -suffix.length);
+	return page.slug;
 }
 
 //#endregion
@@ -9321,6 +9509,7 @@ function computePageEdits(plan, sources) {
 			if (edit.ok) text = edit.text;
 			else result.problems.push(`${page.path}: ${edit.reason}`);
 		}
+		checkHypothesisDomains(page, mapped, result);
 		if (page.type === "mechanism") {
 			const rewritten = rewriteInstanceLines(text, (domain, slug) => {
 				if (assigned === null || plan.op !== "split") return mapper.map(domain, page.path);
@@ -9346,6 +9535,23 @@ function computePageEdits(plan, sources) {
 		});
 	}
 	return result;
+}
+/**
+* A merge can give `from_domain` and `to_domain` of a hypothesis the same name. A stack needs two domains (`fuse check`
+* refuses the page), so the recut stops there. An analogy that borrows inside one domain is odd but valid, so it gets a
+* note. A hypothesis that had one domain before the recut is not the business of the recut.
+*/
+function checkHypothesisDomains(page, mapped, result) {
+	if (page.type !== "hypothesis") return;
+	const from = page.refs.find((ref) => ref.key === "from_domain")?.value;
+	const to = page.refs.find((ref) => ref.key === "to_domain")?.value;
+	if (from === void 0 || to === void 0 || from === to || mapped(from) !== mapped(to)) return;
+	const domain = mapped(from);
+	if (page.relation === "stack") result.problems.push(`${page.path}: relation stack needs two domains, but this recut gives from_domain and to_domain the same domain ${domain}. Change the plan so that the two domains of this page stay two domains.`);
+	else {
+		const kind = page.relation === "analogy" ? "analogy" : "hypothesis";
+		result.notes.push(`${page.path}: this ${kind} now has the same domain ${domain} in from_domain and to_domain. Check if it still makes sense.`);
+	}
 }
 /** The new domains of the assigned pages, by the lower-case slug of the page. */
 function assignedDomainsBySlug(assignments, sources) {
@@ -9468,7 +9674,7 @@ function uncommittedChanges(project) {
 			if (!(relative === "heptabase-map.json" || relative === LLM_WIKI_DIR || relative.startsWith(`${LLM_WIKI_DIR}/`))) paths.add(relative);
 		}
 	}
-	return [...paths].sort(compareText$1);
+	return [...paths].sort(compareText);
 }
 
 //#endregion
@@ -9478,7 +9684,7 @@ function uncommittedChanges(project) {
 *
 * `--project P --plan F` gives `{ ok: true, sha, pages, mergeCandidates?, notes? }`. `F` is the path of a JSON file with
 * the plan (see `plan.ts`), or the JSON itself when it starts with `{`. `pages` are the wiki pages that changed;
-* `sha` is the new commit. A merge always gives `mergeCandidates`: pairs of pages with the same slug that the merge
+* `sha` is the new commit. A merge always gives `mergeCandidates`: pairs of pages with the same name that the merge
 * brings into one domain (the skill files them as `duplicate` reviews). `notes` are things to tell the user.
 *
 * The command checks everything before it writes anything: the plan against `domains.yaml` and the pages, the work
@@ -9492,6 +9698,9 @@ function uncommittedChanges(project) {
 * 4. commits all of these files in one commit `recut: <op> <from> → <to> (<N> pages)`, where N counts the changed wiki
 *    pages only (ruling U7), through `commitPathsLocked`;
 * 5. after the commit, gives the dismissed fusion pairs the new names (ruling U5; not committed).
+*
+* In a reading wiki, `notes` also says which domain names changed: a work wiki that reads this wiki keeps the old names in
+* the `from_domain` and `to_domain` of its hypothesis pages, and its pages need the new names (ruling U21).
 *
 * When the commit fails, the files are taken out of the index, every file goes back to what it was, and the command exits
 * with the problem, so a failed recut leaves the work tree as it found it. Nothing is pushed.
@@ -9574,10 +9783,10 @@ async function recutApply(args) {
 	const indexFiles = [
 		[ROOT_INDEX_PATH, renderRootIndex(indexed, changes.next)],
 		[MECHANISM_INDEX_PATH, renderMechanismIndex(indexed)],
-		...Object.keys(changes.next.domains).sort(compareText$1).map((domain) => [domainIndexPath(domain), renderDomainIndex(domain, indexed)])
+		...Object.keys(changes.next.domains).sort(compareText).map((domain) => [domainIndexPath(domain), renderDomainIndex(domain, indexed)])
 	];
 	const writes = indexFiles.filter(([path, text]) => currentText(project, path) !== text).map(([path]) => path);
-	const removals = changes.removed.map(domainIndexPath).filter((path) => existsSync(resolveInProject(project, path)));
+	const removals = changes.removed.map(domainIndexPath).filter((path) => lexists(resolveInProject(project, path)));
 	const outside = [
 		DOMAINS_FILE,
 		...writes,
@@ -9613,6 +9822,8 @@ async function recutApply(args) {
 	}
 	if (!committed.ok) return failed(project, files, committed.problem, true);
 	const notes = [...changes.notes, ...pageEdits.notes];
+	const reading = config.identity.role === "reading" ? libraryNote(plan, changes) : null;
+	if (reading !== null) notes.push(reading);
 	if (plan.op !== "split") {
 		const mapper = createMapper(plan);
 		try {
@@ -9648,6 +9859,7 @@ async function failed(project, files, problem, staged) {
 		problems: [...problem === "" ? [] : [problem], ...extra]
 	};
 }
+/** The problem for a file that another tool changed while the recut ran. The skill `wiki-recut` names it. */
 function staleProblem(path) {
 	return `${path} changed while the recut ran, so nothing was written. Run the recut again.`;
 }
@@ -9719,7 +9931,7 @@ function editedDomainsFile(project, plan, changes, lenses) {
 	};
 }
 function sameDomains(a, b) {
-	const normal = (config) => JSON.stringify(Object.keys(config.domains).sort(compareText$1).map((name) => [name, config.domains[name]]));
+	const normal = (config) => JSON.stringify(Object.keys(config.domains).sort(compareText).map((name) => [name, config.domains[name]]));
 	return normal(a) === normal(b);
 }
 function currentText(project, path) {

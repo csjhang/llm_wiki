@@ -6,7 +6,7 @@
  */
 import { readFileSync, readdirSync, statSync } from "node:fs"
 import { join, relative } from "node:path"
-import { type IndexedPage, domainIndexPath, indexedPageFromMarkdown, MECHANISM_INDEX_PATH, renderDomainIndex, renderMechanismIndex, renderRootIndex, ROOT_INDEX_PATH } from "@/lib/mechanism-wiki/domain-index-render"
+import { type IndexedPage, domainIndexPath, indexedPageFromMarkdown, isAppOwnPath, MECHANISM_INDEX_PATH, renderDomainIndex, renderMechanismIndex, renderRootIndex, ROOT_INDEX_PATH } from "@/lib/mechanism-wiki/domain-index-render"
 import { parseDomainsYaml } from "@/lib/wiki-config/domains"
 import { runCli } from "../cli"
 import { commit, git, initRepo } from "../lint/lint-fixture"
@@ -141,7 +141,7 @@ export function indexFiles(project: string): Record<string, string> {
   if (!domains.ok) throw new Error("the fixture domains.yaml is not valid")
   const pages: IndexedPage[] = markdownFiles(join(project, "wiki"))
     .map((file) => relative(project, file).replace(/\\/g, "/"))
-    .filter((path) => !["wiki/index.md", "wiki/log.md", "wiki/overview.md"].includes(path) && !path.startsWith("wiki/indexes/"))
+    .filter((path) => !isAppOwnPath(path))
     .map((path) => indexedPageFromMarkdown(path, readFileSync(join(project, path), "utf8")))
   const files: Record<string, string> = {
     [ROOT_INDEX_PATH]: renderRootIndex(pages, domains.value),

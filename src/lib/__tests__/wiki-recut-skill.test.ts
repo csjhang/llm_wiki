@@ -13,9 +13,11 @@ import { isAllowedApiReviewAction } from "@/lib/review-option-actions"
 import { apiReviewTypes, fillPlaceholders, jsonBlocks, OPTION_PROBLEM, readRepoFile, wikiToolCommands } from "@/test-helpers/skill-contract"
 import { findLongSentences } from "@/test-helpers/ste-check"
 import { runCli } from "../../../tools/wiki-tool/src/cli"
+import { missingOptionMessage } from "../../../tools/wiki-tool/src/cmd-plan-down"
 import { GIT_LOCK_BUSY_MESSAGE } from "../../../tools/wiki-tool/src/git-lock"
 import { commit } from "../../../tools/wiki-tool/src/lint/lint-fixture"
 import { RECUT_GROUP } from "../../../tools/wiki-tool/src/recut"
+import { staleProblem } from "../../../tools/wiki-tool/src/recut/apply"
 import { parseRecutPlan } from "../../../tools/wiki-tool/src/recut/plan"
 import {
   ALPHA,
@@ -275,7 +277,7 @@ describe("wiki-recut skill: the Heptabase options", () => {
   it("a missing option stops the card at the next sync, as wiki-sync says", () => {
     const sync = readRepoFile("plugins/llm-wiki/skills/wiki-sync/SKILL.md")
     expect(sync).toContain("If a select option is missing, stop that card. Tell the user which option to add in which property.")
-    expect(readRepoFile("tools/wiki-tool/src/cmd-plan-down.ts")).toContain("to the \"${property.name}\" property in Heptabase")
+    expect(missingOptionMessage("example/omega", "domain")).toBe('add the option "example/omega" to the "domain" property in Heptabase')
   })
 })
 
@@ -335,7 +337,7 @@ describe("wiki-recut skill: the problems of recut apply", () => {
   })
 
   it("a page that changed during the run, and a busy git lock, are handled with a new run", () => {
-    expect(readRepoFile("tools/wiki-tool/src/recut/apply.ts")).toContain("changed while the recut ran, so nothing was written. Run the recut again.")
+    expect(staleProblem("wiki/concepts/one.md")).toBe("wiki/concepts/one.md changed while the recut ran, so nothing was written. Run the recut again.")
     expect(table).toContain("| A page changed while the recut ran | Run `recut apply` again. |")
     expect(GIT_LOCK_BUSY_MESSAGE).toBe("another wiki tool is using git")
     expect(table).toContain("| Another wiki tool is using git | Wait. Run `recut apply` again. Never delete a lock file. |")

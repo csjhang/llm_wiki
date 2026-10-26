@@ -4,6 +4,7 @@ import {
   compareText,
   domainIndexPath,
   indexedPageFromMarkdown,
+  isAppOwnPath,
   isDomainIndexPath,
   renderDomainIndex,
   renderMechanismIndex,
@@ -214,6 +215,28 @@ describe("isDomainIndexPath", () => {
     expect(isDomainIndexPath("wiki\\Indexes\\ai.md")).toBe(true)
     expect(isDomainIndexPath("wiki/index.md")).toBe(false)
     expect(isDomainIndexPath("wiki/concepts/indexes/x.md")).toBe(false)
+  })
+})
+
+// Final review, M8: one list of the files that the app keeps in wiki/, for the app and the wiki-tool CLI.
+describe("isAppOwnPath", () => {
+  it("is true for the pages of the app and for every file in wiki/indexes/, in any case", () => {
+    for (const path of ["wiki/index.md", "wiki/log.md", "wiki/overview.md", "wiki/Index.MD", "wiki\\LOG.md", "wiki/indexes/ai.md", "wiki/Indexes/x.md", "wiki/indexes/"]) {
+      expect(isAppOwnPath(path), path).toBe(true)
+    }
+  })
+
+  it("is false for a page of the wiki", () => {
+    for (const path of ["wiki/concepts/index.md", "wiki/concepts/log.md", "wiki/overview.mdx", "wiki/indexes-old/x.md", "wiki/mechanisms/m.md"]) {
+      expect(isAppOwnPath(path), path).toBe(false)
+    }
+  })
+})
+
+describe("indexedPageFromMarkdown and a byte order mark", () => {
+  it("reads the frontmatter of a page that starts with a byte order mark", () => {
+    const page = indexedPageFromMarkdown("wiki/concepts/a.md", "\uFEFF---\ntype: concept\ntitle: A\ndomain: example/alpha\n---\n# A\n")
+    expect(page).toMatchObject({ type: "concept", title: "A", domain: "example/alpha" })
   })
 })
 

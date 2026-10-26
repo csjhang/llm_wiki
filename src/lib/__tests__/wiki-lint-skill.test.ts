@@ -10,6 +10,7 @@ import { readFileSync, rmSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterEach, describe, expect, it, vi } from "vitest"
+import { CONFIG_INVALID_CHECK } from "@/lib/mechanism-wiki/lint-structure"
 import { isAllowedApiReviewAction } from "@/lib/review-option-actions"
 import { DEFAULT_LINT_THRESHOLDS } from "@/lib/wiki-config/wiki-identity"
 import { apiReviewTypes, fillPlaceholders, jsonBlocks, OPTION_PROBLEM, readRepoFile, wikiToolCommands } from "@/test-helpers/skill-contract"
@@ -115,8 +116,8 @@ describe("wiki-lint skill: the output keys that it names", () => {
     const structure = await runLint<{ findings: Array<{ check: string }> }>("structure", project)
     expect(structure.exitCode).toBe(0)
     expect(structure.output.findings.map((finding) => finding.check)).toContain("config-invalid")
-    expect(readRepoFile("src/lib/mechanism-wiki/lint-structure.ts")).toContain("`config-invalid`")
-    named("config-invalid")
+    expect(CONFIG_INVALID_CHECK).toBe("config-invalid")
+    named(CONFIG_INVALID_CHECK)
     expect((await runLint("changed-domains", project)).exitCode).toBe(2)
     expect((await runLint("batch", project, "--domain", HARDWARE)).exitCode).toBe(2)
     expect(skill).toContain("`changed-domains` and `batch` exit with 2 when a config file is not valid")

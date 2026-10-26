@@ -43,7 +43,7 @@ function page(fields: string[], body = "# Page\n"): string {
 async function findingsOfCli(): Promise<StructureFinding[]> {
   const result = await runCli(["lint", "structure", "--project", project])
   expect(result.exitCode, JSON.stringify(result.output)).toBe(0)
-  return (result.output as { findings: StructureFinding[] }).findings
+  return (result.output as unknown as { findings: StructureFinding[] }).findings
 }
 
 /** Both readers on the project at once: they must agree, and the common answer is returned. */

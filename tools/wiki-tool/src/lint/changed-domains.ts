@@ -25,7 +25,7 @@ import { structurePageFromMarkdown } from "@/lib/mechanism-wiki/lint-structure"
 import { headCommit, isGitWorkTree, readGit } from "../git"
 import type { CommandResult } from "../io"
 import { readWikiPages } from "../mirror-pages"
-import { readMarker } from "./marker"
+import { ancestorOfHead, readMarker } from "./marker"
 import {
   isPagePath,
   libraryOnlyDomains,
@@ -63,7 +63,7 @@ export function lintChangedDomains(args: string[]): CommandResult {
   let note: string | undefined
   let since: string | null = null
   if (head !== null && marker.kind === "commit") {
-    since = usableMarkerCommit(project, marker.commit)
+    since = ancestorOfHead(project, marker.commit)
     if (since === null) {
       note = `The marker commit ${marker.commit} is not in the history of HEAD (the history was rewritten, or the marker is not a commit). Every domain is listed.`
     }
@@ -112,18 +112,6 @@ function orderedDomains(config: LintProject, touched: ReadonlySet<string>, every
 function domainsOfPage(path: string, markdown: string): string[] {
   const page = structurePageFromMarkdown(path, markdown)
   return [...(page.domain === null ? [] : [page.domain]), ...page.also]
-}
-
-/**
- * The full sha of the marker commit when it is an ancestor of `HEAD`, else null. The commit may be unknown
- * (the history was rewritten and the object is gone), or known and on another line of history.
- */
-function usableMarkerCommit(project: string, commit: string): string | null {
-  const found = readGit(project, ["rev-parse", "--verify", "--quiet", `${commit}^{commit}`])
-  if (found.status !== 0) return null
-  const sha = found.stdout.trim()
-  // Exit 0: an ancestor (or HEAD itself). Exit 1: not an ancestor.
-  return readGit(project, ["merge-base", "--is-ancestor", sha, "HEAD"]).status === 0 ? sha : null
 }
 
 /**

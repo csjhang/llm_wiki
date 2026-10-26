@@ -6,7 +6,7 @@
  *
  * Real temporary git repositories. Domains, slugs, and titles are placeholders.
  */
-import { chmodSync, mkdirSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
+import { chmodSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { commitPathsLocked } from "../git"
@@ -153,6 +153,77 @@ describe("recut apply: a page behind a link that stays inside the project", () =
   })
 })
 
+// Final review, P1 (parked from Task 4): a file or folder that is a link inside the project is refused like a page is.
+// A write would replace the link with a regular file, and the commit would record a change of type.
+describe("recut apply: domains.yaml and the index files behind a link that stays inside the project", () => {
+  it("refuses a domains.yaml that is a link to a file inside the project, and writes nothing", async () => {
+    const project = makeRecutRepo({ "shared/domains.real.yaml": DOMAINS_YAML })
+    rmSync(join(project, "domains.yaml"))
+    symlinkSync("shared/domains.real.yaml", join(project, "domains.yaml"))
+    commit(project, "link domains.yaml inside the project")
+    const before = head(project)
+
+    const result = await applyPlan(project, rename)
+    expect(result.exitCode).toBe(2)
+    expect(result.output.problems).toEqual(["domains.yaml: the file is a link, so a recut does not write it"])
+    expect(read(project, "shared/domains.real.yaml")).toBe(DOMAINS_YAML)
+    expect(head(project)).toBe(before)
+    expect(status(project)).toBe("")
+    expect(read(project, "wiki/concepts/one.md")).toBe(ONE)
+  })
+
+  it("refuses an index folder that is a link to a folder inside the project", async () => {
+    const project = makeRecutRepo()
+    renameSync(join(project, "wiki/indexes"), join(project, "shared-indexes"))
+    symlinkSync("../shared-indexes", join(project, "wiki/indexes"), "dir")
+    commit(project, "link the index folder inside the project")
+    const before = head(project)
+    const files = readdirSync(join(project, "shared-indexes")).sort()
+
+    const result = await applyPlan(project, rename)
+    expect(result.exitCode).toBe(2)
+    expect(result.output.problems?.[0]).toMatch(/^wiki\/indexes\/[^:]+: a folder in its path is a link, so a recut does not write it$/)
+    expect(readdirSync(join(project, "shared-indexes")).sort()).toEqual(files)
+    expect(head(project)).toBe(before)
+    expect(status(project)).toBe("")
+  })
+
+  it("refuses an index file that is a link to a file inside the project", async () => {
+    const project = makeRecutRepo()
+    // The rename writes the root index and the index of the new name. The root index is a link to another file.
+    renameSync(join(project, "wiki/index.md"), join(project, "root-index.md"))
+    symlinkSync("../root-index.md", join(project, "wiki/index.md"))
+    commit(project, "link the root index inside the project")
+    const before = head(project)
+
+    const result = await applyPlan(project, rename)
+    expect(result.exitCode).toBe(2)
+    expect(result.output.problems).toEqual(["wiki/index.md: the file is a link, so a recut does not write it"])
+    expect(head(project)).toBe(before)
+    expect(status(project)).toBe("")
+  })
+
+  it("refuses to remove an index file that is a link, also one that leads nowhere", async () => {
+    const project = makeRecutRepo()
+    // The rename removes the index of the old name. Here it is a link to a file that does not exist.
+    rmSync(join(project, "wiki/indexes/example--alpha.md"))
+    symlinkSync("missing.md", join(project, "wiki/indexes/example--alpha.md"))
+    commit(project, "link the old index to nothing")
+    const before = head(project)
+
+    const result = await applyPlan(project, rename)
+    expect(result.exitCode).toBe(2)
+    expect(result.output.problems).toEqual(["wiki/indexes/example--alpha.md: the file is a link, so a recut does not write it"])
+    expect(head(project)).toBe(before)
+    expect(status(project)).toBe("")
+  })
+
+  it("still writes through a folder that is a plain folder", async () => {
+    const result = await applyPlan(makeRecutRepo(), rename)
+    expect(result.exitCode).toBe(0)
+  })
+})
+
 describe("recut apply: a path that cannot be resolved", () => {
   it("names the path in a problem for a link loop, with exit 2", async () => {
     const project = makeRecutRepo()
@@ -169,12 +240,48 @@ describe("recut apply: a path that cannot be resolved", () => {
     expect(read(project, "wiki/concepts/one.md")).toBe(ONE)
   })
 
+  // Final review, P1: the index file that a recut would remove is a link loop. It was skipped without a word.
+  it("names the path of an index file to remove that is a link loop, with exit 2", async () => {
+    const project = makeRecutRepo()
+    // The rename removes the index of the old name. Here it is a link to itself.
+    rmSync(join(project, "wiki/indexes/example--alpha.md"))
+    symlinkSync("example--alpha.md", join(project, "wiki/indexes/example--alpha.md"))
+    commit(project, "link the old index to itself")
+    const before = head(project)
+
+    const result = await applyPlan(project, rename)
+    expect(result.exitCode).toBe(2)
+    expect(result.output.problems).toEqual([
+      expect.stringMatching(/^wiki\/indexes\/example--alpha\.md: the path cannot be resolved \(ELOOP.*\), so a recut does not write it$/),
+    ])
+    expect(head(project)).toBe(before)
+    expect(status(project)).toBe("")
+  })
+
   it("does not rewrite a dismissed-pairs file behind a link loop, and says so", async () => {
     const project = makeRecutRepo()
     mkdirSync(join(project, ".llm-wiki"), { recursive: true })
     symlinkSync("fusion-dismissed.json", join(project, ".llm-wiki/fusion-dismissed.json"))
     const result = await applyPlan(project, rename)
     expect(result.exitCode).toBe(0)
+    expect(result.output.notes).toEqual([
+      expect.stringContaining("This is a reading wiki."),
+      expect.stringMatching(/fusion-dismissed\.json were not updated: the path cannot be resolved \(ELOOP/),
+    ])
+  })
+
+  it("does not rewrite a dismissed-pairs file that is a link inside the project, and says so", async () => {
+    const pairs = `[{"mechanism":"wiki/mechanisms/handshake.md","targetDomain":"${ALPHA}"}]`
+    const project = makeRecutRepo({ "shared/pairs.json": pairs })
+    mkdirSync(join(project, ".llm-wiki"), { recursive: true })
+    symlinkSync("../shared/pairs.json", join(project, ".llm-wiki/fusion-dismissed.json"))
+    const result = await applyPlan(project, rename)
+    expect(result.exitCode).toBe(0)
+    expect(read(project, "shared/pairs.json")).toBe(pairs)
+    expect(result.output.notes).toEqual([
+      expect.stringContaining("This is a reading wiki."),
+      expect.stringMatching(/fusion-dismissed\.json were not updated: the file is a link/),
+    ])
   })
 })
 

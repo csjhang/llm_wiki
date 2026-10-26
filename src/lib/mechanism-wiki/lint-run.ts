@@ -81,7 +81,10 @@ async function loadLibrary(ctx: MechanismContext): Promise<LibraryInfo> {
     }
     return { domains: library.domains, problems: library.configIssues.map((issue) => configProblemText(issue, "library")) }
   } catch {
-    return { domains: null, problems: [] }
+    // The reading wiki cannot be read. Say so as a problem of its domains.yaml: without one, every domain of the reading
+    // wiki that a hypothesis names would look unknown, and the lint would flag each such page.
+    const issue = { path: "domains.yaml", message: "could not read the file" }
+    return { domains: null, problems: [configProblemText(issue, "library")] }
   }
 }
 

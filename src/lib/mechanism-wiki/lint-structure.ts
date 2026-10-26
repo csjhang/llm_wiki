@@ -3,7 +3,9 @@
  *
  * `checkStructure` takes the pages, the domain files, the identity, the card map, and today's
  * date. It returns a list of findings and changes nothing. It is pure: no file access, no Tauri,
- * no store. The `wiki-tool` CLI bundles this file, so it may import only pure modules.
+ * no store. It throws an `Error` when `today` is not a real date in `YYYY-MM-DD` form: that is a bug of the
+ * caller, and every age would be wrong. The caller passes `localDate()`. The `wiki-tool` CLI bundles this
+ * file, so it may import only pure modules.
  * The index module `domain-index.ts` reads files, so it is not imported here.
  *
  * Check ids: `domain-missing`, `domain-unknown`, `concept-cross-domain`, `mechanism-no-instance`,
@@ -78,6 +80,9 @@ export interface StructureFinding {
   /** The domains that the finding names. */
   domains?: string[]
 }
+
+/** The check id of a config file problem (ruling U14). The skill `wiki-lint` names it. */
+export const CONFIG_INVALID_CHECK = "config-invalid"
 
 /** Where a config problem was found: in a file of this wiki, or in a file of the reading wiki. */
 export type ConfigProblemSource = "this" | "library"
@@ -222,7 +227,7 @@ function checkConfigProblems(problems: string[], kinds: ConfigProblemKind[]): St
             ? "The default value of the threshold is used until you fix the file."
             : "Fix the file."
     return {
-      check: "config-invalid",
+      check: CONFIG_INVALID_CHECK,
       page: null,
       message: `A config file has a problem: ${problem.replace(/[.\s]+$/, "")}. ${consequence}`,
     }

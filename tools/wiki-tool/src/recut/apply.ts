@@ -24,7 +24,7 @@
  * When the commit fails, the files are taken out of the index, every file goes back to what it was, and the command exits
  * with the problem, so a failed recut leaves the work tree as it found it. Nothing is pushed.
  */
-import { existsSync, readFileSync, rmSync } from "node:fs"
+import { readFileSync, rmSync } from "node:fs"
 import { buildActionCommitMessage } from "@/lib/commit-message"
 import {
   domainIndexPath,
@@ -44,7 +44,7 @@ import { loadLintProject, notMechanismWiki, parseLintArgs } from "../lint/projec
 import { compareText } from "../mirror-pages"
 import { remapDismissedPairs } from "./dismissed"
 import { DomainsFileError, editDomainsYaml } from "./domains-file"
-import { insideProblem } from "./inside"
+import { insideProblem, lexists } from "./inside"
 import { computePageEdits, findLeftoverRefs } from "./page-edits"
 import { createMapper, type DomainChanges, findMergeCandidates, libraryNote, parseRecutPlan, planDomains, planTitle, type RecutPlan, validateRecutPlan } from "./plan"
 import { readPageSources } from "./read-pages"
@@ -112,7 +112,8 @@ export async function recutApply(args: string[]): Promise<CommandResult> {
   ]
 
   const writes = indexFiles.filter(([path, text]) => currentText(project, path) !== text).map(([path]) => path)
-  const removals = changes.removed.map(domainIndexPath).filter((path) => existsSync(resolveInProject(project, path)))
+  // A link that leads nowhere, or loops, is something to remove too: `insideProblem` below refuses it, so it is not skipped.
+  const removals = changes.removed.map(domainIndexPath).filter((path) => lexists(resolveInProject(project, path)))
   const outside = [DOMAINS_FILE, ...writes, ...removals].flatMap((path) => {
     const problem = insideProblem(project, path)
     return problem === null ? [] : [`${path}: ${problem}, so a recut does not write it`]
@@ -183,7 +184,8 @@ async function failed(project: string, files: FileChanges, problem: string, stag
   return { ok: false, problems: [...(problem === "" ? [] : [problem]), ...extra] }
 }
 
-function staleProblem(path: string): string {
+/** The problem for a file that another tool changed while the recut ran. The skill `wiki-recut` names it. */
+export function staleProblem(path: string): string {
   return `${path} changed while the recut ran, so nothing was written. Run the recut again.`
 }
 
