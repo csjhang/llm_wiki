@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest"
 import { realFs, createTempProject, readFileRaw, writeFileRaw, fileExists } from "@/test-helpers/fs-temp"
-import { waitFor, flushIO } from "@/test-helpers/deferred"
+import { waitUntil } from "@/test-helpers/deferred"
 
 vi.mock("@/commands/fs", () => realFs)
 
@@ -85,7 +85,7 @@ async function readQueueFile(): Promise<string> {
 
 async function waitForQueueSnapshot<T>(predicate: (parsed: T) => boolean): Promise<T> {
   let snapshot: T | null = null
-  await waitFor(async () => {
+  await waitUntil(async () => {
     try {
       const parsed = JSON.parse(await readQueueFile()) as T
       if (!predicate(parsed)) return false
@@ -133,7 +133,7 @@ describe("ingest-queue persistence — write", () => {
   it("auto-creates .llm-wiki/ directory when it doesn't exist", async () => {
     expect(await fileExists(`${tmp.path}/.llm-wiki`)).toBe(false)
     await enqueueIngest(TEST_ID_A, "x.md")
-    await waitFor(() => fileExists(`${tmp.path}/.llm-wiki/ingest-queue.json`))
+    await waitUntil(() => fileExists(`${tmp.path}/.llm-wiki/ingest-queue.json`))
   })
 
   it("each enqueue updates the persisted JSON in-place", async () => {
@@ -156,7 +156,7 @@ describe("ingest-queue persistence — restore round-trip", () => {
       { sourcePath: "b.md", folderContext: "ctx-b" },
     ])
     // Wait for disk state to stabilize
-    await waitFor(async () => {
+    await waitUntil(async () => {
       try {
         return JSON.parse(await readQueueFile()).length === 2
       } catch {
@@ -192,7 +192,7 @@ describe("ingest-queue persistence — restore round-trip", () => {
     )
 
     await restoreQueue(TEST_ID_A, tmp.path)
-    await flushIO(2)
+    await waitUntil(() => getQueue().length === 1)
 
     const restored = getQueue()
     expect(restored).toHaveLength(1)
@@ -271,7 +271,7 @@ describe("ingest-queue persistence — cross-project isolation", () => {
     try {
       // Populate project A
       await enqueueIngest(TEST_ID_A, "a.md")
-      await waitFor(async () => {
+      await waitUntil(async () => {
         try {
           return JSON.parse(await readQueueFile()).length === 1
         } catch {

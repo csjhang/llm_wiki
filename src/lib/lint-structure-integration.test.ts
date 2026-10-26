@@ -8,7 +8,7 @@
  */
 import fs from "node:fs/promises"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
-import { createDeferred, flushIO, waitFor } from "@/test-helpers/deferred"
+import { createDeferred, waitUntil } from "@/test-helpers/deferred"
 import { createTempProject, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useLintStore } from "@/stores/lint-store"
@@ -81,9 +81,17 @@ const CARD_2 = "00000000-0000-4000-8000-000000000002"
 let tmp: { path: string; cleanup: () => Promise<void> }
 let project: string
 
-/** The queue saves its state to a real file, so a step takes more ticks than with a fake file system. */
-const MAX_TICKS = 5_000
-const waitUntil = (predicate: () => boolean): Promise<void> => waitFor(predicate, MAX_TICKS)
+// The queue saves its state to a real file, so a step takes real time that depends on the load of the machine. These
+// tests wait by time (`waitUntil`, 5 s at most), never by turns of the event loop (final review, I4).
+
+/** How long the background work gets to end when a test must see that nothing more happens. */
+const SETTLE_MS = 25
+
+/** Let the work that is still running end: the lint steps, and the file writes of the queue. */
+async function settle(): Promise<void> {
+  await Promise.all(pendingStructuralLints())
+  await new Promise<void>((resolve) => setTimeout(resolve, SETTLE_MS))
+}
 
 function domainsYaml(...names: string[]): string {
   return [
@@ -651,12 +659,13 @@ describe("after an ingest", () => {
 
   afterEach(async () => {
     clearQueueState()
-    await flushIO()
+    await settle()
   })
 
   it("runs after a successful ingest and stores the findings as items of type structure", async () => {
     await enqueueIngest(TEST_ID, "raw/sources/a.md")
     await lintSettled()
+    await queueEmpty()
 
     expect(mockLintRun).toHaveBeenCalledWith(project, expect.objectContaining({ signal: expect.any(AbortSignal) }))
     const items = structureItems()
@@ -691,7 +700,7 @@ describe("after an ingest", () => {
     ])
     await lintSettled()
     await queueEmpty()
-    await flushIO()
+    await settle()
 
     expect(mockAutoIngest).toHaveBeenCalledTimes(3)
     expect(mockLintRun).toHaveBeenCalledTimes(1)
@@ -702,9 +711,10 @@ describe("after an ingest", () => {
     vi.spyOn(console, "log").mockImplementation(() => {})
 
     await enqueueIngest(TEST_ID, "raw/sources/a.md")
-    // The queue tries a failing task three times.
+    // The queue tries a failing task three times, and then keeps it as failed.
     await waitUntil(() => mockAutoIngest.mock.calls.length >= 3)
-    await flushIO(5)
+    await waitUntil(() => getQueue()[0]?.status === "failed")
+    await settle()
 
     expect(mockLintRun).not.toHaveBeenCalled()
   })
@@ -757,6 +767,7 @@ describe("after an ingest", () => {
 
       await enqueueIngest(TEST_ID, "raw/sources/a.md")
       await lintSettled()
+      await queueEmpty()
 
       expect(getQueue()).toEqual([])
       expect(structureItems()).toEqual([])
@@ -771,6 +782,7 @@ describe("after an ingest", () => {
 
       await enqueueIngest(TEST_ID, "raw/sources/a.md")
       await lintSettled()
+      await queueEmpty()
 
       expect(getQueue()).toEqual([])
       expect(mockAutoIngest).toHaveBeenCalledTimes(1)

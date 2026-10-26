@@ -1,3 +1,5 @@
+import { vi } from "vitest"
+
 /**
  * A promise whose resolve/reject handles are exposed so tests can drive
  * completion timing manually. Essential for race/abort/concurrency tests
@@ -68,4 +70,30 @@ export async function waitFor(
     await new Promise<void>((resolve) => setImmediate(resolve))
   }
   throw new Error(`waitFor: predicate never became true after ${maxAttempts} attempts`)
+}
+
+export interface WaitUntilOptions {
+  /** How long to wait, in milliseconds. */
+  timeout?: number
+  /** How long to sleep between two checks, in milliseconds. */
+  interval?: number
+}
+
+/**
+ * Wait until `predicate()` returns true, by time: a check every `interval` ms (5 by default), for at most `timeout` ms
+ * (5000 by default). Use it when real I/O runs (a real temporary folder, the libuv thread pool). `waitFor` counts turns
+ * of the event loop, and 5000 turns of an idle loop take only tens of milliseconds, so on a busy machine the I/O is
+ * not done when the count ends. A predicate that throws counts as false; at the timeout the wait rejects with the
+ * error that the last check threw, or with a message that says how long it waited.
+ */
+export async function waitUntil(
+  predicate: () => boolean | Promise<boolean>,
+  { timeout = 5000, interval = 5 }: WaitUntilOptions = {},
+): Promise<void> {
+  await vi.waitFor(
+    async () => {
+      if (!(await predicate())) throw new Error(`waitUntil: the condition was not true within ${timeout} ms`)
+    },
+    { timeout, interval },
+  )
 }
