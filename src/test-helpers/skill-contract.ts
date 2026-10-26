@@ -17,24 +17,27 @@ export function readRepoFile(relativePath: string): string {
 // --- JSON blocks ---------------------------------------------------------
 
 export interface JsonBlock {
-  /** The `llm_wiki_*` tool named last in the paragraph before the block, or null. */
+  /** The tool named last in the paragraph before the block, or null. */
   tool: string | null
   json: Record<string, unknown>
+  /** The name that the caller gave the text (a file name), for the message of a failed check. */
+  source: string
 }
 
-const LLM_WIKI_TOOL = /\b(llm_wiki_[a-z_]+)\b/g
+/** The tools that a skill names before a JSON block: the `llm_wiki_*` tools and the Heptabase reads of wiki-fuse. */
+const TOOL_NAME = /\b(llm_wiki_[a-z_]+|read_whiteboard|read_object|list_whiteboards|list_cards|read_database)\b/g
 
 /**
- * Every ```json block of a markdown text, with the `llm_wiki_*` tool that the paragraph right before it names last
- * (null when that paragraph names none, as before a recut plan).
+ * Every ```json block of a markdown text, with the tool that the paragraph right before it names last (null when that
+ * paragraph names none, as before a recut plan). All the skill tests use this one function.
  */
-export function jsonBlocks(markdown: string): JsonBlock[] {
+export function jsonBlocks(markdown: string, source = ""): JsonBlock[] {
   const blocks: JsonBlock[] = []
   for (const match of markdown.matchAll(/```json\n([\s\S]*?)```/g)) {
     const paragraphs = markdown.slice(0, match.index).split(/\n\s*\n/).filter((text) => text.trim() !== "")
-    const paragraph = paragraphs[paragraphs.length - 1]
-    const names = [...paragraph.matchAll(LLM_WIKI_TOOL)].map((name) => name[1])
-    blocks.push({ tool: names.length > 0 ? names[names.length - 1] : null, json: JSON.parse(match[1]) as Record<string, unknown> })
+    const paragraph = paragraphs[paragraphs.length - 1] ?? ""
+    const names = [...paragraph.matchAll(TOOL_NAME)].map((name) => name[1])
+    blocks.push({ tool: names.length > 0 ? names[names.length - 1] : null, json: JSON.parse(match[1]) as Record<string, unknown>, source })
   }
   return blocks
 }

@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { readCandidateLines } from "@/lib/mechanism-wiki/fusion-candidates"
 import { isAllowedApiReviewAction } from "@/lib/review-option-actions"
+import { jsonBlocks } from "@/test-helpers/skill-contract"
 import { findLongSentences } from "@/test-helpers/ste-check"
 
 const REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url))
@@ -24,33 +25,6 @@ const explore = readFileSync(join(FUSE_DIR, "reference/explore.md"), "utf8")
 const update = readFileSync(join(FUSE_DIR, "reference/update.md"), "utf8")
 const hypothesisRules = readFileSync(join(REPO_ROOT, "templates/mechanism-wiki/schema/page-types/hypothesis.md"), "utf8")
 
-interface JsonBlock {
-  /** The tool named last in the prose before the block, or null. */
-  tool: string | null
-  json: Record<string, unknown>
-  source: string
-}
-
-const TOOL_NAME = /\b(llm_wiki_[a-z_]+|read_whiteboard|read_object|list_whiteboards|list_cards|read_database)\b/g
-
-/** Every ```json block of a markdown file, with the tool that the text before it names last. */
-function jsonBlocks(file: string, text: string): JsonBlock[] {
-  const blocks: JsonBlock[] = []
-  const fence = /```json\n([\s\S]*?)```/g
-  let previousEnd = 0
-  for (const match of text.matchAll(fence)) {
-    const before = text.slice(previousEnd, match.index)
-    const names = [...before.matchAll(TOOL_NAME)].map((name) => name[1])
-    blocks.push({
-      tool: names.length > 0 ? names[names.length - 1] : null,
-      json: JSON.parse(match[1]) as Record<string, unknown>,
-      source: file,
-    })
-    previousEnd = (match.index ?? 0) + match[0].length
-  }
-  return blocks
-}
-
 function markdownFiles(directory: string): string[] {
   return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
     const path = join(directory, entry.name)
@@ -60,9 +34,9 @@ function markdownFiles(directory: string): string[] {
 }
 
 const fuseBlocks = [
-  ...jsonBlocks("directed.md", directed),
-  ...jsonBlocks("explore.md", explore),
-  ...jsonBlocks("update.md", update),
+  ...jsonBlocks(directed, "directed.md"),
+  ...jsonBlocks(explore, "explore.md"),
+  ...jsonBlocks(update, "update.md"),
 ]
 const llmWikiBlocks = fuseBlocks.filter((block) => block.tool?.startsWith("llm_wiki_"))
 
@@ -91,7 +65,7 @@ describe("wiki-fuse skill: the lookup of a review item (ruling S18)", () => {
   const candidateSection = explore.slice(explore.indexOf("## Start from a candidate"))
 
   it("--candidate finds its item by id, with the type, and never searches a list", () => {
-    const lookup = jsonBlocks("explore.md", candidateSection).find((block) => block.tool === "llm_wiki_reviews")
+    const lookup = jsonBlocks(candidateSection, "explore.md").find((block) => block.tool === "llm_wiki_reviews")
     expect(lookup?.json).toEqual({
       project_id: "<project folder>",
       id: "<review id>",
@@ -105,7 +79,7 @@ describe("wiki-fuse skill: the lookup of a review item (ruling S18)", () => {
 
   it("explore mode lists the candidates, and raises the limit to 1000 when Count equals the limit", () => {
     const exploreSection = explore.slice(explore.indexOf("## Explore"), explore.indexOf("## Start from a candidate"))
-    const list = jsonBlocks("explore.md", exploreSection).find((block) => block.tool === "llm_wiki_reviews")
+    const list = jsonBlocks(exploreSection, "explore.md").find((block) => block.tool === "llm_wiki_reviews")
     expect(list?.json).toMatchObject({ type: "fusion-candidate", status: "unresolved", limit: 50 })
     expect(exploreSection).toContain("If `Count` in the answer equals `limit`")
     expect(exploreSection).toContain('Call again with `"limit": 1000`')
@@ -113,7 +87,7 @@ describe("wiki-fuse skill: the lookup of a review item (ruling S18)", () => {
   })
 
   it("update mode finds the verify items by title_prefix", () => {
-    const lookup = jsonBlocks("update.md", update).find((block) => block.tool === "llm_wiki_reviews")
+    const lookup = jsonBlocks(update, "update.md").find((block) => block.tool === "llm_wiki_reviews")
     expect(lookup?.json).toEqual({
       project_id: "<project folder>",
       type: "suggestion",
@@ -131,7 +105,7 @@ describe("wiki-fuse skill: the lookup of a review item (ruling S18)", () => {
 })
 
 describe("wiki-fuse skill: the verify item title prefix (ruling S16)", () => {
-  const add = jsonBlocks("directed.md", directed).find((block) => block.tool === "llm_wiki_add_review" && block.json.type === "suggestion")
+  const add = jsonBlocks(directed, "directed.md").find((block) => block.tool === "llm_wiki_add_review" && block.json.type === "suggestion")
   const PREFIX = "Verify (<hypothesis slug>): "
 
   it("directed mode titles each item with the prefix, the type suggestion, and the page in affectedPages", () => {
@@ -141,7 +115,7 @@ describe("wiki-fuse skill: the verify item title prefix (ruling S16)", () => {
   })
 
   it("update mode matches with the same prefix, up to the claim", () => {
-    const lookup = jsonBlocks("update.md", update).find((block) => block.tool === "llm_wiki_reviews")
+    const lookup = jsonBlocks(update, "update.md").find((block) => block.tool === "llm_wiki_reviews")
     expect(lookup?.json.title_prefix).toBe(PREFIX)
     expect(String(add?.json.title).startsWith(String(lookup?.json.title_prefix))).toBe(true)
     expect(update).toContain("The title of the item of a row is `Verify (<hypothesis slug>): ` and the start of the claim of the row.")
@@ -177,7 +151,7 @@ describe("wiki-fuse skill: the candidate item that the app writes (ruling S9)", 
 describe("wiki-fuse skill: option actions of review items (ruling S17)", () => {
   /** Every option of every json block in every skill file. */
   const options = markdownFiles(SKILLS_DIR).flatMap((file) =>
-    jsonBlocks(file, readFileSync(file, "utf8")).flatMap((block) => {
+    jsonBlocks(readFileSync(file, "utf8"), file).flatMap((block) => {
       const list = block.json.options
       return Array.isArray(list) ? list.map((option) => ({ file, option: option as { label: string; action: string } })) : []
     }),
@@ -198,7 +172,7 @@ describe("wiki-fuse skill: option actions of review items (ruling S17)", () => {
 
   it("keeps wiki-sync mirror-edited items and verify items on the default Dismiss button", () => {
     const steps = readFileSync(join(SKILLS_DIR, "wiki-sync/reference/mcp-steps.md"), "utf8")
-    const mirror = jsonBlocks("mcp-steps.md", steps).find((block) => block.json.type === "mirror-edited")
+    const mirror = jsonBlocks(steps, "mcp-steps.md").find((block) => block.json.type === "mirror-edited")
     expect(mirror, "mirror-edited call").toBeDefined()
     expect(mirror?.json.options).toBeUndefined()
   })
@@ -208,7 +182,7 @@ describe("wiki-fuse skill: option actions of review items (ruling S17)", () => {
     expect(step3).toContain("In a work wiki, tell the user that the mechanism needs approval first.")
     expect(step3).toContain("In a reading wiki, tell the user that the mechanism page can be written in this wiki directly.")
     expect(step3).toContain("This reading wiki can hold the mechanism page itself. Write the page here directly.")
-    const readingOptions = jsonBlocks("directed.md", step3).find((block) => block.json.type === undefined && block.json.options !== undefined)
+    const readingOptions = jsonBlocks(step3, "directed.md").find((block) => block.json.type === undefined && block.json.options !== undefined)
     expect(readingOptions?.json.options).toEqual([{ label: "Skip", action: "Skip" }])
     // The note that mech:propose-mechanism writes fits a work wiki only.
     expect(readFileSync(join(REPO_ROOT, "src/lib/mechanism-wiki/review-actions.ts"), "utf8")).toContain("Instances: 1 in work wiki")
