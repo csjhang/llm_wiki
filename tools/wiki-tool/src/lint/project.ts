@@ -8,11 +8,11 @@
  */
 import { existsSync, readFileSync } from "node:fs"
 import { join, resolve } from "node:path"
-import { isDomainIndexPath } from "@/lib/mechanism-wiki/domain-index-render"
+import { isAppOwnPath } from "@/lib/mechanism-wiki/domain-index-render"
 import { type ConfigProblemSource, configProblemText } from "@/lib/mechanism-wiki/lint-structure"
 import { type DomainsConfig, parseDomainsYaml } from "@/lib/wiki-config/domains"
 import type { ConfigIssue } from "@/lib/wiki-config/types"
-import { DEFAULT_LINT_THRESHOLDS, parseWikiYaml, type WikiIdentity } from "@/lib/wiki-config/wiki-identity"
+import { defaultIdentity, parseWikiYaml, type WikiIdentity } from "@/lib/wiki-config/wiki-identity"
 import { type ArgSpec, parseArgs } from "../args"
 import { knownLenses } from "../cmd-snapshot"
 import { type CommandResult, isDirectory } from "../io"
@@ -21,9 +21,6 @@ const DOMAINS_FILE = "domains.yaml"
 const WIKI_FILE = "wiki.yaml"
 const UNREADABLE_MESSAGE = "could not read the file"
 const MISSING_WIKI_MESSAGE = 'the file is missing; treating this wiki as a reading wiki with id "reading"'
-
-/** The pages that the app keeps in `wiki/`. They are no pages of the wiki. */
-const NON_PAGE_PATHS: ReadonlySet<string> = new Set(["wiki/index.md", "wiki/log.md", "wiki/overview.md"])
 
 export interface LintProject {
   /** `wiki.yaml`. The default reading identity when the file is missing or not valid. */
@@ -83,11 +80,6 @@ export function loadLintProject(project: string): LintProject | null {
   return { identity: wiki.identity, domains: own.domains ?? { version: 1, domains: {} }, libraryDomains, configProblems, blockingProblems }
 }
 
-/** The lint thresholds and the role of a wiki without `wiki.yaml`. */
-function defaultIdentity(): WikiIdentity {
-  return { version: 1, id: "reading", role: "reading", mechanism_library: null, lint: { ...DEFAULT_LINT_THRESHOLDS } }
-}
-
 /** The text of a file without a byte order mark. Null when the file is missing; undefined when it cannot be read. */
 function readText(path: string): string | null | undefined {
   if (!existsSync(path)) return null
@@ -112,7 +104,8 @@ function readIdentity(root: string): { identity: WikiIdentity; status: "ok" | "m
     return { identity: defaultIdentity(), status: "invalid", issues: [{ path: WIKI_FILE, message: UNREADABLE_MESSAGE }] }
   }
   const parsed = parseWikiYaml(text)
-  if (parsed.ok) return { identity: parsed.value, status: "ok", issues: [] }
+  // A bad threshold took its default: the file is valid, and the problem is a config problem that does not block.
+  if (parsed.ok) return { identity: parsed.value, status: "ok", issues: parsed.issues.map((issue) => fileIssue(WIKI_FILE, issue)) }
   return { identity: defaultIdentity(), status: "invalid", issues: parsed.issues.map((issue) => fileIssue(WIKI_FILE, issue)) }
 }
 
@@ -143,7 +136,7 @@ export function libraryOnlyDomains(project: LintProject): string[] {
 /** True for the path of a page of the wiki: a file under `wiki/` that is not one of the pages of the app. */
 export function isPagePath(path: string): boolean {
   const key = path.replace(/\\/g, "/").toLowerCase()
-  return key.startsWith("wiki/") && key.endsWith(".md") && !isDomainIndexPath(key) && !NON_PAGE_PATHS.has(key)
+  return key.startsWith("wiki/") && key.endsWith(".md") && !isAppOwnPath(key)
 }
 
 // --- options -------------------------------------------------------------

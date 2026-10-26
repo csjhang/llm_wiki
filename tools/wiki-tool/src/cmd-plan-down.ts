@@ -23,6 +23,11 @@
  * its card now is another one. The hash covers the body (title, text, links, footer) and the
  * property values, but not the sync date.
  *
+ * A retired card that the user deleted by hand is not in the mirror list any more. With the whole list in hand, its page
+ * gets a `forget` action and nothing else, whether the page exists or not: the skill makes no MCP call and tells
+ * `hepta record` with a `forgotten` event, which drops the entry from the map. Without that, the lint would name the
+ * card for ever, and a page that is back and mirrored would be stopped by a card that is gone.
+ *
  * A mirror card that the user edited is never overwritten: its page gets a `skip-edited`, whether
  * the page changed or not, until `hepta record` saves the edit as feedback. The edit check needs the whole list
  * of the mirror tag, so `--mirror-cards` is required once a card is mapped, and a list that is a failed result or
@@ -36,6 +41,7 @@
  * has an entry. The skill passes the flag only after the user said yes (ruling U6).
  */
 import { readFileSync } from "node:fs"
+import { isSyncable, RETIRED_TITLE_PREFIX } from "@/lib/mechanism-wiki/mirror-rules"
 import type { HeptabaseConfig, PropertyKey } from "@/lib/wiki-config/heptabase-config"
 import { UUID_PATTERN } from "@/lib/wiki-config/types"
 import { isRecord } from "@/lib/wiki-config/yaml-util"
@@ -50,14 +56,12 @@ import {
   createRenderer,
   editsOf,
   frontmatterText,
-  isSyncable,
   type MirrorRenderer,
   type PropertyEdit,
   pageProperties,
   readProjectConfig,
   readWikiPages,
   RETIRED_BODY,
-  RETIRED_TITLE_PREFIX,
   slugOfPath,
   type WikiPage,
 } from "./mirror-pages"
@@ -117,6 +121,8 @@ export type DownAction =
       cardUpdatedAt?: string
     }
   | { op: "skip-edited"; page: string; cardId: string; cardUpdatedAt: string }
+  /** The card of a retired page is gone from the mirror tag. No Heptabase call: the skill records `forgotten`. */
+  | { op: "forget"; page: string; cardId: string }
   | { op: "place"; page: string; cardId: string; whiteboardId: string; cardUpdatedAt?: string }
 
 /** A page that cannot be planned, and what the user must do. */
@@ -156,7 +162,7 @@ const MAX_ENUMERATED_LINKS = 10
 const SELECT_KEYS: readonly PropertyKey[] = ["domain", "page_type", "wiki", "status", "hypothesis_status", "strength"]
 
 /** The order of actions that are for the same page. */
-const OP_ORDER: readonly DownAction["op"][] = ["setup", "create", "update", "relink", "retire", "skip-edited", "place"]
+const OP_ORDER: readonly DownAction["op"][] = ["setup", "create", "update", "relink", "retire", "skip-edited", "place", "forget"]
 
 export function planDown(args: string[]): CommandResult {
   const { parsed, problems: optionProblems } = parseArgs(args, OPTION_SPEC)
@@ -333,6 +339,11 @@ function planPages(input: PlanInput): { pass: 1 | 2; actions: DownAction[]; prob
   for (const path of paths) {
     const page = pageByPath.get(path)
     const entry = input.map.pages[path]
+    const forget = forgetGoneCard(input, path, entry)
+    if (forget) {
+      actions.push(forget)
+      continue
+    }
     const plan = page ? planPage(input, renderer, page, entry) : planGone(input, path, entry)
     for (const message of [...plan.blockers, ...plan.notes]) problems.push({ page: path, problem: message })
     if (plan.blockers.length > 0) continue
@@ -374,6 +385,16 @@ function dropRetires(actions: DownAction[]): void {
   for (let index = actions.length - 1; index >= 0; index -= 1) {
     if (actions[index].op === "retire") actions.splice(index, 1)
   }
+}
+
+/**
+ * A retired entry whose card is not in the whole mirror list: the user deleted the card, or took it out of the tag.
+ * Nothing is left to do for the card, so the entry goes. Without a list nobody looked, so nothing is judged. A card that
+ * waits for setup is not in the tag yet, so it is never judged gone.
+ */
+function forgetGoneCard(input: PlanInput, path: string, entry: PageEntry | undefined): DownAction | undefined {
+  if (!entry || entry.status !== "retired" || entry.setup_pending || !input.listed || input.cards.has(entry.card_id)) return undefined
+  return { op: "forget", page: path, cardId: entry.card_id }
 }
 
 /** A mapped page whose file is not there (or is not a wiki page any more). */

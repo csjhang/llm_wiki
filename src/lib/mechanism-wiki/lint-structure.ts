@@ -17,8 +17,9 @@ import type { DomainsConfig } from "@/lib/wiki-config/domains"
 import type { ConfigIssue } from "@/lib/wiki-config/types"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
 import { isRecord } from "@/lib/wiki-config/yaml-util"
-import { compareText, indexedPageFromMarkdown, isDomainIndexPath, MECHANISM_TYPE } from "./domain-index-render"
+import { compareText, indexedPageFromMarkdown, isAppOwnPath, MECHANISM_TYPE, withoutBom } from "./domain-index-render"
 import type { IndexedPage } from "./domain-index-render"
+import { isSyncable, RETIRED_TITLE_PREFIX } from "./mirror-rules"
 
 /** A page with the frontmatter fields that the checks read. */
 export interface StructurePage extends IndexedPage {
@@ -38,6 +39,11 @@ export interface StructurePage extends IndexedPage {
    * one. A hypothesis page where it is null or absent gets `domain-missing`.
    */
   fromDomain?: string | null
+  /**
+   * True when the Heptabase sync mirrors this page (`isSyncable`, judged by the `type` in the frontmatter, as the
+   * sync does). Absent counts as false. `mirror-retired` uses it: the card of a mirrored page comes back at the next sync.
+   */
+  mirrored?: boolean
 }
 
 export interface StructureInput {
@@ -89,19 +95,15 @@ export function configProblemText(issue: ConfigIssue, source: ConfigProblemSourc
   return source === "library" ? `${LIBRARY_PROBLEM_PREFIX}${text}` : text
 }
 
-type ConfigProblemKind = "domains" | "library-domains" | "other"
+type ConfigProblemKind = "domains" | "library-domains" | "threshold" | "other"
 
 function classifyProblem(problem: string): ConfigProblemKind {
   const library = problem.startsWith(LIBRARY_PROBLEM_PREFIX)
   const names = /^domains\.yaml(?:$|[:\s])/.test(library ? problem.slice(LIBRARY_PROBLEM_PREFIX.length) : problem)
-  return names ? (library ? "library-domains" : "domains") : "other"
+  if (names) return library ? "library-domains" : "domains"
+  // A bad value under `lint:` in wiki.yaml (final review, M2). The threshold takes its default.
+  return !library && /^wiki\.yaml:lint(?:$|[.:\s])/.test(problem) ? "threshold" : "other"
 }
-
-/** Files of `wiki/` that are not pages. The app keeps them. */
-const NON_PAGE_PATHS: ReadonlySet<string> = new Set(["wiki/index.md", "wiki/log.md", "wiki/overview.md"])
-
-/** Shown in the title of a retired mirror card. The tool puts the full prefix before the title. */
-const RETIRED_TITLE_PREFIX = "🗄 已停用"
 
 const RAW_SOURCES_DIR = "raw/sources/"
 const HYPOTHESIS_TYPE = "hypothesis"
@@ -113,8 +115,9 @@ const MS_PER_DAY = 86_400_000
 
 // --- reading a page ----------------------------------------------------
 
-/** The page that `markdown` is, at `path`, with the fields that the checks read. */
-export function structurePageFromMarkdown(path: string, markdown: string): StructurePage {
+/** The page that `markdown` is, at `path`, with the fields that the checks read. A byte order mark before the frontmatter is ignored. */
+export function structurePageFromMarkdown(path: string, rawMarkdown: string): StructurePage {
+  const markdown = withoutBom(rawMarkdown)
   const base = indexedPageFromMarkdown(path, markdown)
   const { frontmatter } = parseFrontmatter(markdown)
   const text = (key: string): string | undefined => {
@@ -138,6 +141,7 @@ export function structurePageFromMarkdown(path: string, markdown: string): Struc
   if (created !== undefined) page.created = created
   if (frontmatter !== null && frontmatter !== undefined && "instances" in frontmatter) page.instances = list("instances")
   page.fromDomain = base.type === HYPOTHESIS_TYPE ? (text("from_domain") ?? null) : null
+  page.mirrored = isSyncable({ type: text("type") ?? "", sources: page.sources })
   return page
 }
 
@@ -202,8 +206,7 @@ export function checkStructure(input: StructureInput): StructureFinding[] {
 }
 
 function isWikiPage(path: string): boolean {
-  const key = path.replace(/\\/g, "/").toLowerCase()
-  return key.startsWith("wiki/") && !isDomainIndexPath(key) && !NON_PAGE_PATHS.has(key)
+  return path.replace(/\\/g, "/").toLowerCase().startsWith("wiki/") && !isAppOwnPath(path)
 }
 
 /** One finding for each config problem. The text of the problem is in the message. */
@@ -215,7 +218,9 @@ function checkConfigProblems(problems: string[], kinds: ConfigProblemKind[]): St
         ? "The domain checks are skipped until you fix the file."
         : kind === "library-domains"
           ? "The domains of the reading wiki are not checked until you fix the file."
-          : "Fix the file."
+          : kind === "threshold"
+            ? "The default value of the threshold is used until you fix the file."
+            : "Fix the file."
     return {
       check: "config-invalid",
       page: null,
@@ -374,24 +379,32 @@ function checkMechanismInstances(pages: StructurePage[], identity: WikiIdentity)
     }))
 }
 
-/** A retired card is left in Heptabase for the user to delete. An active entry needs its page. */
+/**
+ * A retired card is left in Heptabase for the user to delete. An active entry needs its page.
+ *
+ * A retired entry whose page file exists again is not reported when the sync mirrors the page (`mirrored`): the
+ * next sync updates that card and makes it active, so the user must not delete it. When the user deleted a
+ * retired card, the next sync drops the entry (`hepta plan-down` plans `forget`), and this finding ends.
+ */
 function checkCardMap(input: StructureInput): StructureFinding[] {
   if (input.cardMap === null) return []
   // Every page counts here, so a page that no check looks at still keeps its card.
-  const titles = new Map(input.pages.map((page) => [normalizePath(page.path), page.title]))
+  const byPath = new Map(input.pages.map((page) => [normalizePath(page.path), page]))
   const findings: StructureFinding[] = []
   for (const [rawPath, entry] of Object.entries(input.cardMap.pages)) {
     const path = normalizePath(rawPath)
     if (entry.status === "retired") {
-      const title = titles.get(path)
+      const page = byPath.get(path)
+      if (page?.mirrored === true) continue
       findings.push({
         check: "mirror-retired",
         page: path,
         message:
-          `The card of ${path}${title === undefined ? "" : ` ("${title}")`} is retired. Card id: ${entry.card_id}. ` +
-          `Find the card in the mirror tag by this id or by the "${RETIRED_TITLE_PREFIX}" title prefix. Delete it by hand.`,
+          `The card of ${path}${page === undefined ? "" : ` ("${page.title}")`} is retired. Card id: ${entry.card_id}. ` +
+          `Find the card in the mirror tag by this id or by the "${RETIRED_TITLE_PREFIX}" title prefix. Delete it by hand. ` +
+          "The next wiki-sync then drops the entry from the card map.",
       })
-    } else if (entry.status === "active" && !titles.has(path)) {
+    } else if (entry.status === "active" && !byPath.has(path)) {
       findings.push({
         check: "map-missing-page",
         page: path,
@@ -460,6 +473,10 @@ function utcDay(text: string): number | null {
 /**
  * The page count of each domain of `domains.yaml`, with zero for a domain that has no page.
  * A page counts once, under its `domain` (a hypothesis: its `to_domain`), never under `also`.
+ *
+ * `domain-too-large` uses the pages of the domain itself: splitting it into child domains is the cure. `domain-too-small`
+ * adds the pages of every listed domain below it (`<domain>/...`), so a parent whose pages are all in its children is
+ * not reported as empty. A domain of the wiki that `domains.yaml` does not list has no count.
  */
 function checkDomainSizes(pages: StructurePage[], input: StructureInput): StructureFinding[] {
   const { max_domain_pages: max, min_domain_pages: min } = input.identity.lint
@@ -477,11 +494,15 @@ function checkDomainSizes(pages: StructurePage[], input: StructureInput): Struct
         message: `Domain "${domain}" has ${plural(count)}. The limit is ${max}. Split it into sub-domains.`,
         domains: [domain],
       })
-    } else if (count < min) {
+      continue
+    }
+    const children = [...counts].filter(([other]) => other.startsWith(`${domain}/`))
+    const total = children.reduce((sum, [, childCount]) => sum + childCount, count)
+    if (total < min) {
       findings.push({
         check: "domain-too-small",
         page: null,
-        message: `Domain "${domain}" has ${plural(count)}. The minimum is ${min}. Add pages, or merge it into a parent domain.`,
+        message: `Domain "${domain}" has ${plural(total)}${children.length > 0 ? " with its child domains" : ""}. The minimum is ${min}. Add pages, or merge it into a parent domain.`,
         domains: [domain],
       })
     }

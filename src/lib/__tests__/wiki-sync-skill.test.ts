@@ -27,9 +27,17 @@ describe("wiki-sync skill", () => {
     }
   })
 
+  // Final review, I2(b): a retired card that the user deleted is dropped from the map. The skill makes no MCP call for it.
+  it("records a forgotten event for a forget action, with no MCP call", () => {
+    const down = skill.slice(skill.indexOf("## Down (wiki to Heptabase)"), skill.indexOf("### Record events"))
+    expect(down).toContain("`forget`")
+    expect(down).toContain("A `forget` action has no MCP call. Run `record` with a `forgotten` event for it.")
+    expect(skill).toContain('{"type":"forgotten","page":"<page>"}')
+  })
+
   it("names only record events that the tool takes", async () => {
     const types = [...new Set([...skill.matchAll(/"type":"([a-z-]+)"/g)].map((match) => match[1]))]
-    expect(types.sort()).toEqual(["created", "feedback", "placed", "relinked", "retired", "setup-done", "up-decision", "updated"])
+    expect(types.sort()).toEqual(["created", "feedback", "forgotten", "placed", "relinked", "retired", "setup-done", "up-decision", "updated"])
     for (const type of types) {
       const result = await runCli(["hepta", "record", "--project", scratch, "--event", JSON.stringify({ type })])
       expect(JSON.stringify(result.output), type).not.toContain("unknown event type")

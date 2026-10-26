@@ -29,6 +29,8 @@ export interface RecutPage {
   domain: string | null
   /** In the order `domain`, `to_domain`, `from_domain`, then the items of `also`. */
   refs: PageRef[]
+  /** The `relation` of a hypothesis page (`analogy` or `stack`), as written. Null for any other page, and when it is not text. */
+  relation: string | null
   /** The text of the page, without a byte order mark. */
   markdown: string
 }
@@ -50,5 +52,15 @@ export function recutPage(path: string, markdown: string): RecutPage {
   for (const item of Array.isArray(also) ? also : typeof also === "string" ? [also] : []) {
     if (item.trim() !== "") refs.push({ key: "also", value: item.trim() })
   }
-  return { path: indexed.path, slug: indexed.slug, title: indexed.title, type: indexed.type, domain: indexed.domain, refs, markdown }
+  const relation = indexed.type === HYPOTHESIS_TYPE ? frontmatter?.relation : undefined
+  return {
+    path: indexed.path,
+    slug: indexed.slug,
+    title: indexed.title,
+    type: indexed.type,
+    domain: indexed.domain,
+    refs,
+    relation: typeof relation === "string" && relation.trim() !== "" ? relation.trim() : null,
+    markdown,
+  }
 }

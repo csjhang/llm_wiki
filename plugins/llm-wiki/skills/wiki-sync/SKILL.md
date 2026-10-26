@@ -199,8 +199,8 @@ node "<plugin dir>/scripts/wiki-tool.mjs" hepta plan-down --project "<project>" 
 7. If a problem says to add an option, tell the user which option to add in which property of the mirror tag. The MCP cannot add an option. Go on with the other cards.
 8. If a problem says `refusing to retire`, the plan retires no card. Do not retire a card by hand. Show the user the count and the reason. The `wiki/` folder may be unreadable, or the user may have removed many pages. Tell the user to check the `wiki/` folder. Ask the user if these cards must be retired. Only after a yes, run the plan again with `--allow-mass-retire` added to the command. Use the flag on this plan only. If a later plan of this run refuses again, ask the user again. If the user says no, go on without the retires.
 9. If a problem says that a card is not in the mirror tag, tell the user. The plan does nothing for that page. Do not create, update, or retire the card by hand.
-10. Show the counts per action (`create`, `setup`, `update`, `relink`, `retire`, `skip-edited`, `place`). Wait for a yes.
-11. Handle the actions in the order of the list. For each action, run its MCP calls. Then run `record` at once, before the next action.
+10. Show the counts per action (`create`, `setup`, `update`, `relink`, `retire`, `skip-edited`, `place`, `forget`). Wait for a yes.
+11. Handle the actions in the order of the list. For each action, run its MCP calls. Then run `record` at once, before the next action. A `forget` action has no MCP call. Run `record` with a `forgotten` event for it.
 12. When the list is done, go back to step 2. Plan again. Stop when the plan has no action, or when only cards that failed in this run are left. Stop after four rounds.
 13. Pass 2 of the plan gives the `relink` actions. They appear when no `create`, `update`, or `retire` is left.
 
@@ -220,12 +220,13 @@ The events are:
 {"type":"updated","page":"<page>","cardUpdatedAt":"<time>","contentHash":"<contentHash>"}
 {"type":"relinked","page":"<page>","cardUpdatedAt":"<time>","contentHash":"<contentHash>"}
 {"type":"retired","page":"<page>","cardUpdatedAt":"<time>"}
+{"type":"forgotten","page":"<page>"}
 {"type":"placed","page":"<page>","whiteboardId":"<whiteboard id>"}
 ```
 
 - Copy `page` and `contentHash` from the action. Do not compute a hash.
 - Use the event `relinked` for a `relink` action.
-- Every event except `created` and `placed` needs `cardUpdatedAt`. See "Get the card time".
+- Every event except `created`, `placed`, and `forgotten` needs `cardUpdatedAt`. See "Get the card time".
 - The tool finds the body file of the page itself. Do not name it.
 - If `record` fails, show the problems. Do not run the next action until you fix the cause.
 
@@ -335,12 +336,12 @@ node "<plugin dir>/scripts/wiki-tool.mjs" hepta record --project "<project>" --e
 At the end, give the user a short report.
 
 - The direction that ran.
-- The counts per action: created, set up, updated, relinked, retired, placed, skipped because edited, snapshots, questions asked, PDF cards.
+- The counts per action: created, set up, updated, relinked, retired, forgotten, placed, skipped because edited, snapshots, questions asked, PDF cards.
 - The counts in `skipped` of Up.
 - The problems and warnings, as the tool printed them. Include a missing option, and the name of the property.
 - The cards that failed in this run: the title, the card id, and the page of each.
 - The edited cards: the title, the card id, and the wiki page of each. Say that the skill did not overwrite them. Say if a note was saved or the card was the same as the text the wiki sent. Say if a review item was added, or why it was not.
-- The retired cards: the title and the card id of each. Tell the user to delete these cards by hand.
+- The retired cards: the title and the card id of each. Tell the user to delete these cards by hand. The next plan then gives a `forget` action for each card that is gone.
 - The new snapshot files. Say that ingest waits until the app runs, and that the source watch of the app must be on.
 - The PDF cards that the user must save by hand.
 - Say that `heptabase-map.json` maps wiki pages to Heptabase cards. The user must never discard or revert it.

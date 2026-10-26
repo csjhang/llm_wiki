@@ -65,13 +65,25 @@ export function isDomainIndexPath(relativePath: string): boolean {
   return relativePath.replace(/\\/g, "/").toLowerCase().startsWith(DOMAIN_INDEX_DIR)
 }
 
+/** The files of `wiki/` that the app writes and keeps, besides `wiki/indexes/`. They are no pages of the wiki. Lower case. */
+export const APP_OWN_PAGES: ReadonlySet<string> = new Set([ROOT_INDEX_PATH, "wiki/log.md", "wiki/overview.md"])
+
+/**
+ * True for a path under `wiki/` that is not a page of the wiki: one of `APP_OWN_PAGES`, or a file in
+ * `wiki/indexes/`. The case of the path does not matter. This is the one list that the app and the
+ * `wiki-tool` CLI use when they scan `wiki/`.
+ */
+export function isAppOwnPath(relativePath: string): boolean {
+  return APP_OWN_PAGES.has(relativePath.replace(/\\/g, "/").toLowerCase()) || isDomainIndexPath(relativePath)
+}
+
 // --- reading a page ----------------------------------------------------
 
-/** The page that `markdown` is, at `path`. */
+/** The page that `markdown` is, at `path`. A byte order mark before the frontmatter is ignored. */
 export function indexedPageFromMarkdown(path: string, markdown: string): IndexedPage {
   const normalized = path.replace(/\\/g, "/")
   const slug = fileStem(normalized)
-  const { frontmatter, body } = parseFrontmatter(markdown)
+  const { frontmatter, body } = parseFrontmatter(withoutBom(markdown))
   const field = (key: string): string | null => {
     const value = frontmatter?.[key]
     if (typeof value !== "string") return null
@@ -90,6 +102,11 @@ export function indexedPageFromMarkdown(path: string, markdown: string): Indexed
     // A hypothesis page has no `domain`. It belongs to the domain it points at.
     domain: type === "hypothesis" ? field("to_domain") : field("domain"),
   }
+}
+
+/** The text without a byte order mark. The `wiki-tool` CLI reads pages the same way. */
+export function withoutBom(text: string): string {
+  return text.replace(/^\uFEFF/, "")
 }
 
 function fileStem(path: string): string {

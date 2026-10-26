@@ -84,6 +84,8 @@ export function computePageEdits(plan: RecutPlan, sources: readonly PageSource[]
       else result.problems.push(`${page.path}: ${edit.reason}`)
     }
 
+    checkHypothesisDomains(page, mapped, result)
+
     // The Known instances lines of a mechanism page.
     if (page.type === MECHANISM_TYPE) {
       const rewritten = rewriteInstanceLines(text, (domain, slug) => {
@@ -104,6 +106,27 @@ export function computePageEdits(plan: RecutPlan, sources: readonly PageSource[]
     if (text !== original) result.edits.push({ path: page.path, before: original, after: text })
   }
   return result
+}
+
+/**
+ * A merge can give `from_domain` and `to_domain` of a hypothesis the same name. A stack needs two domains (`fuse check`
+ * refuses the page), so the recut stops there. An analogy that borrows inside one domain is odd but valid, so it gets a
+ * note. A hypothesis that had one domain before the recut is not the business of the recut.
+ */
+function checkHypothesisDomains(page: RecutPage, mapped: (domain: string) => string, result: PageEdits): void {
+  if (page.type !== HYPOTHESIS_TYPE) return
+  const from = page.refs.find((ref) => ref.key === "from_domain")?.value
+  const to = page.refs.find((ref) => ref.key === "to_domain")?.value
+  if (from === undefined || to === undefined || from === to || mapped(from) !== mapped(to)) return
+  const domain = mapped(from)
+  if (page.relation === "stack") {
+    result.problems.push(
+      `${page.path}: relation stack needs two domains, but this recut gives from_domain and to_domain the same domain ${domain}. Change the plan so that the two domains of this page stay two domains.`,
+    )
+  } else {
+    const kind = page.relation === "analogy" ? "analogy" : "hypothesis"
+    result.notes.push(`${page.path}: this ${kind} now has the same domain ${domain} in from_domain and to_domain. Check if it still makes sense.`)
+  }
 }
 
 /** The new domains of the assigned pages, by the lower-case slug of the page. */

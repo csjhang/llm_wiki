@@ -264,6 +264,34 @@ describe("loadMechanismContext", () => {
     for (const issue of ctx!.configIssues) expect(issue.path.startsWith("wiki.yaml")).toBe(true)
   })
 
+  // Final review, M2: a typo in a threshold must not stop the mechanism writes of the app.
+  it("a bad lint threshold takes its default and is a config issue; id and role stay valid", async () => {
+    setFile("wiki.yaml", "version: 1\nid: my-reading\nrole: reading\nmechanism_library: null\nlint:\n  draft_days: 0\n  max_domain_pages: 50\n")
+
+    const ctx = await loadMechanismContext(PROJECT)
+
+    expect(ctx!.identity).toEqual({
+      version: 1,
+      id: "my-reading",
+      role: "reading",
+      mechanism_library: null,
+      lint: { ...DEFAULT_LINT_THRESHOLDS, max_domain_pages: 50 },
+    })
+    expect(ctx!.identityStatus).toBe("ok")
+    expect(ctx!.configIssues).toEqual([{ path: "wiki.yaml:lint.draft_days", message: "must be a positive integer" }])
+    expect(canWriteMechanismPages(ctx!)).toBe(true)
+  })
+
+  it("a bad lint threshold in a work wiki keeps the role", async () => {
+    setFile("wiki.yaml", "version: 1\nid: work\nrole: work\nmechanism_library: ../reading\nlint:\n  draft_day: 3\n")
+
+    const ctx = await loadMechanismContext(PROJECT)
+
+    expect(ctx!.identity.role).toBe("work")
+    expect(ctx!.identityStatus).toBe("ok")
+    expect(ctx!.configIssues.map((issue) => issue.path)).toEqual(["wiki.yaml:lint.draft_day"])
+  })
+
   it("work wiki resolves relative library path", async () => {
     const work = "/home/me/work/projectA"
     mountSample(work)

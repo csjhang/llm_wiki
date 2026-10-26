@@ -12,6 +12,7 @@
  *   {"type":"relinked","page","cardUpdatedAt"[,"contentHash"]}
  *   {"type":"placed","page","whiteboardId"}
  *   {"type":"retired","page","cardUpdatedAt"}
+ *   {"type":"forgotten","page"}                                    (a `forget` action: no Heptabase call)
  *   {"type":"feedback","page","cardId","cardUpdatedAt"}          (with one --content file for each page of read_object)
  *   {"type":"up-decision","cardId","decision"}                    (decision: "skip" or "this-wiki")
  *
@@ -37,6 +38,10 @@
  * `raw/sources/heptabase/`, so the next ingest reads the user's change and not the text of the wiki. Without a sent
  * text the note holds the whole card. Either way the event records the time of that edit (`cardUpdatedAt`, the
  * `updatedAt` of the card) in the map, so plan-down reports one edit once.
+ *
+ * A `forgotten` event drops the map entry of a retired page whose card is gone from the mirror tag (the user deleted it).
+ * It is for the `forget` action of plan-down and takes a retired entry only: the card of an active page is not gone.
+ * A page that is mirrored again later gets a new card at the next plan.
  *
  * An `up-decision` event keeps the user's answer to a question of `plan-up` (an `ask` action): `skip` leaves the
  * card out, `this-wiki` makes it a source of this wiki. `plan-up` plans no question for the card while the answer is
@@ -91,6 +96,7 @@ const HANDLERS: Record<string, EventHandler> = {
   "setup-done": recordSetupDone,
   placed: recordPlaced,
   retired: recordRetired,
+  forgotten: recordForgotten,
   feedback: recordFeedback,
   "up-decision": recordUpDecision,
 }
@@ -410,6 +416,21 @@ function recordRetired(context: RecordContext): CommandResult {
     },
     bodyFile,
   )
+}
+
+/** The card of a retired page is gone. The entry leaves the map; the wiki page and the snapshots stay. */
+function recordForgotten(context: RecordContext): CommandResult {
+  const fields = new Fields(context.event, context.project)
+  const page = fields.page()
+  const problems = fields.problems
+  const existing = page === "" ? null : mappedPage(context.map, page, problems)
+  refuseWhileWaiting(existing, page, problems)
+  if (existing && existing.status !== "retired") problems.push(`${page} is not retired, so its card cannot be forgotten`)
+  if (problems.length > 0 || !existing) return fail(problems)
+
+  delete context.map.pages[page]
+  saveCardMap(context.project, context.map)
+  return { ok: true, event: "forgotten", page, entry: existing }
 }
 
 function recordFeedback(context: RecordContext): CommandResult {

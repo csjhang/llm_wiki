@@ -10,6 +10,7 @@
     "../../src/lib/frontmatter.ts",
     "../../src/lib/wiki-page-types.ts",
     "../../src/lib/mechanism-wiki/domain-index-render.ts",
-    "../../src/lib/mechanism-wiki/lint-structure.ts"
+    "../../src/lib/mechanism-wiki/lint-structure.ts",
+    "../../src/lib/mechanism-wiki/mirror-rules.ts"
   ]
 }

@@ -15,7 +15,7 @@ import {
   compareText,
   domainIndexPath,
   indexedPageFromMarkdown,
-  isDomainIndexPath,
+  isAppOwnPath,
   MECHANISM_INDEX_PATH,
   MECHANISM_TYPE,
   renderDomainIndex,
@@ -26,9 +26,6 @@ import {
 import type { IndexedPage } from "./domain-index-render"
 
 export type { IndexedPage } from "./domain-index-render"
-
-/** Files of `wiki/` that are not pages: the app keeps them (`wiki/indexes/` is skipped as a folder). */
-const NON_PAGE_FILES: ReadonlySet<string> = new Set([ROOT_INDEX_PATH, "wiki/log.md", "wiki/overview.md"])
 
 /**
  * The prompt text lists at most this many unassigned pages, because the root index goes into
@@ -88,8 +85,8 @@ function collectPagePaths(nodes: FileNode[], folder: string): string[] {
   for (const node of nodes) {
     const path = `${folder}/${node.name}`
     if (node.is_dir) {
-      if (!isDomainIndexPath(`${path}/`)) paths.push(...collectPagePaths(node.children ?? [], path))
-    } else if (node.name.endsWith(".md") && node.name.length > ".md".length && !NON_PAGE_FILES.has(path)) {
+      if (!isAppOwnPath(`${path}/`)) paths.push(...collectPagePaths(node.children ?? [], path))
+    } else if (node.name.toLowerCase().endsWith(".md") && node.name.length > ".md".length && !isAppOwnPath(path)) {
       paths.push(path)
     }
   }

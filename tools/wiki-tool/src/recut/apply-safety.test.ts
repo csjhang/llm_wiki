@@ -125,7 +125,11 @@ describe("recut apply: nothing is written outside the project", () => {
     const result = await applyPlan(project, rename)
     expect(result.exitCode).toBe(0)
     expect(readFileSync(join(outside, "pairs.json"), "utf8")).toBe(pairs)
-    expect(result.output.notes).toEqual([expect.stringMatching(/fusion-dismissed\.json were not updated: .*outside the project/)])
+    // The first note is the one of a reading wiki (ruling U21); the second is about the dismissed pairs.
+    expect(result.output.notes).toEqual([
+      expect.stringContaining("This is a reading wiki."),
+      expect.stringMatching(/fusion-dismissed\.json were not updated: .*outside the project/),
+    ])
   })
 })
 

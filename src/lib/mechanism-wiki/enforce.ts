@@ -38,6 +38,7 @@ import { hasOwn } from "@/lib/wiki-config/yaml-util"
 import { canWriteMechanismPages, lensForDomain } from "./context"
 import type { MechanismContext } from "./context"
 import { knownLenses } from "./decisions"
+import { APP_OWN_PAGES } from "./domain-index-render"
 import type { AnalysisDecisions } from "./types"
 
 type NewReview = Omit<ReviewItem, "id" | "resolved" | "createdAt">
@@ -58,8 +59,6 @@ const HYPOTHESIS_DIR = "wiki/hypotheses/"
 const SOURCES_DIR = "wiki/sources/"
 /** How many lines from the top `declaredType` reads when the frontmatter does not parse. */
 const TYPE_LINE_WINDOW = 30
-/** Pages that the app maintains or that hold no domain. Lower case. */
-const EXEMPT_PAGES = new Set(["wiki/index.md", "wiki/log.md", "wiki/overview.md"])
 
 /**
  * What to write for a FILE block: the block as it is, other content and/or another path, or nothing.
@@ -172,7 +171,7 @@ class Rules {
       this.proposeMechanism(block)
       return { kind: "drop" }
     }
-    if (!lower.startsWith("wiki/") || !lower.endsWith(".md") || EXEMPT_PAGES.has(lower)) return KEEP
+    if (!lower.startsWith("wiki/") || !lower.endsWith(".md") || APP_OWN_PAGES.has(lower)) return KEEP
     if (lower.startsWith(HYPOTHESIS_DIR) || declaredType(block.content) === "hypothesis") return KEEP
     return this.keepDomainsApart(path, block.content, this.fixDomain(path, block.content))
   }

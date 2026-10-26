@@ -136,6 +136,17 @@ describe("hepta plan-down", () => {
     })
   })
 
+  // Final review, M2: a typo in a lint threshold must not stop the sync.
+  it("runs when a lint threshold of wiki.yaml is bad", async () => {
+    const project = makeProject({
+      [MECHANISM_PATH]: mechanism("Event Driven"),
+      "wiki.yaml": "version: 1\nid: test\nrole: reading\nlint:\n  draft_days: 0\n",
+    })
+    const result = await plan(project)
+    expect(result.exitCode).toBe(0)
+    expect(result.output.actions.map((action) => action.op)).toEqual(["create"])
+  })
+
   it("uses the date of the clock for last synced, in UTC", async () => {
     const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
     const result = await runCli(["hepta", "plan-down", "--project", project, "--now", "2026-01-02T23:59:59.000-05:00"])
@@ -407,6 +418,94 @@ describe("hepta plan-down", () => {
       mapOf({ "wiki/mechanisms/gone.md": { card_id: id(21), content_hash: "x", status: "retired" } }),
     )
     expect((await plan(project)).output.actions).toEqual([])
+  })
+
+  // Final review, I2(b): a retired card that the user deleted by hand is dropped from the map by a `forget` action.
+  describe("a retired card that is not in the mirror list", () => {
+    const retired = (path = "wiki/mechanisms/gone.md", card = 21): CardMap =>
+      mapOf({ [path]: { card_id: id(card), content_hash: "x", status: "retired" } })
+    const OTHER = [{ id: id(99), title: "Other", updated: NOW }]
+
+    it("plans forget when the page is gone", async () => {
+      const project = makeProject()
+      saveCardMap(project, retired())
+      const result = await plan(project, ["--mirror-cards", writeMirrorList(project, OTHER)])
+      expect(result.exitCode).toBe(0)
+      expect(result.output).toEqual({ ok: true, pass: 1, problems: [], actions: [{ op: "forget", page: "wiki/mechanisms/gone.md", cardId: id(21) }] })
+    })
+
+    it("plans forget when the page exists but the sync does not mirror it", async () => {
+      const project = makeProject({ "wiki/concepts/one.md": pageText({ type: "concept", title: "One", sources: ["a.md"] }) })
+      saveCardMap(project, retired("wiki/concepts/one.md"))
+      const result = await plan(project, ["--mirror-cards", writeMirrorList(project, OTHER)])
+      expect(result.output.actions).toEqual([{ op: "forget", page: "wiki/concepts/one.md", cardId: id(21) }])
+    })
+
+    it("plans forget, and not the blocker, when the page is back and mirrored", async () => {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      saveCardMap(project, retired(MECHANISM_PATH))
+      const result = await plan(project, ["--mirror-cards", writeMirrorList(project, OTHER)])
+      expect(result.output.actions).toEqual([{ op: "forget", page: MECHANISM_PATH, cardId: id(21) }])
+      expect(result.output.problems).toEqual([])
+      // After the record, the page gets a new card.
+      await record(project, { type: "forgotten", page: MECHANISM_PATH })
+      const next = await plan(project, ["--mirror-cards", writeMirrorList(project, OTHER)])
+      expect(next.output.actions.map((action) => [action.op, action.page])).toEqual([["create", MECHANISM_PATH]])
+    })
+
+    it("plans nothing while the card is in the list", async () => {
+      const project = makeProject()
+      saveCardMap(project, retired())
+      const listed = writeMirrorList(project, [{ id: id(21), title: "🗄 已停用｜Gone", updated: NOW }])
+      expect((await plan(project, ["--mirror-cards", listed])).output.actions).toEqual([])
+    })
+
+    it("plans nothing without the list: a card cannot be called gone when nobody looked", async () => {
+      const project = makeProject()
+      saveCardMap(project, retired())
+      const result = await planWith(project)
+      expect(result.exitCode).toBe(0)
+      expect(result.output.actions).toEqual([])
+    })
+
+    it("plans nothing for an active card that the list does not hold: that one is a problem", async () => {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      saveCardMap(project, mapOf({ [MECHANISM_PATH]: { card_id: id(21), content_hash: "x" } }))
+      const result = await plan(project, ["--mirror-cards", writeMirrorList(project, OTHER)])
+      expect(result.output.actions).toEqual([])
+      expect(result.output.problems).toEqual([{ page: MECHANISM_PATH, problem: expect.stringContaining("is not in the mirror tag") }])
+    })
+
+    it("is no retire for the mass-retire rule, and is not refused by it", async () => {
+      const project = makeProject()
+      const entries: Record<string, { card_id: string; content_hash: string; status: "retired" }> = {}
+      for (let index = 0; index < 6; index += 1) entries[`wiki/mechanisms/p${index}.md`] = { card_id: id(21 + index), content_hash: "x", status: "retired" }
+      saveCardMap(project, mapOf(entries))
+      mkdirSync(join(project, "wiki"), { recursive: true })
+      const result = await plan(project, ["--mirror-cards", writeMirrorList(project, OTHER)])
+      expect(result.output.actions.map((action) => action.op)).toEqual(Array(6).fill("forget"))
+      expect(result.output.problems).toEqual([])
+    })
+
+    it("does not make a relink wait", async () => {
+      const project = makeProject({
+        "wiki/mechanisms/alpha.md": mechanism("Alpha", "See [[beta]]."),
+        "wiki/mechanisms/beta.md": mechanism("Beta"),
+      })
+      const creates = (await plan(project)).output.actions
+      await recordCreated(project, creates[0], id(22))
+      await recordCreated(project, creates[1], id(23))
+      const map = loadCardMap(project)
+      map.pages["wiki/mechanisms/gone.md"] = { ...map.pages["wiki/mechanisms/alpha.md"], card_id: id(24), status: "retired" }
+      saveCardMap(project, map)
+      const list = writeMirrorList(project, [
+        { id: id(22), title: "Alpha", updated: NOW },
+        { id: id(23), title: "Beta", updated: NOW },
+      ])
+      const result = await plan(project, ["--mirror-cards", list])
+      expect(result.output.pass).toBe(2)
+      expect(result.output.actions.map((action) => action.op)).toEqual(["relink", "forget"])
+    })
   })
 
   it("does not retire a card the user edited", async () => {

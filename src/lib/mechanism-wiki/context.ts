@@ -12,7 +12,7 @@ import { isAbsolutePath, normalizePath } from "@/lib/path-utils"
 import { domainParent, KNOWN_LENSES, parseDomainsYaml } from "@/lib/wiki-config/domains"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
 import type { ConfigIssue } from "@/lib/wiki-config/types"
-import { DEFAULT_LINT_THRESHOLDS, parseWikiYaml } from "@/lib/wiki-config/wiki-identity"
+import { defaultIdentity, parseWikiYaml } from "@/lib/wiki-config/wiki-identity"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
 import { hasOwn } from "@/lib/wiki-config/yaml-util"
 import type { FileNode } from "@/types/wiki"
@@ -32,7 +32,7 @@ export interface LensDoc {
 
 /**
  * How `wiki.yaml` loaded. `identity` is the default reading identity unless this is "ok".
- * - ok: the file parsed with no issues.
+ * - ok: the file gave a valid identity. A bad `lint:` threshold takes its default and is a config issue.
  * - missing: the file does not exist.
  * - invalid: the file exists but cannot be read or does not parse.
  */
@@ -237,10 +237,6 @@ async function readAll(
 
 // --- config ------------------------------------------------------------
 
-function defaultIdentity(): WikiIdentity {
-  return { version: 1, id: "reading", role: "reading", mechanism_library: null, lint: { ...DEFAULT_LINT_THRESHOLDS } }
-}
-
 function fileIssue(file: string, issue: ConfigIssue): ConfigIssue {
   return { path: issue.path === "" ? file : `${file}:${issue.path}`, message: issue.message }
 }
@@ -261,7 +257,11 @@ function resolveIdentity(
     return { identity: defaultIdentity(), status: "invalid" }
   }
   const parsed = parseWikiYaml(wiki.text)
-  if (parsed.ok) return { identity: parsed.value, status: "ok" }
+  if (parsed.ok) {
+    // A bad threshold took its default. The problem is reported, and the identity stays valid.
+    issues.push(...parsed.issues.map((issue) => fileIssue(WIKI_FILE, issue)))
+    return { identity: parsed.value, status: "ok" }
+  }
   issues.push(...parsed.issues.map((issue) => fileIssue(WIKI_FILE, issue)))
   return { identity: defaultIdentity(), status: "invalid" }
 }

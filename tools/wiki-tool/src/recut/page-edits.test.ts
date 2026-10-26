@@ -96,6 +96,90 @@ describe("computePageEdits: rename and merge", () => {
   })
 })
 
+// Final review, M1: a merge can give the two domains of a hypothesis the same name. A stack needs two domains.
+describe("computePageEdits: a hypothesis whose two domains become one", () => {
+  const merge: RecutPlan = { op: "merge", from: ["example/alpha", "example/beta"], into: INTO("example/gamma") }
+  const hypothesis = (relation: string | null, from = "example/alpha", to = "example/beta"): string =>
+    ["---", "type: hypothesis", ...(relation === null ? [] : [`relation: ${relation}`]), `from_domain: ${from}`, `to_domain: ${to}`, "---", "", "Body.", ""].join("\n")
+
+  it("refuses a stack, names the page, and says what to do", () => {
+    const result = computePageEdits(merge, [source("wiki/hypotheses/layers.md", hypothesis("stack"))])
+    expect(result.problems).toEqual([
+      "wiki/hypotheses/layers.md: relation stack needs two domains, but this recut gives from_domain and to_domain the same domain example/gamma. Change the plan so that the two domains of this page stay two domains.",
+    ])
+  })
+
+  it("refuses a stack that the merge puts into an existing domain", () => {
+    const into: RecutPlan = { op: "merge", from: ["example/alpha", "example/beta"], into: INTO("example/zeta") }
+    const result = computePageEdits(into, [source("wiki/hypotheses/layers.md", hypothesis("stack", "example/alpha", "example/zeta"))])
+    expect(result.problems).toHaveLength(1)
+    expect(result.problems[0]).toContain("same domain example/zeta")
+  })
+
+  it("adds a note for an analogy and still edits the page", () => {
+    const text = hypothesis("analogy")
+    const result = computePageEdits(merge, [source("wiki/hypotheses/borrow.md", text)])
+    expect(result.problems).toEqual([])
+    expect(result.notes).toEqual([
+      "wiki/hypotheses/borrow.md: this analogy now has the same domain example/gamma in from_domain and to_domain. Check if it still makes sense.",
+    ])
+    expect(result.edits).toEqual([
+      { path: "wiki/hypotheses/borrow.md", before: text, after: text.replace("example/alpha", "example/gamma").replace("example/beta", "example/gamma") },
+    ])
+  })
+
+  it("adds a note for a hypothesis without a relation, or with another one", () => {
+    for (const relation of [null, "other"]) {
+      const result = computePageEdits(merge, [source("wiki/hypotheses/x.md", hypothesis(relation))])
+      expect(result.problems, String(relation)).toEqual([])
+      expect(result.notes, String(relation)).toEqual([
+        "wiki/hypotheses/x.md: this hypothesis now has the same domain example/gamma in from_domain and to_domain. Check if it still makes sense.",
+      ])
+    }
+  })
+
+  it("says nothing for a hypothesis that had one domain before the recut", () => {
+    for (const relation of ["stack", "analogy"]) {
+      const result = computePageEdits(merge, [source("wiki/hypotheses/x.md", hypothesis(relation, "example/alpha", "example/alpha"))])
+      expect(result.problems, relation).toEqual([])
+      expect(result.notes, relation).toEqual([])
+    }
+  })
+
+  it("says nothing when the two domains stay two domains", () => {
+    const result = computePageEdits(merge, [source("wiki/hypotheses/x.md", hypothesis("stack", "example/alpha", "example/zeta"))])
+    expect(result.problems).toEqual([])
+    expect(result.notes).toEqual([])
+  })
+
+  it("names every such page, in the order of the pages", () => {
+    const result = computePageEdits(merge, [
+      source("wiki/hypotheses/a.md", hypothesis("stack")),
+      source("wiki/hypotheses/b.md", hypothesis("analogy")),
+      source("wiki/hypotheses/c.md", hypothesis("stack")),
+    ])
+    expect(result.problems.map((problem) => problem.split(":")[0])).toEqual(["wiki/hypotheses/a.md", "wiki/hypotheses/c.md"])
+    expect(result.notes.map((note) => note.split(":")[0])).toEqual(["wiki/hypotheses/b.md"])
+  })
+
+  it("does not read the relation of a page that is no hypothesis", () => {
+    const text = "---\ntype: concept\nrelation: stack\nfrom_domain: example/alpha\nto_domain: example/beta\ndomain: example/alpha\n---\n\nBody.\n"
+    expect(computePageEdits(merge, [source("wiki/concepts/x.md", text)]).problems).toEqual([])
+  })
+
+  it("does not make two domains of a split hypothesis whose keys are both the split domain", () => {
+    const split: SplitPlan = {
+      op: "split",
+      from: "example/alpha",
+      into: [INTO("example/one"), INTO("example/two")],
+      assignments: { "wiki/hypotheses/x.md": "example/one" },
+    }
+    const result = computePageEdits(split, [source("wiki/hypotheses/x.md", hypothesis("stack", "example/alpha", "example/alpha"))])
+    expect(result.problems).toEqual([])
+    expect(result.notes).toEqual([])
+  })
+})
+
 describe("computePageEdits: split", () => {
   const split: SplitPlan = {
     op: "split",

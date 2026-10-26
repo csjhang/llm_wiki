@@ -351,6 +351,27 @@ function generated(name: string, text: DomainText, whiteboards: readonly string[
   return { name, lens: text.lens, description: text.description, whiteboards: [...whiteboards] }
 }
 
+/**
+ * The note for a reading wiki (ruling U21). A work wiki whose `mechanism_library` is this wiki names the domains of
+ * this wiki in the `from_domain` and `to_domain` of its hypothesis pages, and a recut here cannot change those pages.
+ * The note lists each domain that gets another name, with its new name (a split: the new domains, as a choice). Null
+ * when no name changes, which no recut does.
+ */
+export function libraryNote(plan: RecutPlan, changes: DomainChanges): string | null {
+  const pairs: Array<[string, string[]]> =
+    plan.op === "split"
+      ? [[plan.from, plan.into.map((entry) => entry.domain)]]
+      : plan.op === "merge"
+        ? plan.from.filter((domain) => domain !== plan.into.domain).map((domain): [string, string[]] => [domain, [plan.into.domain]])
+        : [...changes.renames].map(([old, now]): [string, string[]] => [old, [now]])
+  if (pairs.length === 0) return null
+  const list = pairs.map(([old, now]) => `${old} → ${now.join(" or ")}`).join("; ")
+  return (
+    "This is a reading wiki. A work wiki whose mechanism_library is this wiki keeps the old names in the from_domain and to_domain of its hypothesis pages. " +
+    `Those pages need the new names: ${list}. Until then, fuse check and the lint of that work wiki report them.`
+  )
+}
+
 /** The subject of the commit without its prefix and its count: `rename <from> → <to>`. */
 export function planTitle(plan: RecutPlan): string {
   if (plan.op === "split") return `split ${plan.from} → ${plan.into.map((entry) => entry.domain).join("+")}`
@@ -366,25 +387,50 @@ export interface MergeCandidate {
 }
 
 /**
- * Pairs of pages with the same slug that a merge brings into one domain: the pages of the merged domains and of the
- * target, from two different domains. The two paths of a pair are in path order, and so are the pairs.
+ * Pairs of pages with the same name that a merge brings into one domain: the pages of the merged domains and of the
+ * target, from two different domains. Two such pages never share a slug in one folder, because ingest gives the
+ * second one the suffix `--<domain>` (`enforce.ts`, rule 5). So the name of a page is its slug without that suffix
+ * (`baseName`). Two pages that have the same slug count too, as before. The two paths of a pair are in path order,
+ * and so are the pairs.
  */
 export function findMergeCandidates(plan: RecutPlan, pages: readonly RecutPage[]): MergeCandidate[] {
   if (plan.op !== "merge") return []
   const joined = new Set([...plan.from, plan.into.domain])
   const bySlug = new Map<string, RecutPage[]>()
+  const byBaseName = new Map<string, RecutPage[]>()
+  const add = (groups: Map<string, RecutPage[]>, key: string, page: RecutPage): void => {
+    groups.set(key, [...(groups.get(key) ?? []), page])
+  }
   for (const page of pages) {
     if (page.domain === null || !joined.has(page.domain) || page.type === MECHANISM_TYPE) continue
-    bySlug.set(page.slug, [...(bySlug.get(page.slug) ?? []), page])
+    add(bySlug, page.slug, page)
+    add(byBaseName, baseName(page), page)
   }
-  const pairs: MergeCandidate[] = []
-  for (const group of bySlug.values()) {
+  // A pair can come from both maps. The key makes it count once.
+  const pairs = new Map<string, MergeCandidate>()
+  for (const group of [...bySlug.values(), ...byBaseName.values()]) {
     const sorted = [...group].sort((x, y) => compareText(x.path, y.path))
     for (let first = 0; first < sorted.length; first += 1) {
       for (let second = first + 1; second < sorted.length; second += 1) {
-        if (sorted[first].domain !== sorted[second].domain) pairs.push({ a: sorted[first].path, b: sorted[second].path })
+        if (sorted[first].domain === sorted[second].domain) continue
+        pairs.set(`${sorted[first].path}\n${sorted[second].path}`, { a: sorted[first].path, b: sorted[second].path })
       }
     }
   }
-  return pairs.sort((x, y) => compareText(x.a, y.a) || compareText(x.b, y.b))
+  return [...pairs.values()].sort((x, y) => compareText(x.a, y.a) || compareText(x.b, y.b))
+}
+
+/**
+ * The slug of `page` without the suffix that ingest adds to keep two domains apart: `--<domain with / as -->`, else
+ * `--<last segment of the domain>`. The whole form comes first, because the short form is the end of it. The suffix
+ * must be that of the domain of the page itself, and it must leave a name.
+ */
+function baseName(page: RecutPage): string {
+  if (page.domain === null) return page.slug
+  const whole = `--${page.domain.replace(/\//g, "--")}`
+  const short = `--${page.domain.split("/").pop()}`
+  for (const suffix of [whole, short]) {
+    if (page.slug.length > suffix.length && page.slug.endsWith(suffix)) return page.slug.slice(0, -suffix.length)
+  }
+  return page.slug
 }

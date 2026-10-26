@@ -323,6 +323,90 @@ describe("merge", () => {
     ])
   })
 
+  // Ingest never writes two pages of one slug in one folder: the second one gets the suffix `--<domain>`
+  // (enforce.ts, rule 5). A merge must find these pairs by the name without the suffix.
+  describe("pages that the app renamed for their domain", () => {
+    it("pairs a page with the page that has the short domain suffix", () => {
+      const pages = [
+        page("wiki/concepts/attention.md", { type: "concept", domain: "example/alpha" }),
+        page("wiki/concepts/attention--beta.md", { type: "concept", domain: "example/beta" }),
+      ]
+      expect(findMergeCandidates(merge, pages)).toEqual([{ a: "wiki/concepts/attention--beta.md", b: "wiki/concepts/attention.md" }])
+    })
+
+    it("pairs a page with the page that has the whole domain as suffix", () => {
+      const pages = [
+        page("wiki/concepts/routing.md", { type: "concept", domain: "example/alpha" }),
+        page("wiki/concepts/routing--example--beta.md", { type: "concept", domain: "example/beta" }),
+      ]
+      expect(findMergeCandidates(merge, pages)).toEqual([{ a: "wiki/concepts/routing--example--beta.md", b: "wiki/concepts/routing.md" }])
+    })
+
+    it("pairs the pages of a child domain by its last segment", () => {
+      const plan: MergePlan = { op: "merge", from: ["example/alpha/child", "example/beta"], into: INTO("example/gamma") }
+      const pages = [
+        page("wiki/entities/valve.md", { type: "entity", domain: "example/beta" }),
+        page("wiki/entities/valve--child.md", { type: "entity", domain: "example/alpha/child" }),
+      ]
+      expect(findMergeCandidates(plan, pages)).toEqual([{ a: "wiki/entities/valve--child.md", b: "wiki/entities/valve.md" }])
+    })
+
+    it("lists every pair of a page and its renamed twins", () => {
+      const plan: MergePlan = { op: "merge", from: ["example/alpha", "example/beta", "example/zeta"], into: INTO("example/gamma") }
+      const pages = [
+        page("wiki/concepts/x.md", { type: "concept", domain: "example/alpha" }),
+        page("wiki/concepts/x--beta.md", { type: "concept", domain: "example/beta" }),
+        page("wiki/concepts/x--zeta.md", { type: "concept", domain: "example/zeta" }),
+      ]
+      expect(findMergeCandidates(plan, pages)).toEqual([
+        { a: "wiki/concepts/x--beta.md", b: "wiki/concepts/x--zeta.md" },
+        { a: "wiki/concepts/x--beta.md", b: "wiki/concepts/x.md" },
+        { a: "wiki/concepts/x--zeta.md", b: "wiki/concepts/x.md" },
+      ])
+    })
+
+    it("keeps an exact-slug pair", () => {
+      const pages = [
+        page("wiki/concepts/x--beta.md", { type: "concept", domain: "example/alpha" }),
+        page("wiki/entities/x--beta.md", { type: "entity", domain: "example/beta" }),
+      ]
+      expect(findMergeCandidates(merge, pages)).toEqual([{ a: "wiki/concepts/x--beta.md", b: "wiki/entities/x--beta.md" }])
+    })
+
+    it("does not strip a suffix that is not the domain of the page", () => {
+      const pages = [
+        page("wiki/concepts/plain.md", { type: "concept", domain: "example/alpha" }),
+        // The suffix names another domain than the one of the page, so it is part of the name.
+        page("wiki/concepts/plain--alpha.md", { type: "concept", domain: "example/beta" }),
+      ]
+      expect(findMergeCandidates(merge, pages)).toEqual([])
+    })
+
+    it("does not pair two pages of one domain", () => {
+      const pages = [
+        page("wiki/concepts/same.md", { type: "concept", domain: "example/alpha" }),
+        page("wiki/concepts/same--alpha.md", { type: "concept", domain: "example/alpha" }),
+      ]
+      expect(findMergeCandidates(merge, pages)).toEqual([])
+    })
+
+    it("does not turn a name that is only the suffix into an empty name", () => {
+      const pages = [
+        page("wiki/concepts/--beta.md", { type: "concept", domain: "example/beta" }),
+        page("wiki/concepts/other.md", { type: "concept", domain: "example/alpha" }),
+      ]
+      expect(findMergeCandidates(merge, pages)).toEqual([])
+    })
+
+    it("lists a pair once when the slugs and the base names both match", () => {
+      const pages = [
+        page("wiki/concepts/x.md", { type: "concept", domain: "example/alpha" }),
+        page("wiki/entities/x.md", { type: "entity", domain: "example/beta" }),
+      ]
+      expect(findMergeCandidates(merge, pages)).toEqual([{ a: "wiki/concepts/x.md", b: "wiki/entities/x.md" }])
+    })
+  })
+
   it("counts the pages of an existing target as well", () => {
     const plan: MergePlan = { op: "merge", from: ["example/alpha", "example/beta"], into: INTO("example/zeta") }
     const pages = [

@@ -499,7 +499,7 @@ describe("mirror-retired", () => {
         page: "wiki/concepts/a.md",
         message:
           `The card of wiki/concepts/a.md ("Alpha Page") is retired. Card id: ${CARD_1}. ` +
-          'Find the card in the mirror tag by this id or by the "🗄 已停用" title prefix. Delete it by hand.',
+          'Find the card in the mirror tag by this id or by the "🗄 已停用｜" title prefix. Delete it by hand. The next wiki-sync then drops the entry from the card map.',
       },
     ])
   })
@@ -515,9 +515,40 @@ describe("mirror-retired", () => {
         page: "wiki/concepts/gone.md",
         message:
           `The card of wiki/concepts/gone.md is retired. Card id: ${CARD_1}. ` +
-          'Find the card in the mirror tag by this id or by the "🗄 已停用" title prefix. Delete it by hand.',
+          'Find the card in the mirror tag by this id or by the "🗄 已停用｜" title prefix. Delete it by hand. The next wiki-sync then drops the entry from the card map.',
       },
     ])
+  })
+
+  // Final review, I2(a): a page that the sync mirrors gets its card back at the next sync (planPage plans an update
+  // for the retired card). Telling the user to delete that card would block the page for good.
+  describe("when the page file exists again", () => {
+    const mapOf = (path: string) => ({ pages: { [path]: retiredEntry } })
+    const found = (page: StructurePage) => only("mirror-retired", checkStructure(input([page], { cardMap: mapOf(page.path) })))
+
+    it("says nothing for a page that the sync mirrors", () => {
+      expect(found(pageOf("wiki/mechanisms/m.md", { type: "mechanism", instances: ["x"] }))).toEqual([])
+      expect(found(pageOf("wiki/hypotheses/h.md", { type: "hypothesis", from_domain: ALPHA, to_domain: BETA }))).toEqual([])
+      expect(found(pageOf("wiki/concepts/c.md", { type: "comparison", domain: ALPHA }))).toEqual([])
+      expect(found(pageOf("wiki/concepts/two.md", { type: "concept", domain: ALPHA, sources: ["a.md", "b.md"] }))).toEqual([])
+    })
+
+    it("keeps the finding for a page that the sync does not mirror", () => {
+      expect(found(pageOf("wiki/concepts/one.md", { type: "concept", domain: ALPHA, sources: ["a.md"] }))).toHaveLength(1)
+      expect(found(pageOf("wiki/concepts/same.md", { type: "concept", domain: ALPHA, sources: ["a.md", "a.md"] }))).toHaveLength(1)
+      expect(found(pageOf("wiki/entities/e.md", { type: "entity", domain: ALPHA, sources: ["a.md", "b.md"] }))).toHaveLength(1)
+    })
+
+    it("judges by the type in the frontmatter, as the sync does, not by the folder", () => {
+      const noType = structurePageFromMarkdown("wiki/mechanisms/m.md", "---\ntitle: M\n---\n# M\n")
+      expect(noType.type).toBe("mechanism")
+      expect(found(noType)).toHaveLength(1)
+    })
+
+    it("keeps the finding for a page whose frontmatter cannot be read", () => {
+      const broken = structurePageFromMarkdown("wiki/mechanisms/m.md", "---\ntype: [mechanism\n---\n# M\n")
+      expect(found(broken)).toHaveLength(1)
+    })
   })
 
   it("says nothing for an active entry or without a card map", () => {
@@ -716,6 +747,62 @@ describe("domain-too-large and domain-too-small", () => {
     expect(findings[1].message).toContain("0")
   })
 
+  // Final review, M3: a parent domain that holds its pages in child domains is not empty.
+  describe("a domain that has child domains", () => {
+    const CHILD = "example/alpha/child"
+    const GRANDCHILD = "example/alpha/child/leaf"
+    const tree = domainsOf(ALPHA, CHILD, GRANDCHILD, BETA)
+    const small = (pages: StructurePage[]) =>
+      only("domain-too-small", checkStructure(input(pages, { identity: READING, domains: tree })))
+    const names = (pages: StructurePage[]) => small(pages).map((finding) => finding.domains?.[0])
+
+    it("counts the pages of its child domains too", () => {
+      const pages = [...pagesIn(CHILD, 3), ...pagesIn(BETA, 3), ...pagesIn(GRANDCHILD, 3)]
+      // The parent has no page of its own, but 6 in its children. Each child is judged by its own pages.
+      expect(names(pages)).toEqual([])
+    })
+
+    it("counts the pages of a grandchild for every ancestor", () => {
+      const pages = [...pagesIn(GRANDCHILD, 3), ...pagesIn(BETA, 3)]
+      // `example/alpha/child` has no page of its own either, but its child does.
+      expect(names(pages)).toEqual([])
+    })
+
+    it("judges a child domain by its own pages and its own children", () => {
+      const pages = [...pagesIn(ALPHA, 5), ...pagesIn(CHILD, 1), ...pagesIn(GRANDCHILD, 3), ...pagesIn(BETA, 3)]
+      expect(names(pages)).toEqual([])
+      expect(names([...pagesIn(ALPHA, 5), ...pagesIn(BETA, 3)])).toEqual([CHILD, GRANDCHILD])
+    })
+
+    it("flags a parent whose own and child pages together are fewer than the minimum, and says so", () => {
+      const findings = small([...pagesIn(ALPHA, 1), ...pagesIn(CHILD, 1), ...pagesIn(BETA, 3)])
+      expect(findings.map((finding) => [finding.domains?.[0], finding.message])).toEqual([
+        [ALPHA, 'Domain "example/alpha" has 2 pages with its child domains. The minimum is 3. Add pages, or merge it into a parent domain.'],
+        [CHILD, 'Domain "example/alpha/child" has 1 page with its child domains. The minimum is 3. Add pages, or merge it into a parent domain.'],
+        [GRANDCHILD, 'Domain "example/alpha/child/leaf" has 0 pages. The minimum is 3. Add pages, or merge it into a parent domain.'],
+      ])
+    })
+
+    it("names the count with the child domains in the message of the parent", () => {
+      const pages = [...pagesIn(ALPHA, 1), ...pagesIn(CHILD, 1), ...pagesIn(GRANDCHILD, 3), ...pagesIn(BETA, 3)]
+      const tiny = only("domain-too-small", checkStructure(input(pages, { identity: { ...READING, lint: { ...DEFAULT_LINT_THRESHOLDS, min_domain_pages: 6 } }, domains: tree })))
+      expect(tiny.map((finding) => finding.message)).toContain(
+        'Domain "example/alpha" has 5 pages with its child domains. The minimum is 6. Add pages, or merge it into a parent domain.',
+      )
+    })
+
+    it("does not count a domain that is not listed, and not a domain with a similar prefix", () => {
+      const pages = [...pagesIn("example/alpha/unlisted", 5), ...pagesIn("example/alphabet", 5), ...pagesIn(BETA, 3)]
+      expect(names(pages)).toEqual([ALPHA, CHILD, GRANDCHILD])
+    })
+
+    it("does not change the count of a domain that is too large", () => {
+      const large = checkStructure(input([...pagesIn(CHILD, 201), ...pagesIn(BETA, 3), ...pagesIn(GRANDCHILD, 3)], { identity: READING, domains: tree }))
+      // The parent has no page of its own: only the child is too large.
+      expect(only("domain-too-large", large).map((finding) => finding.domains)).toEqual([[CHILD]])
+    })
+  })
+
   it("counts a hypothesis under its to_domain", () => {
     const hypotheses = Array.from({ length: 3 }, (_, index) =>
       pageOf(`wiki/hypotheses/h${index}.md`, { type: "hypothesis", from_domain: ALPHA, to_domain: BETA }),
@@ -775,6 +862,17 @@ describe("config-invalid (ruling U14)", () => {
         message: "A config file has a problem: domains.yaml: could not read the file. The domain checks are skipped until you fix the file.",
       },
       { check: "config-invalid", page: null, message: "A config file has a problem: wiki.yaml: the file is missing. Fix the file." },
+    ])
+  })
+
+  it("says that a bad threshold of wiki.yaml uses its default", () => {
+    const findings = only("config-invalid", checkStructure(input([], { configProblems: ["wiki.yaml:lint.draft_days: must be a positive integer"] })))
+    expect(findings).toEqual([
+      {
+        check: "config-invalid",
+        page: null,
+        message: "A config file has a problem: wiki.yaml:lint.draft_days: must be a positive integer. The default value of the threshold is used until you fix the file.",
+      },
     ])
   })
 

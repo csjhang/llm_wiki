@@ -9,25 +9,17 @@
 import { type Dirent, readdirSync, readFileSync, realpathSync, statSync } from "node:fs"
 import { posix } from "node:path"
 import { type FrontmatterValue, parseFrontmatter } from "@/lib/frontmatter"
+import { isAppOwnPath, withoutBom } from "@/lib/mechanism-wiki/domain-index-render"
+import { isSyncable } from "@/lib/mechanism-wiki/mirror-rules"
 import { type HeptabaseConfig, parseHeptabaseYaml, type PropertyKey } from "@/lib/wiki-config/heptabase-config"
-import type { ParseResult } from "@/lib/wiki-config/types"
+import type { ConfigIssue } from "@/lib/wiki-config/types"
 import { parseWikiYaml, type WikiIdentity } from "@/lib/wiki-config/wiki-identity"
 import { type CardMap, contentHash } from "./card-map"
 import { type LinkTarget, wikiPageToCard } from "./convert"
 import { resolveInProject } from "./io"
 
-/** Title prefix of a card whose page is gone. */
-export const RETIRED_TITLE_PREFIX = "🗄 已停用｜"
 /** Body of a card whose page is gone. No replacement is known. */
 export const RETIRED_BODY = "此頁已從 wiki 移除。"
-
-/** Page types that are always synced. A `concept` is synced when it has two sources. */
-const ALWAYS_SYNCED_TYPES: readonly string[] = ["mechanism", "hypothesis", "comparison"]
-const MIN_CONCEPT_SOURCES = 2
-
-/** Pages that the app maintains; they are never synced. Lower case. */
-const SKIPPED_PAGES = new Set(["wiki/index.md", "wiki/log.md", "wiki/overview.md"])
-const SKIPPED_DIRECTORY = "wiki/indexes"
 
 export interface WikiPage {
   /** Path from the project root, with `/`: `wiki/mechanisms/event-driven.md`. */
@@ -67,7 +59,7 @@ function fileStem(path: string): string {
 }
 
 export function parseWikiPage(path: string, markdown: string): WikiPage {
-  const text = markdown.replace(/^\uFEFF/, "")
+  const text = withoutBom(markdown)
   const { frontmatter, body } = parseFrontmatter(text)
   const field = (key: string): string => {
     const value = frontmatter?.[key]
@@ -90,12 +82,6 @@ export function parseWikiPage(path: string, markdown: string): WikiPage {
 function sourceNames(value: FrontmatterValue | undefined): string[] {
   const items = Array.isArray(value) ? value : typeof value === "string" ? [value] : []
   return [...new Set(items.map((item) => item.trim()).filter((item) => item !== ""))]
-}
-
-/** True for a page that is mirrored: mechanism, hypothesis, comparison, or a concept with two sources. */
-export function isSyncable(page: WikiPage): boolean {
-  if (ALWAYS_SYNCED_TYPES.includes(page.type)) return true
-  return page.type === "concept" && page.sources.length >= MIN_CONCEPT_SOURCES
 }
 
 /** The page at a project-relative path, or null when the file cannot be read. */
@@ -154,12 +140,12 @@ function collectMarkdown(project: string, directory: string, visited: Set<string
       throw error
     }
     if (stats.isDirectory()) {
-      if (path.toLowerCase() === SKIPPED_DIRECTORY) continue
+      if (isAppOwnPath(`${path}/`)) continue
       const real = realpathSync(absolute)
       if (visited.has(real)) continue
       visited.add(real)
       collectMarkdown(project, path, visited, found)
-    } else if (stats.isFile() && entry.name.toLowerCase().endsWith(".md") && !SKIPPED_PAGES.has(path.toLowerCase())) {
+    } else if (stats.isFile() && entry.name.toLowerCase().endsWith(".md") && !isAppOwnPath(path)) {
       found.push(path)
     }
   }
@@ -275,7 +261,7 @@ export function readWikiIdentity(project: string, problems: string[]): WikiIdent
 function readConfigFile<T>(
   project: string,
   name: string,
-  parse: (text: string) => ParseResult<T>,
+  parse: (text: string) => { ok: true; value: T } | { ok: false; issues: ConfigIssue[] },
   problems: string[],
 ): T | null {
   const path = resolveInProject(project, name)

@@ -9,11 +9,12 @@ import { rmSync } from "node:fs"
 import { basename, join } from "node:path"
 import { afterEach, describe, expect, it } from "vitest"
 import { runCli } from "../cli"
-import { removeProjects } from "../test-project"
+import { id, makeProject, mirrorList, removeProjects, writeProjectFile } from "../test-project"
 import {
   BUSINESS,
   conceptPage,
   DOMAINS,
+  DOMAINS_YAML,
   git,
   HARDWARE,
   hypothesisPage,
@@ -176,6 +177,25 @@ describe("lint structure: the card map", () => {
     ])
   })
 
+  // Final review, I2: the finding was permanent, because nothing ever dropped a retired entry.
+  it("stops finding a retired card after the sync has forgotten it", async () => {
+    const files = {
+      ...cleanFiles(),
+      "heptabase-map.json": cardMap({ "wiki/concepts/old.md": { status: "retired", card_id: id(21) } }),
+    }
+    const project = makeProject({ "domains.yaml": DOMAINS_YAML, ...files })
+    expect((await structure(project)).output.findings).toMatchObject([{ check: "mirror-retired", page: "wiki/concepts/old.md" }])
+
+    // The user deleted the card by hand, so the mirror list does not hold it.
+    writeProjectFile(project, ".llm-wiki/hepta/mirror.txt", mirrorList([{ id: id(99), title: "Other", updated: "2026-10-24T08:00:00.000Z" }]))
+    const planned = await runCli(["hepta", "plan-down", "--project", project, "--mirror-cards", join(project, ".llm-wiki/hepta/mirror.txt")])
+    expect(planned.output.actions).toEqual([{ op: "forget", page: "wiki/concepts/old.md", cardId: id(21) }])
+    const recorded = await runCli(["hepta", "record", "--project", project, "--event", JSON.stringify({ type: "forgotten", page: "wiki/concepts/old.md" })])
+    expect(recorded.exitCode).toBe(0)
+
+    expect((await structure(project)).output.findings).toEqual([])
+  })
+
   it("a project without a card map gets no card map finding", async () => {
     const project = makeWiki(cleanFiles())
     const { output } = await structure(project)
@@ -256,6 +276,25 @@ describe("lint structure: config problems (ruling U14)", () => {
     const found = (output.findings ?? []).filter((finding) => finding.check === "config-invalid")
     expect(found).toHaveLength(1)
     expect(found[0].message).toContain("wiki.yaml:role")
+  })
+
+  // Final review, M2: the thresholds are optional, so a typo in one must not take the whole file down.
+  it("a bad threshold in wiki.yaml is one config-invalid finding, and the default is used", async () => {
+    const files = cleanFiles()
+    // `min_domain_pages: 0` is not valid, so the default 3 applies and each domain (one page) is too small.
+    const project = makeWiki({ ...files, "wiki.yaml": "version: 1\nid: test\nrole: reading\nlint:\n  min_domain_pages: 0\n" })
+    const { exitCode, output } = await structure(project)
+    expect(exitCode).toBe(0)
+    expect(checks(output.findings)).toEqual(["config-invalid", "domain-too-small", "domain-too-small", "domain-too-small"])
+    expect(output.findings?.[0].message).toContain("wiki.yaml:lint.min_domain_pages")
+    expect(output.findings?.[0].message).toContain("The default value of the threshold is used")
+  })
+
+  it("a bad threshold does not stop the commands that read the domain list", async () => {
+    const project = makeWiki({ ...cleanFiles(), "wiki.yaml": "version: 1\nid: test\nrole: reading\nlint:\n  draft_days: 0\n" })
+    const batch = await runLint<{ ok: boolean }>("batch", project, "--domain", HARDWARE)
+    expect(batch.exitCode).toBe(0)
+    expect(batch.output.ok).toBe(true)
   })
 
   it("a missing wiki.yaml gives a config-invalid finding", async () => {

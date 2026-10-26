@@ -3,7 +3,7 @@
  *
  * `--project P --plan F` gives `{ ok: true, sha, pages, mergeCandidates?, notes? }`. `F` is the path of a JSON file with
  * the plan (see `plan.ts`), or the JSON itself when it starts with `{`. `pages` are the wiki pages that changed;
- * `sha` is the new commit. A merge always gives `mergeCandidates`: pairs of pages with the same slug that the merge
+ * `sha` is the new commit. A merge always gives `mergeCandidates`: pairs of pages with the same name that the merge
  * brings into one domain (the skill files them as `duplicate` reviews). `notes` are things to tell the user.
  *
  * The command checks everything before it writes anything: the plan against `domains.yaml` and the pages, the work
@@ -17,6 +17,9 @@
  * 4. commits all of these files in one commit `recut: <op> <from> → <to> (<N> pages)`, where N counts the changed wiki
  *    pages only (ruling U7), through `commitPathsLocked`;
  * 5. after the commit, gives the dismissed fusion pairs the new names (ruling U5; not committed).
+ *
+ * In a reading wiki, `notes` also says which domain names changed: a work wiki that reads this wiki keeps the old names in
+ * the `from_domain` and `to_domain` of its hypothesis pages, and its pages need the new names (ruling U21).
  *
  * When the commit fails, the files are taken out of the index, every file goes back to what it was, and the command exits
  * with the problem, so a failed recut leaves the work tree as it found it. Nothing is pushed.
@@ -43,7 +46,7 @@ import { remapDismissedPairs } from "./dismissed"
 import { DomainsFileError, editDomainsYaml } from "./domains-file"
 import { insideProblem } from "./inside"
 import { computePageEdits, findLeftoverRefs } from "./page-edits"
-import { createMapper, type DomainChanges, findMergeCandidates, parseRecutPlan, planDomains, planTitle, type RecutPlan, validateRecutPlan } from "./plan"
+import { createMapper, type DomainChanges, findMergeCandidates, libraryNote, parseRecutPlan, planDomains, planTitle, type RecutPlan, validateRecutPlan } from "./plan"
 import { readPageSources } from "./read-pages"
 import { uncommittedChanges } from "./work-tree"
 
@@ -141,6 +144,9 @@ export async function recutApply(args: string[]): Promise<CommandResult> {
 
   // The commit is done. What follows must not undo it.
   const notes = [...changes.notes, ...pageEdits.notes]
+  // A work wiki may name the domains of this wiki (ruling U21). It is a reading wiki when wiki.yaml says so or is missing.
+  const reading = config.identity.role === "reading" ? libraryNote(plan, changes) : null
+  if (reading !== null) notes.push(reading)
   if (plan.op !== "split") {
     const mapper = createMapper(plan)
     try {

@@ -1,16 +1,23 @@
 import { readFileSync } from "node:fs"
 import { fileURLToPath } from "node:url"
 import { describe, it, expect } from "vitest"
-import { parseWikiYaml } from "./wiki-identity"
-import type { ConfigIssue, ParseResult } from "./types"
+import { parseWikiYaml, type WikiIdentity, type WikiParseResult } from "./wiki-identity"
+import type { ConfigIssue } from "./types"
 
-function valueOf<T>(result: ParseResult<T>): T {
+function valueOf(result: WikiParseResult): WikiIdentity {
   if (!result.ok) throw new Error(`expected ok, got ${JSON.stringify(result.issues)}`)
   return result.value
 }
 
-function pathsOf<T>(result: ParseResult<T>): string[] {
+/** The paths of the issues of a file that is not valid. */
+function pathsOf(result: WikiParseResult): string[] {
   if (result.ok) throw new Error("expected issues, got ok")
+  return result.issues.map((issue: ConfigIssue) => issue.path)
+}
+
+/** The paths of the problems of a file that is valid: a threshold took its default (ruling M2 of the final review). */
+function softPathsOf(result: WikiParseResult): string[] {
+  if (!result.ok) throw new Error(`expected ok, got ${JSON.stringify(result.issues)}`)
   return result.issues.map((issue: ConfigIssue) => issue.path)
 }
 
@@ -159,62 +166,95 @@ describe("parseWikiYaml", () => {
       })
     })
 
-    it("names the key of a value that is not a positive integer", () => {
+    // A bad threshold does not make the file invalid. The key takes its default and the problem is reported, so
+    // `id` and `role` stay usable and sync and ingest go on (final review, M2).
+    it("takes the default for a value that is not a positive integer, and names the key", () => {
       for (const key of ["draft_days", "max_domain_pages", "min_domain_pages", "semantic_reminder_ingests"]) {
         for (const value of ["0", "-3", "1.5", '"10"', "null", "[10]", ".inf", "true"]) {
           const result = parseWikiYaml(build() + `lint:\n  ${key}: ${value}\n`)
-          expect(pathsOf(result), `${key}: ${value}`).toEqual([`lint.${key}`])
-          if (result.ok) throw new Error("expected issues")
+          expect(softPathsOf(result), `${key}: ${value}`).toEqual([`lint.${key}`])
+          expect(valueOf(result).lint, `${key}: ${value}`).toEqual(DEFAULTS)
           expect(result.issues[0].message).toContain("positive integer")
         }
       }
     })
 
-    it("reports every bad key together", () => {
-      const text = build() + "lint:\n  draft_days: 0\n  max_domain_pages: x\n"
-      expect(pathsOf(parseWikiYaml(text))).toEqual(["lint.draft_days", "lint.max_domain_pages"])
+    it("keeps id and role and the other thresholds when one threshold is bad", () => {
+      const text = build({ id: "work", role: "work", library: "../reading" }) + "lint:\n  draft_days: 0\n  max_domain_pages: 50\n"
+      const result = parseWikiYaml(text)
+      expect(softPathsOf(result)).toEqual(["lint.draft_days"])
+      expect(valueOf(result)).toEqual({
+        version: 1,
+        id: "work",
+        role: "work",
+        mechanism_library: "../reading",
+        lint: { ...DEFAULTS, max_domain_pages: 50 },
+      })
     })
 
-    it("rejects an unknown key inside lint", () => {
-      expect(pathsOf(parseWikiYaml(build() + "lint:\n  draft_day: 3\n"))).toEqual(["lint.draft_day"])
+    it("reports every bad key together, and each takes its default", () => {
+      const text = build() + "lint:\n  draft_days: 0\n  max_domain_pages: x\n  min_domain_pages: 4\n"
+      const result = parseWikiYaml(text)
+      expect(softPathsOf(result)).toEqual(["lint.draft_days", "lint.max_domain_pages"])
+      expect(valueOf(result).lint).toEqual({ ...DEFAULTS, min_domain_pages: 4 })
     })
 
-    it("rejects a lint block that is not a mapping", () => {
+    it("takes no problem for a file without a bad threshold", () => {
+      expect(softPathsOf(parseWikiYaml(build() + "lint:\n  draft_days: 14\n"))).toEqual([])
+    })
+
+    it("reports an unknown key inside lint and goes on", () => {
+      const result = parseWikiYaml(build() + "lint:\n  draft_day: 3\n  max_domain_pages: 50\n")
+      expect(softPathsOf(result)).toEqual(["lint.draft_day"])
+      expect(valueOf(result).lint).toEqual({ ...DEFAULTS, max_domain_pages: 50 })
+    })
+
+    it("takes the defaults for a lint block that is not a mapping", () => {
       for (const value of ["3", "[a]", '"text"']) {
-        expect(pathsOf(parseWikiYaml(build() + `lint: ${value}\n`)), value).toEqual(["lint"])
+        const result = parseWikiYaml(build() + `lint: ${value}\n`)
+        expect(softPathsOf(result), value).toEqual(["lint"])
+        expect(valueOf(result).lint, value).toEqual(DEFAULTS)
       }
     })
 
-    it("rejects min_domain_pages greater than max_domain_pages and names both keys", () => {
+    it("takes both defaults for min_domain_pages greater than max_domain_pages and names the key of the file", () => {
       const result = parseWikiYaml(build() + "lint:\n  min_domain_pages: 10\n  max_domain_pages: 5\n")
-      expect(pathsOf(result)).toEqual(["lint.min_domain_pages"])
-      if (result.ok) throw new Error("expected issues")
+      expect(softPathsOf(result)).toEqual(["lint.min_domain_pages"])
       expect(result.issues[0].message).toBe("min_domain_pages (10) must not be greater than max_domain_pages (5)")
+      expect(valueOf(result).lint).toEqual(DEFAULTS)
     })
 
     it("compares min_domain_pages with the default max_domain_pages when only min is set", () => {
       const result = parseWikiYaml(build() + "lint:\n  min_domain_pages: 201\n")
-      expect(pathsOf(result)).toEqual(["lint.min_domain_pages"])
-      if (result.ok) throw new Error("expected issues")
+      expect(softPathsOf(result)).toEqual(["lint.min_domain_pages"])
       expect(result.issues[0].message).toBe("min_domain_pages (201) must not be greater than max_domain_pages (200)")
+      expect(valueOf(result).lint).toEqual(DEFAULTS)
     })
 
     it("compares max_domain_pages with the default min_domain_pages when only max is set", () => {
       const result = parseWikiYaml(build() + "lint:\n  max_domain_pages: 2\n")
       // The file sets max, so the issue points at max.
-      expect(pathsOf(result)).toEqual(["lint.max_domain_pages"])
-      if (result.ok) throw new Error("expected issues")
+      expect(softPathsOf(result)).toEqual(["lint.max_domain_pages"])
       expect(result.issues[0].message).toBe("min_domain_pages (3) must not be greater than max_domain_pages (2)")
+      expect(valueOf(result).lint).toEqual(DEFAULTS)
     })
 
     it("accepts min_domain_pages equal to max_domain_pages", () => {
       const text = build() + "lint:\n  min_domain_pages: 7\n  max_domain_pages: 7\n"
       expect(valueOf(parseWikiYaml(text)).lint).toMatchObject({ min_domain_pages: 7, max_domain_pages: 7 })
+      expect(softPathsOf(parseWikiYaml(text))).toEqual([])
     })
 
     it("does not compare the two keys when one of them is not a positive integer", () => {
       const text = build() + "lint:\n  min_domain_pages: 10\n  max_domain_pages: 0\n"
-      expect(pathsOf(parseWikiYaml(text))).toEqual(["lint.max_domain_pages"])
+      const result = parseWikiYaml(text)
+      expect(softPathsOf(result)).toEqual(["lint.max_domain_pages"])
+      expect(valueOf(result).lint).toEqual({ ...DEFAULTS, min_domain_pages: 10 })
+    })
+
+    it("still rejects the file when a field other than lint is wrong, and lists the lint problems with the others", () => {
+      const result = parseWikiYaml(build({ role: "other" }) + "lint:\n  draft_days: 0\n")
+      expect(pathsOf(result)).toEqual(["role", "lint.draft_days"])
     })
 
     it("accepts a lint block in a work wiki", () => {

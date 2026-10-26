@@ -394,6 +394,89 @@ describe("hepta record", () => {
     })
   })
 
+  // Final review, I2(b): nothing dropped a retired entry once the user had deleted its card by hand.
+  describe("forgotten", () => {
+    /** A project whose page is created, retired, and then gone. */
+    async function retiredProject(): Promise<string> {
+      const project = await createdProject()
+      await record(project, { type: "retired", page: PAGE, cardUpdatedAt: "2026-10-24T08:20:00.000Z" })
+      return project
+    }
+
+    it("removes a retired entry from the map and leaves the rest of the map alone", async () => {
+      const project = await retiredProject()
+      const other = "wiki/mechanisms/other.md"
+      writeProjectFile(project, other, mechanism("Other"))
+      await record(project, { type: "created", page: other, cardId: id(22), cardUpdatedAt: NOW, contentHash: HASH_B })
+      await record(project, { type: "up-decision", cardId: id(23), decision: "skip" })
+      const before = loadCardMap(project)
+
+      const result = await record(project, { type: "forgotten", page: PAGE })
+
+      expect(result.exitCode).toBe(0)
+      expect(result.output).toMatchObject({ ok: true, event: "forgotten", page: PAGE })
+      const after = loadCardMap(project)
+      expect(Object.keys(after.pages)).toEqual([other])
+      expect(after.pages[other]).toEqual(before.pages[other])
+      expect(after.sources).toEqual(before.sources)
+      expect(after.up_decisions).toEqual(before.up_decisions)
+    })
+
+    it("takes the page in other forms of the path, like every event", async () => {
+      const project = await retiredProject()
+      const result = await record(project, { type: "forgotten", page: `./${PAGE}` })
+      expect(result.exitCode).toBe(0)
+      expect(loadCardMap(project).pages[PAGE]).toBeUndefined()
+    })
+
+    it("refuses an active entry: the card of an active page is not gone", async () => {
+      const project = await createdProject()
+      const result = await record(project, { type: "forgotten", page: PAGE })
+      expect(result.exitCode).toBe(2)
+      expect(result.output.problems).toEqual([`${PAGE} is not retired, so its card cannot be forgotten`])
+      expect(loadCardMap(project).pages[PAGE].status).toBe("active")
+    })
+
+    it("refuses a page that is not in the map, and a page that is not a path under wiki/", async () => {
+      const project = await retiredProject()
+      const missing = await record(project, { type: "forgotten", page: "wiki/mechanisms/none.md" })
+      expect(missing.exitCode).toBe(2)
+      expect(missing.output.problems).toEqual(["wiki/mechanisms/none.md is not in the card map"])
+      for (const page of [undefined, "", "heptabase-map.json", "wiki/readme.txt"]) {
+        const bad = await record(project, { type: "forgotten", page })
+        expect(bad.exitCode, String(page)).toBe(2)
+        expect(bad.output.problems, String(page)).toEqual([expect.stringContaining('event "page"')])
+      }
+      expect(loadCardMap(project).pages[PAGE].status).toBe("retired")
+    })
+
+    it("refuses a card that waits for setup", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      await record(project, { type: "created", page: PAGE, cardId: id(21), setup: false, contentHash: HASH_A })
+      const map = loadCardMap(project)
+      map.pages[PAGE].status = "retired"
+      saveCardMap(project, map)
+      const result = await record(project, { type: "forgotten", page: PAGE })
+      expect(result.exitCode).toBe(2)
+      expect(result.output.problems).toEqual([`${PAGE} is waiting for setup; record setup-done first`])
+    })
+
+    it("lets the page get a new card at the next plan when the page is back and mirrored", async () => {
+      const project = await retiredProject()
+      await record(project, { type: "forgotten", page: PAGE })
+      const planned = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW, ...quietMirrorArgs(project)])
+      expect((planned.output.actions as { op: string; page: string }[]).map((action) => [action.op, action.page])).toEqual([["create", PAGE]])
+    })
+
+    it("needs no heptabase.yaml", async () => {
+      const project = makeProject({}, { noHeptabaseYaml: true })
+      const map = loadCardMap(project)
+      map.pages[PAGE] = { card_id: id(21), content_hash: HASH_A, last_synced_at: NOW, card_updated_at: NOW, placements: [], status: "retired" }
+      saveCardMap(project, map)
+      expect((await record(project, { type: "forgotten", page: PAGE })).exitCode).toBe(0)
+    })
+  })
+
   describe("the sent text", () => {
     const read = (project: string, path: string): string => readFileSync(join(project, path), "utf8")
 

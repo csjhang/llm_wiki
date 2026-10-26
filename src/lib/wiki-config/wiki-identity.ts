@@ -1,4 +1,4 @@
-import type { ConfigIssue, ParseResult } from "./types"
+import type { ConfigIssue } from "./types"
 import { checkVersion, childPath, hasOwn, isRecord, loadYamlMapping, reportUnknownKeys } from "./yaml-util"
 
 /**
@@ -31,6 +31,14 @@ export const DEFAULT_LINT_THRESHOLDS: Readonly<LintThresholds> = {
   semantic_reminder_ingests: 10,
 }
 
+/**
+ * The identity of a wiki without a usable `wiki.yaml`: a reading wiki with the id "reading" and the default
+ * thresholds. The app and the `wiki-tool` CLI both use it. Every call gives a new object.
+ */
+export function defaultIdentity(): WikiIdentity {
+  return { version: 1, id: "reading", role: "reading", mechanism_library: null, lint: { ...DEFAULT_LINT_THRESHOLDS } }
+}
+
 const LINT_KEYS = Object.keys(DEFAULT_LINT_THRESHOLDS) as (keyof LintThresholds)[]
 
 export interface WikiIdentity {
@@ -43,6 +51,15 @@ export interface WikiIdentity {
   lint: LintThresholds
 }
 
+/**
+ * The result of `parseWikiYaml`. A bad value under `lint:` does not make the file invalid: the key takes its
+ * default, the file is `ok`, and `issues` holds the problem of each such key (its `path` starts with `lint`).
+ * Every other problem makes the file invalid, and `issues` then holds all problems, the `lint` ones last.
+ */
+export type WikiParseResult =
+  | { ok: true; value: WikiIdentity; issues: ConfigIssue[] }
+  | { ok: false; issues: ConfigIssue[] }
+
 const WIKI_ID_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 
 const TOP_LEVEL_KEYS = ["version", "id", "role", "mechanism_library", "lint"] as const
@@ -51,7 +68,7 @@ const TOP_LEVEL_KEYS = ["version", "id", "role", "mechanism_library", "lint"] as
  * Parse and validate the text of `wiki.yaml`. Collects every issue before
  * returning. Does not check that the library path exists.
  */
-export function parseWikiYaml(text: string): ParseResult<WikiIdentity> {
+export function parseWikiYaml(text: string): WikiParseResult {
   const loaded = loadYamlMapping(text)
   if (!loaded.ok) return { ok: false, issues: [loaded.issue] }
 
@@ -62,13 +79,14 @@ export function parseWikiYaml(text: string): ParseResult<WikiIdentity> {
   const id = parseId(root.id, issues)
   const role = parseRole(root.role, issues)
   const mechanismLibrary = parseMechanismLibrary(root.mechanism_library, role, issues)
-  const lint = parseLint(root.lint, issues)
+  const lintIssues: ConfigIssue[] = []
+  const lint = parseLint(root.lint, lintIssues)
 
-  if (issues.length > 0 || role === null) return { ok: false, issues }
+  if (issues.length > 0 || role === null) return { ok: false, issues: [...issues, ...lintIssues] }
   return {
     ok: true,
     value: { version: 1, id, role, mechanism_library: mechanismLibrary, lint },
-    issues: [],
+    issues: lintIssues,
   }
 }
 
@@ -122,7 +140,10 @@ function parseMechanismLibrary(
 /**
  * The `lint:` block. A missing block, or `lint:` with no value, gives the defaults.
  * A missing key takes its default. A value that is not a positive integer is an issue
- * that names the key. `min_domain_pages` must not be greater than `max_domain_pages`.
+ * that names the key, and the key takes its default. `min_domain_pages` must not be greater
+ * than `max_domain_pages`: when it is, the issue names the key that the file sets and both
+ * keys take their defaults. The issues go to `issues`; the result is always a usable set
+ * of thresholds, so a typo in a threshold never invalidates `wiki.yaml`.
  */
 function parseLint(raw: unknown, issues: ConfigIssue[]): LintThresholds {
   const lint: LintThresholds = { ...DEFAULT_LINT_THRESHOLDS }
@@ -150,6 +171,9 @@ function parseLint(raw: unknown, issues: ConfigIssue[]): LintThresholds {
       path: childPath("lint", at),
       message: `min_domain_pages (${lint.min_domain_pages}) must not be greater than max_domain_pages (${lint.max_domain_pages})`,
     })
+    // The two values do not fit each other and neither one is wrong alone: both take their defaults.
+    lint.min_domain_pages = DEFAULT_LINT_THRESHOLDS.min_domain_pages
+    lint.max_domain_pages = DEFAULT_LINT_THRESHOLDS.max_domain_pages
   }
   return lint
 }

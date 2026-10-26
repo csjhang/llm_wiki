@@ -234,7 +234,7 @@ describe("recut apply: split", () => {
       ].join("\n"),
     )
     expect(result.output.pages).toEqual(["wiki/concepts/one.md", "wiki/entities/three.md", "wiki/hypotheses/idea.md", "wiki/mechanisms/handshake.md"])
-    expect(result.output.notes).toEqual([`These child domains stay as they are: ${CHILD}.`])
+    expect(result.output.notes).toEqual([`These child domains stay as they are: ${CHILD}.`, expect.stringContaining(`${ALPHA} → ${LEFT} or ${RIGHT}`)])
     expect(lastSubject(project)).toBe(`recut: split ${ALPHA} → ${LEFT}+${RIGHT} (4 pages)`)
     expect(read(project, "wiki/indexes/example--left.md")).toBe("# example/left\n\n## Concept\n\n- [[one]] — One: a placeholder\n")
     expect(existsSync(join(project, "wiki/indexes/example--alpha.md"))).toBe(false)
@@ -276,6 +276,65 @@ describe("recut apply: split", () => {
   })
 })
 
+// Final review, I3 (ruling U21): a work wiki that reads this wiki names its domains in hypothesis pages. A recut here
+// cannot change those pages, so the output must say that they need the new names.
+describe("recut apply: the reading wiki is the library of work wikis", () => {
+  const WORK_NOTE_START = "This is a reading wiki. A work wiki whose mechanism_library is this wiki keeps the old names in the from_domain and to_domain of its hypothesis pages."
+
+  it("lists the old and new name of every renamed domain, child domains included", async () => {
+    const project = makeRecutRepo()
+    const result = await applyPlan(project, { op: "rename", from: ALPHA, to: GAMMA })
+    expect(result.exitCode).toBe(0)
+    expect(result.output.notes).toEqual([
+      `${WORK_NOTE_START} Those pages need the new names: ${ALPHA} → ${GAMMA}; ${CHILD} → ${GAMMA}/child. Until then, fuse check and the lint of that work wiki report them.`,
+    ])
+  })
+
+  it("lists the new domains of a split", async () => {
+    const project = makeRecutRepo()
+    const into = [{ domain: "example/alpha-1", lens: "hardware", description: "One" }, { domain: "example/alpha-2", lens: "hardware", description: "Two" }]
+    const listed = await runRecut<{ pages: Array<{ path: string }> }>("pages", project, "--domain", ALPHA)
+    const assignments = Object.fromEntries(listed.output.pages.map((entry) => [entry.path, "example/alpha-1"]))
+    const result = await applyPlan(project, { op: "split", from: ALPHA, into, assignments })
+    expect(result.exitCode).toBe(0)
+    expect(result.output.notes).toContain(
+      `${WORK_NOTE_START} Those pages need the new names: ${ALPHA} → example/alpha-1 or example/alpha-2. Until then, fuse check and the lint of that work wiki report them.`,
+    )
+  })
+
+  it("lists each merged domain that gets another name, and not the target that keeps its name", async () => {
+    const project = makeRecutRepo()
+    const result = await applyPlan(project, { op: "merge", from: [ALPHA, BETA], into: INTO(BETA, "business") })
+    expect(result.exitCode).toBe(0)
+    expect(result.output.notes).toContain(
+      `${WORK_NOTE_START} Those pages need the new names: ${ALPHA} → ${BETA}. Until then, fuse check and the lint of that work wiki report them.`,
+    )
+    const both = makeRecutRepo()
+    const merged = await applyPlan(both, { op: "merge", from: [BETA, ALPHA], into: INTO(GAMMA) })
+    expect(merged.output.notes).toContain(
+      `${WORK_NOTE_START} Those pages need the new names: ${BETA} → ${GAMMA}; ${ALPHA} → ${GAMMA}. Until then, fuse check and the lint of that work wiki report them.`,
+    )
+  })
+
+  it("adds no note in a work wiki", async () => {
+    const library = makeRecutRepo()
+    const project = makeRecutRepo({ "wiki.yaml": `version: 1\nid: work\nrole: work\nmechanism_library: ${library}\n` })
+    const result = await applyPlan(project, { op: "rename", from: ALPHA, to: GAMMA })
+    expect(result.exitCode).toBe(0)
+    expect(result.output.notes ?? []).toEqual([])
+  })
+
+  it("gives the note for a missing wiki.yaml too, which reads as a reading wiki", async () => {
+    const project = makeRecutRepo()
+    rmFile(project, "wiki.yaml")
+    git(project, "add", "-A")
+    git(project, "commit", "--quiet", "--no-verify", "-m", "remove wiki.yaml")
+    const result = await applyPlan(project, { op: "rename", from: ALPHA, to: GAMMA })
+    expect(result.exitCode).toBe(0)
+    expect(result.output.notes?.[0]).toContain("This is a reading wiki.")
+  })
+})
+
 describe("recut apply: merge", () => {
   const SHARED_ALPHA = ["---", "type: concept", "title: Shared", `domain: ${ALPHA}`, "---", "", "# Shared", ""].join("\n")
   const SHARED_BETA = ["---", "type: entity", "title: Shared", `domain: ${BETA}`, "---", "", "# Shared", ""].join("\n")
@@ -288,6 +347,37 @@ describe("recut apply: merge", () => {
     expect(result.exitCode).toBe(0)
     expect(result.output.mergeCandidates).toEqual([{ a: "wiki/concepts/shared.md", b: "wiki/entities/shared.md" }])
     expect(lastSubject(project)).toBe(`recut: merge ${ALPHA}+${BETA} → ${GAMMA} (6 pages)`)
+  })
+
+  it("reports the pair that the app made with a domain suffix", async () => {
+    const attention = (domain: string) => ["---", "type: concept", "title: Attention", `domain: ${domain}`, "---", "", "# Attention", ""].join("\n")
+    const project = makeRecutRepo({
+      "wiki/concepts/attention.md": attention(ALPHA),
+      "wiki/concepts/attention--beta.md": attention(BETA),
+    })
+    const result = await applyPlan(project, plan)
+    expect(result.exitCode).toBe(0)
+    expect(result.output.mergeCandidates).toEqual([{ a: "wiki/concepts/attention--beta.md", b: "wiki/concepts/attention.md" }])
+  })
+
+  // Final review, M1.
+  it("refuses a merge that gives a stack hypothesis one domain, and writes nothing", async () => {
+    const stack = IDEA.replace("type: hypothesis", "type: hypothesis\nrelation: stack")
+    const project = makeRecutRepo({ "wiki/hypotheses/idea.md": stack })
+    const result = await applyPlan(project, plan)
+    expect(result.exitCode).toBe(2)
+    expect(result.output.problems).toEqual([expect.stringMatching(/^wiki\/hypotheses\/idea\.md: relation stack needs two domains/)])
+    expect(status(project)).toBe("")
+  })
+
+  it("names an analogy hypothesis that the merge gives one domain", async () => {
+    const analogy = IDEA.replace("type: hypothesis", "type: hypothesis\nrelation: analogy")
+    const project = makeRecutRepo({ "wiki/hypotheses/idea.md": analogy })
+    const result = await applyPlan(project, plan)
+    expect(result.exitCode).toBe(0)
+    expect(result.output.notes).toContain(
+      `wiki/hypotheses/idea.md: this analogy now has the same domain ${GAMMA} in from_domain and to_domain. Check if it still makes sense.`,
+    )
   })
 
   it("rewrites the pages and the domain list of a merge", async () => {
