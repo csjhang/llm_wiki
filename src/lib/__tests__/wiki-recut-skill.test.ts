@@ -84,7 +84,7 @@ describe("wiki-recut skill: the command lines", () => {
   it("runs the apply line as written, on the plan file that the skill names", async () => {
     const apply = commands.find((command) => command.command === "apply")
     expect(apply?.line).toContain(`--plan "<project>/${PLAN_FILE}"`)
-    expect(section("## The plan file")).toContain("Write it to `<project>/.llm-wiki/recut-plan.json`")
+    expect(section("## Apply")).toContain("Write the plan to `<project>/.llm-wiki/recut-plan.json`")
     const project = makeRecutRepo()
     // The plan file is in `.llm-wiki/`, which does not make the working tree dirty.
     writeProjectFile(project, PLAN_FILE, JSON.stringify({ op: "rename", from: ALPHA, to: OMEGA }))
@@ -140,7 +140,7 @@ describe("wiki-recut skill: the output keys that it names", () => {
     expect(merge.output.notes?.length).toBeGreaterThan(0)
     for (const key of ["sha", "pages", "mergeCandidates", "notes", "a", "b"]) named(key)
     expect(skill).toContain("It gives `mergeCandidates` for a merge.")
-    expect(skill).toContain("Each entry is a pair `a` and `b` of pages with the same file name")
+    expect(skill).toContain("Each entry is a pair `a` and `b` of pages with the same name")
   })
 
   it("apply gives no mergeCandidates for a rename", async () => {
@@ -191,9 +191,15 @@ describe("wiki-recut skill: the plan files", () => {
     expect(result.output.mergeCandidates).toEqual([])
   })
 
-  it("tells the agent to write the plan after the yes, and to give a split an assignment for every listed page", () => {
+  it("tells the agent to write the plan file as the first step of Apply, and to give a split an assignment for every listed page", () => {
     const planFile = section("## The plan file")
-    expect(planFile).toContain("Write the plan after the user says yes.")
+    expect(planFile).toContain("The first step of \"Apply\" writes it to a file, after the user says yes.")
+    expect(planFile).not.toContain("Write it to")
+    const apply = section("## Apply")
+    const first = apply.split("\n").find((line) => line.startsWith("1. ")) ?? ""
+    expect(first).toContain("Write the plan to `<project>/.llm-wiki/recut-plan.json` with the file tool.")
+    expect(first).toContain("Never commit it.")
+    expect(apply.indexOf("Write the plan to")).toBeLessThan(apply.indexOf("Run `recut apply`"))
     expect(planFile).toContain("`assignments` has one entry for every path that `recut pages` gave")
     expect(section("## Plan a split")).toContain("A path can have two entries. Give it one new domain.")
   })
@@ -234,7 +240,6 @@ describe("wiki-recut skill: the confirmation and the order of the steps", () => 
     expect(confirm).toContain("Ask: \"Run this plan?\" Wait for the answer.")
     expect(confirm).toContain("A yes starts the next section. Any other answer ends it.")
     expect(section("## Rules")).toContain("Never run `recut apply` before the user says yes to the full plan.")
-    expect(section("## The plan file")).toContain("Write the plan after the user says yes.")
     expect(section("## Apply")).toContain("Run `recut apply` with the plan file.")
   })
 
@@ -277,6 +282,7 @@ describe("wiki-recut skill: the Heptabase options", () => {
   it("a missing option stops the card at the next sync, as wiki-sync says", () => {
     const sync = readRepoFile("plugins/llm-wiki/skills/wiki-sync/SKILL.md")
     expect(sync).toContain("If a select option is missing, stop that card. Tell the user which option to add in which property.")
+    // The sync tool says it as the skill says it: the option and the property.
     expect(missingOptionMessage("example/omega", "domain")).toBe('add the option "example/omega" to the "domain" property in Heptabase')
   })
 })
@@ -291,8 +297,10 @@ describe("wiki-recut skill: the problems of recut apply", () => {
     expect(result.exitCode).toBe(2)
     expect(JSON.stringify(result.output.problems)).toContain("uncommitted changes")
     expect(table).toContain("| The working tree has uncommitted changes |")
-    expect(table).toContain("Tell the user to commit or discard them, but never to discard `heptabase-map.json`.")
-    expect(section("## Rules")).toContain("Never commit, stash, or discard the changes of the user. Tell the user to do it.")
+    // The rules are stated once, in Rule 4 and Rule 10. The table points to them.
+    expect(table).toContain("Follow Rule 4 and Rule 10.")
+    expect(section("## Rules")).toContain("4. Never commit, stash, or discard the changes of the user. Tell the user to commit or discard them.")
+    expect(section("## Rules")).toContain("Rule 10 names one file that the user must not discard.")
     expect(section("## Before you start")).toContain("The card map `heptabase-map.json` and the folder `.llm-wiki/` do not count.")
   })
 
@@ -351,9 +359,32 @@ describe("wiki-recut skill: the problems of recut apply", () => {
     expect(table).toContain("A recut that exits with 2 has written nothing.")
   })
 
-  it("never discards the card map", () => {
-    expect(skill).toContain("Never discard, revert, or reset `heptabase-map.json`.")
-    expect(skill).toContain("It maps wiki pages to Heptabase cards, and nothing can rebuild it.")
+  it("never discards the card map, and says so once", () => {
+    const rule = section("## Rules").split("\n").find((line) => line.startsWith("10. ")) ?? ""
+    expect(rule).toContain("Never edit `heptabase-map.json` or `heptabase.yaml`.")
+    expect(rule).toContain("Never discard, revert, or reset `heptabase-map.json`, and never tell the user to do it.")
+    expect(rule).toContain("It maps wiki pages to Heptabase cards, and nothing can rebuild it.")
+    expect(skill.match(/nothing can rebuild it/g)).toHaveLength(1)
+    expect(skill.match(/never to discard/g)).toBeNull()
+  })
+
+  it("ends the table with a row that shows any other problem and stops", () => {
+    const rows = table.split("\n").filter((line) => line.startsWith("| ") && !line.startsWith("| The problem says") && !line.startsWith("|---"))
+    expect(rows[rows.length - 1]).toBe("| Anything else | Show the problem as it is. Stop. Do not try another way to make the change. |")
+  })
+
+  it("a stack hypothesis that a merge would give one domain is refused, and the skill sends the user back to the plan", async () => {
+    const stack = ["---", "type: hypothesis", "relation: stack", "title: Layers", `from_domain: ${ALPHA}`, `to_domain: ${BETA}`, "---", "", "# Layers", ""].join("\n")
+    const project = makeRecutRepo({ "wiki/hypotheses/idea.md": stack })
+    const result = await applyPlan(project, { op: "merge", from: [ALPHA, BETA], into: { domain: GAMMA, lens: "ai", description: "About gamma" } })
+    expect(result.exitCode).toBe(2)
+    expect(result.output.problems).toEqual([expect.stringContaining("relation stack needs two domains")])
+    expect(status(project)).toBe("")
+    expect(table).toContain("| A hypothesis with `relation: stack` would get one domain |")
+    expect(table).toContain("Change the plan so that the two domains of the page stay two domains.")
+    const merge = section("## Plan a merge")
+    expect(merge).toContain("`recut apply` refuses the plan, because a stack needs two domains.")
+    expect(merge).toContain("For another relation, `recut apply` gives a note.")
   })
 })
 
@@ -380,18 +411,50 @@ describe("wiki-recut skill: calls to the llm_wiki MCP and the merge candidates",
     }
   })
 
-  it("files one item for each slug, because two pairs with one slug would have one title", () => {
+  // Final review, I1 (ruling U20): the app never writes two pages of one name in one folder. The second page gets the
+  // suffix `--<domain>`, so the pairs of a merge are pairs of `attention` and `attention--beta`.
+  it("files one item for each group of pages with one name, because two groups with one slug would have one title", async () => {
     const after = section("## After the recut")
-    expect(after).toContain("Group the pairs by file name without the folder and without `.md`. This is the slug.")
-    expect(after).toContain("For each slug, call `llm_wiki_add_review` once, with the arguments below.")
-    expect(after).toContain("`affectedPages` holds every page of the pairs of that slug.")
+    expect(after).toContain("The app gives the second page of a name the suffix `--<domain>`, so `attention` and `attention--beta` have the same name.")
+    expect(after).toContain("Group the pairs. Pages that are in one pair, or in pairs that share a page, are one group.")
+    expect(after).toContain("The slug of a group is its shortest file name, without the folder and without `.md`.")
+    expect(after).toContain("For each group, call `llm_wiki_add_review` once, with the arguments below.")
+    expect(after).toContain("`affectedPages` holds every page of the group.")
     expect(after).toContain("The id of an item comes from the type and the title.")
+    // The tool really gives such pairs, and the shortest name of the group is the plain name.
+    const attention = (domain: string) => ["---", "type: concept", "title: Attention", `domain: ${domain}`, "---", "", "# Attention", ""].join("\n")
+    const project = makeRecutRepo({
+      "wiki/concepts/attention.md": attention(ALPHA),
+      "wiki/concepts/attention--beta.md": attention(BETA),
+    })
+    const merge = await applyPlan(project, { op: "merge", from: [ALPHA, BETA], into: { domain: GAMMA, lens: "ai", description: "About gamma" } })
+    expect(merge.output.mergeCandidates).toEqual([{ a: "wiki/concepts/attention--beta.md", b: "wiki/concepts/attention.md" }])
   })
 
-  it("makes no more calls when the app does not run, and prints the pairs", () => {
+  it("makes no more calls when the app does not run, shows the text of the failed call, and prints the groups", () => {
     const after = section("## After the recut")
-    expect(after).toContain("If the app does not run, or a call fails, make no more calls. Print the pairs that have no item.")
-    expect(section("## Before you start")).toContain("For a merge, the app should run.")
+    expect(after).toContain("If the app does not run, or a call fails, make no more calls. Show the text of the failed call to the user. Print the groups that have no item.")
+    expect(section("## Before you start")).toContain("For a merge, the app must run, or the merge cannot file its review items.")
+    expect(section("## Requirements")).toContain("`LLM_WIKI_API_TOKEN` in the environment of the `llm_wiki` MCP.")
+  })
+
+  // Final review, I3 (ruling U21).
+  it("tells the user that a work wiki keeps the old names after the recut of a reading wiki", async () => {
+    const result = await applyPlan(makeRecutRepo(), { op: "rename", from: ALPHA, to: OMEGA })
+    expect(result.output.notes?.[0]).toContain("A work wiki whose mechanism_library is this wiki keeps the old names in the from_domain and to_domain of its hypothesis pages.")
+    const after = section("## After the recut")
+    expect(after).toContain("If `notes` says that this is a reading wiki, tell the user this.")
+    expect(after).toContain("A work wiki whose `mechanism_library` is this wiki keeps the old names in the `from_domain` and `to_domain` of its hypothesis pages.")
+    expect(after).toContain("Those pages need the new names from the note.")
+    expect(after).toContain("`fuse check` and the lint of the work wiki report them")
+    expect(section("## Report")).toContain("For a reading wiki, the names that a work wiki must change.")
+  })
+
+  // Final review, M7.
+  it("tells the user to run the lint to see the new domain sizes", () => {
+    const after = section("## After the recut")
+    expect(after).toContain("Tell the user to run Lint in the app, or `wiki-tool lint structure`, to see the new domain sizes.")
+    expect(after).toContain("The lint view shows the old items until then.")
   })
 
   it("tells the user that wiki-undo reverts the commit, and that the property is not in git", () => {
@@ -403,6 +466,19 @@ describe("wiki-recut skill: calls to the llm_wiki MCP and the merge candidates",
 })
 
 describe("wiki-recut skill: the file", () => {
+  it("states the advice about the undo, the card map, and the options once, and points to them", () => {
+    expect(skill.match(/`wiki-undo` reverts the commit/g)).toHaveLength(1)
+    expect(skill.match(/nothing can rebuild it/g)).toHaveLength(1)
+    // The options are explained in their own section; the other places name the section.
+    expect(skill.match(/Tell the user to add these options to the `domain` property/g)).toHaveLength(1)
+    expect(section("## Purpose")).toContain('("Heptabase options")')
+    expect(section("## Before you start")).toContain("Rule 4 and Rule 10 say what to tell the user about the other changes.")
+  })
+
+  it("has no \"should\"", () => {
+    expect(skill).not.toMatch(/\bshould\b/i)
+  })
+
   it("has a name, a description, and short sentences", () => {
     expect(skill).toMatch(/^---\nname: wiki-recut\ndescription: Use this skill to .+\n---\n/)
     expect(findLongSentences("SKILL.md", skill)).toEqual([])

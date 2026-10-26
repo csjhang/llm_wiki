@@ -25,8 +25,7 @@ The tool changes these files:
 - The domain index files.
 
 It makes one commit.
-The tool never calls Heptabase. The recut changes the wiki only. The `domain` property of each mirror card changes at the next `wiki-sync`. The user must add the new select options in Heptabase first.
-The skill `wiki-undo` reverts the commit of a recut.
+The tool never calls Heptabase. The recut changes the wiki only. The `domain` property of each mirror card changes at the next `wiki-sync`, after the user adds the select options ("Heptabase options").
 
 ## Requirements
 
@@ -35,6 +34,7 @@ The skill `wiki-undo` reverts the commit of a recut.
 - A mechanism wiki. The project folder has `domains.yaml`.
 - A working tree without uncommitted changes in the wiki folder. The card map `heptabase-map.json` and the folder `.llm-wiki/` do not count.
 - The `llm_wiki` MCP and the running app. A merge needs them to file its review items. The other operations do not.
+- `LLM_WIKI_API_TOKEN` in the environment of the `llm_wiki` MCP. Adding a review item always needs it. The token is in Settings > API + MCP of the app.
 
 This skill asks the user questions. Run it in a conversation.
 
@@ -74,7 +74,6 @@ node "<plugin dir>/scripts/wiki-tool.mjs" recut apply --project "<project>" --pl
 - `apply` reads the plan file. The plan is the JSON in the section "The plan file".
 - `apply` checks everything before it writes. Then it changes the files and makes one commit. The subject is `recut: <operation> <from> → <to> (<N> pages)`. N counts the changed pages only.
 - `apply` gives `sha` and `pages`, the paths of the changed pages. It gives `mergeCandidates` for a merge. It gives `notes` when it has one.
-- Never edit `heptabase-map.json` or `heptabase.yaml`. Never discard, revert, or reset `heptabase-map.json`. It maps wiki pages to Heptabase cards, and nothing can rebuild it.
 
 ## MCP rules
 
@@ -87,21 +86,22 @@ node "<plugin dir>/scripts/wiki-tool.mjs" recut apply --project "<project>" --pl
 1. Read `CLAUDE.md` of the wiki before you read a page. Follow its read order.
 2. Never run `recut apply` before the user says yes to the full plan. If the plan changes, show it again and ask again.
 3. Never edit a page, `domains.yaml`, or an index file by hand. The tool does it.
-4. Never commit, stash, or discard the changes of the user. Tell the user to do it.
+4. Never commit, stash, or discard the changes of the user. Tell the user to commit or discard them. Rule 10 names one file that the user must not discard.
 5. Run no git command that changes the repository.
 6. Use only a lens that is in `lenses/`. The lens id is the file name without `.md`.
 7. A split needs a new domain for every page that uses the old domain. Never leave a page without one.
 8. Write the description of a new domain in the output language of the wiki. Read it from the line `Output language:` in `purpose.md`.
 9. Never choose a name, a lens, or a page for the user when the data does not decide it. Ask.
+10. Never edit `heptabase-map.json` or `heptabase.yaml`. Never discard, revert, or reset `heptabase-map.json`, and never tell the user to do it. It maps wiki pages to Heptabase cards, and nothing can rebuild it.
 
 ## Before you start
 
 1. Find the project folder. Use the current folder if it contains `wiki/` and `raw/`. Otherwise ask the user for the path.
 2. Read `CLAUDE.md`, `purpose.md`, `domains.yaml`, and the file names in `lenses/`.
 3. Call `llm_wiki_status`. A missing tool or a failed call means that the app is not running.
-4. Tell the user that the working tree must have no uncommitted change in the wiki folder. The card map `heptabase-map.json` and the folder `.llm-wiki/` do not count. Tell the user to commit or discard the other changes first. Tell the user not to discard `heptabase-map.json`.
+4. Tell the user that the working tree must have no uncommitted change in the wiki folder. The card map `heptabase-map.json` and the folder `.llm-wiki/` do not count. Rule 4 and Rule 10 say what to tell the user about the other changes.
 5. If the user did not name an operation, ask which one to run: `rename`, `move`, `split`, or `merge`.
-6. For a merge, the app should run. If it does not, tell the user that the merge cannot file its review items. Ask if the user wants to go on.
+6. For a merge, the app must run, or the merge cannot file its review items. If it does not run, tell the user that. Ask if the user wants to go on.
 
 ## Plan a rename or a move
 
@@ -134,12 +134,12 @@ node "<plugin dir>/scripts/wiki-tool.mjs" recut apply --project "<project>" --pl
 2. The target needs a lens and a description. Propose them. If the target exists, the plan replaces its lens and its description. Show the user the old text from `domains.yaml`, and ask the user to confirm the new text.
 3. The target takes the whiteboard hints of every domain that joins. The child domains of a merged domain stay where they are.
 4. Run `recut pages` for each merged domain. Count the pages.
-5. Build the plan in the form that "The plan file" shows. Keep it in your notes. Do not write the file yet. Go to "Confirm the plan".
+5. Look for a hypothesis page that `recut pages` lists for two of the domains that join, with `from_domain` in one and `to_domain` in the other. After the merge, its two domains are one domain. If its `relation` is `stack`, `recut apply` refuses the plan, because a stack needs two domains. For another relation, `recut apply` gives a note. Tell the user which pages these are before you ask for the yes.
+6. Build the plan in the form that "The plan file" shows. Keep it in your notes. Do not write the file yet. Go to "Confirm the plan".
 
 ## The plan file
 
-Write the plan after the user says yes. Write it to `<project>/.llm-wiki/recut-plan.json` with the file tool. Create the folder first. Never commit it.
-Each plan is one JSON object. The value of `op` is the operation.
+The plan is one JSON object. The value of `op` is the operation. The first step of "Apply" writes it to a file, after the user says yes.
 
 A rename or a move:
 
@@ -182,8 +182,9 @@ A merge:
 4. Show the count of the pages that change, from `recut pages`.
 5. Show what the tool changes: `domains.yaml`, the domain keys of the pages, the Known instances lines, the domain index files, and one commit.
 6. Show what the tool does not carry over, as the section of the operation says.
-7. Ask: "Run this plan?" Wait for the answer.
-8. A yes starts the next section. Any other answer ends it. If the user changes the plan, go back to the section of the operation. Show the new plan and ask again.
+7. For a merge, show each hypothesis page that gets one domain, with its relation.
+8. Ask: "Run this plan?" Wait for the answer.
+9. A yes starts the next section. Any other answer ends it. If the user changes the plan, go back to the section of the operation. Show the new plan and ask again.
 
 ## Heptabase options
 
@@ -199,9 +200,10 @@ Tell the user that the old options stay. The user can remove them by hand after 
 
 ## Apply
 
-1. Run `recut apply` with the plan file.
-2. If the exit code is 2, follow "Problems of apply".
-3. If the exit code is 0, show `notes` to the user as they are. Then go on to "After the recut".
+1. Write the plan to `<project>/.llm-wiki/recut-plan.json` with the file tool. Create the folder first. Never commit it.
+2. Run `recut apply` with the plan file.
+3. If the exit code is 2, follow "Problems of apply".
+4. If the exit code is 0, show `notes` to the user as they are. Then go on to "After the recut".
 
 ## Problems of apply
 
@@ -209,35 +211,39 @@ A recut that exits with 2 has written nothing. If a problem says that a file cou
 
 | The problem says | What to do |
 |---|---|
-| The working tree has uncommitted changes | Show the files. Tell the user to commit or discard them, but never to discard `heptabase-map.json`. After the user says it is done, run `recut apply` again. |
+| The working tree has uncommitted changes | Show the files. Follow Rule 4 and Rule 10. After the user says it is done, run `recut apply` again. |
 | A file is a link, a folder in its path is a link, or a file is outside the project | Show the path. Tell the user that the recut cannot run until the path is a plain file or folder inside the project. |
 | A page names a key that the tool cannot edit | Show the page and the key. Tell the user to write the frontmatter of that page with its keys in the first column. After the user says it is done, run `recut apply` again. |
 | A page changed while the recut ran | Run `recut apply` again. |
 | Another wiki tool is using git | Wait. Run `recut apply` again. Never delete a lock file. |
 | The plan has a mistake, for example a page without a new domain, a name that exists, or a lens that is not known | Show the problem. Go back to the section of the operation. Fix the plan with the user. Ask again, as "Confirm the plan" says. |
+| A hypothesis with `relation: stack` would get one domain | Show the page. Tell the user that a stack needs two domains. Go back to "Plan a merge". Change the plan so that the two domains of the page stay two domains. Ask again, as "Confirm the plan" says. |
 | The commit failed | The tool put every file back. Show the message. Ask the user what to do. |
+| Anything else | Show the problem as it is. Stop. Do not try another way to make the change. |
 
 ## After the recut
 
 1. Tell the user the commit `sha` and the number of changed pages.
-2. For a merge, read `mergeCandidates`. Each entry is a pair `a` and `b` of pages with the same file name that the merge brought into one domain. If the list is empty, say so.
-3. Group the pairs by file name without the folder and without `.md`. This is the slug. For each slug, call `llm_wiki_add_review` once, with the arguments below. `affectedPages` holds every page of the pairs of that slug.
+2. For a merge, read `mergeCandidates`. Each entry is a pair `a` and `b` of pages with the same name that the merge brought into one domain. The app gives the second page of a name the suffix `--<domain>`, so `attention` and `attention--beta` have the same name. If the list is empty, say so.
+3. Group the pairs. Pages that are in one pair, or in pairs that share a page, are one group. The slug of a group is its shortest file name, without the folder and without `.md`. For each group, call `llm_wiki_add_review` once, with the arguments below. `affectedPages` holds every page of the group.
 
 ```json
 {
   "project_id": "<project folder>",
   "type": "duplicate",
   "title": "Recut merge (<target domain>): <slug>",
-  "description": "The merge of <merged domains> brought these pages with one file name into <target domain>. Check if they describe the same thing. If they do, merge them.",
+  "description": "The merge of <merged domains> brought these pages with one name into <target domain>. Check if they describe the same thing. If they do, merge them.",
   "affectedPages": ["<path a>", "<path b>"]
 }
 ```
 
-4. The title carries the domain and the slug. The id of an item comes from the type and the title. So two slugs never share an item.
-5. If the app does not run, or a call fails, make no more calls. Print the pairs that have no item. Tell the user to check them by hand.
-6. Tell the user the select options again, as "Heptabase options" says. Tell the user to run `/wiki-sync` after the options exist.
-7. Tell the user that `wiki-undo` reverts the commit of the recut. The `domain` property of a card is not in git. After an undo, the next sync writes the value of the wiki back to the card.
-8. Report as the next section says.
+4. The title carries the domain and the slug. The id of an item comes from the type and the title. So two groups never share an item.
+5. If the app does not run, or a call fails, make no more calls. Show the text of the failed call to the user. Print the groups that have no item. Tell the user to check them by hand.
+6. If `notes` says that this is a reading wiki, tell the user this. A work wiki whose `mechanism_library` is this wiki keeps the old names in the `from_domain` and `to_domain` of its hypothesis pages. Those pages need the new names from the note. The recut of the work wiki cannot change them. Until the user changes them, `fuse check` and the lint of the work wiki report them.
+7. Tell the user the select options again, as "Heptabase options" says. Tell the user to run `/wiki-sync` after the options exist.
+8. Tell the user to run Lint in the app, or `wiki-tool lint structure`, to see the new domain sizes. The lint view shows the old items until then.
+9. Tell the user that `wiki-undo` reverts the commit of the recut. The `domain` property of a card is not in git. After an undo, the next sync writes the value of the wiki back to the card.
+10. Report as the next section says.
 
 ## Report
 
@@ -248,7 +254,8 @@ At the end, give the user a short report.
 - The pages that changed. If the list is long, give the count and the first ten paths.
 - The `notes` of the tool, as it printed them.
 - The select options to add in Heptabase, and the old options that the user can remove after the sync.
-- The review items filed for the merge candidates, one per slug. If none was filed, say why.
+- The review items filed for the merge candidates, one per group. If none was filed, say why.
 - For a split, the page assignments and their reasons.
-- That `wiki-undo` reverts the recut.
+- For a reading wiki, the names that a work wiki must change.
+- The advice of "After the recut" about the undo and the lint.
 - The problems, as the tool printed them.
