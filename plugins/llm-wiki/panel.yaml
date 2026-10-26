@@ -1,0 +1,29 @@
+# Buttons of the skill panel in the app, in display order.
+# Each button runs one skill of this plugin. The app reads the description of
+# the button from the SKILL.md of the skill, so no description lives here.
+#
+#   skill   name of a folder in skills/
+#   label   text on the button
+#   mode    background: the app runs the skill with no one watching
+#           conversation: the app opens a terminal where you talk with the skill
+#   inputs  values the app asks for first (whiteboard, hypothesis); optional
+#   args    fixed text that goes after the skill name in the command; optional
+version: 1
+buttons:
+  - skill: wiki-sync
+    label: 同步 Heptabase
+    mode: background
+    args: --yes
+  - skill: wiki-fuse
+    label: 融合
+    mode: conversation
+    inputs: [whiteboard]
+  - skill: wiki-lint
+    label: 健檢
+    mode: background
+  - skill: wiki-recut
+    label: 切分領域
+    mode: conversation
+  - skill: wiki-undo
+    label: 退回
+    mode: conversation

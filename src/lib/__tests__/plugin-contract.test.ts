@@ -105,6 +105,18 @@ describe("llm-wiki plugin contract", () => {
     expect(statSync(join(SKILLS_DIR, "wiki")).isDirectory()).toBe(true)
   })
 
+  it("every panel entry names an existing skill folder", () => {
+    const panel = yaml.load(readFileSync(join(PLUGIN_DIR, "panel.yaml"), "utf8")) as {
+      buttons: Array<{ skill: string }>
+    }
+    expect(panel.buttons.length).toBeGreaterThan(0)
+    const folders = skillFolders()
+    for (const button of panel.buttons) {
+      expect(folders, `panel.yaml: ${button.skill}`).toContain(button.skill)
+      expect(existsSync(join(SKILLS_DIR, button.skill, "SKILL.md")), `${button.skill}: SKILL.md`).toBe(true)
+    }
+  })
+
   it("every script that a SKILL.md names exists", () => {
     // A path is `<plugin dir>/scripts/x.mjs`, `<base>/scripts/x.mjs`, `<base>/../../scripts/x.mjs`,
     // or `scripts/x.mjs` (from the base directory of the skill).
