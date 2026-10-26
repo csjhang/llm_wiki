@@ -1238,6 +1238,88 @@ fn git_head_inner(project_path: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// True for text that can be the sha of a commit: 7 to 64 hex digits. The semantic-lint marker
+/// keeps its commit in this shape (`tools/wiki-tool/src/lint/marker.ts`). Anything else could be
+/// read by git as an option or a name.
+fn is_commit_sha(text: &str) -> bool {
+    (7..=64).contains(&text.len()) && text.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+/// The full sha of `sha` when it names a commit that is an ancestor of HEAD (or HEAD itself).
+/// `None` when the commit is unknown (the history was rewritten and the object is gone), is
+/// ambiguous, or lies on another line of history. `sha` must pass `is_commit_sha`.
+fn ancestor_of_head(project_path: &str, sha: &str) -> Result<Option<String>, String> {
+    let spec = format!("{sha}^{{commit}}");
+    let found = run_git_with_env(
+        project_path,
+        &["rev-parse", "--verify", "--quiet", &spec],
+        &[],
+    )?;
+    if !found.success {
+        return Ok(None);
+    }
+    let full = found.stdout.trim().to_string();
+    let args = ["merge-base", "--is-ancestor", full.as_str(), "HEAD"];
+    let check = run_git_with_env(project_path, &args, &[])?;
+    match check.code {
+        // 0: an ancestor (or HEAD itself). 1: not an ancestor.
+        Some(0) => Ok(Some(full)),
+        Some(1) => Ok(None),
+        _ => Err(check.failure_message(&args)),
+    }
+}
+
+/// The commits after `since` (all commits without it) that touch the project folder and whose
+/// subject starts with `prefix`. It counts like `ingestsSince` of `wiki-tool lint changed-domains`
+/// (`tools/wiki-tool/src/lint/changed-domains.ts`): the pathspec `.` is the project folder, so
+/// another folder of a larger repository does not count; a `since` that is not an ancestor of
+/// HEAD (or not in the repository) counts every such commit; a repository with no commit has none.
+/// It only reads, so it takes no lock.
+fn git_count_subjects_inner(
+    project_path: &str,
+    since: Option<&str>,
+    prefix: &str,
+) -> Result<u32, String> {
+    if prefix.is_empty() {
+        return Err("the subject prefix must not be empty".to_string());
+    }
+    let since = match since {
+        Some(sha) if is_commit_sha(sha) => Some(sha.to_ascii_lowercase()),
+        Some(_) => return Err("since must be a commit sha of 7 to 64 hex digits".to_string()),
+        None => None,
+    };
+    run_git_ok(project_path, &["rev-parse", "--git-dir"], &[])?;
+    if !has_head(project_path, &[])? {
+        return Ok(0);
+    }
+    let base = match since {
+        Some(sha) => ancestor_of_head(project_path, &sha)?,
+        None => None,
+    };
+    let range = match base {
+        Some(sha) => format!("{sha}..HEAD"),
+        None => "HEAD".to_string(),
+    };
+    let log = run_git_ok(
+        project_path,
+        &[
+            "--literal-pathspecs",
+            "log",
+            "--format=%s",
+            &range,
+            "--",
+            ".",
+        ],
+        &[],
+    )?;
+    let count = log
+        .stdout
+        .lines()
+        .filter(|subject| subject.starts_with(prefix))
+        .count();
+    Ok(u32::try_from(count).unwrap_or(u32::MAX))
+}
+
 async fn run_blocking<T, F>(label: &str, work: F) -> Result<T, String>
 where
     T: Send + 'static,
@@ -1294,6 +1376,18 @@ pub async fn git_restore_paths(project_path: String, paths: Vec<String>) -> Resu
 #[tauri::command]
 pub async fn git_head(project_path: String) -> Result<Option<String>, String> {
     run_blocking("Git head", move || git_head_inner(&project_path)).await
+}
+
+#[tauri::command]
+pub async fn git_count_subjects(
+    project_path: String,
+    since: Option<String>,
+    prefix: String,
+) -> Result<u32, String> {
+    run_blocking("Git count", move || {
+        git_count_subjects_inner(&project_path, since.as_deref(), &prefix)
+    })
+    .await
 }
 
 #[cfg(test)]
@@ -3256,5 +3350,413 @@ mod tests {
             .join(".git")
             .join(untrack_index_name(&path_str(&root.join("one"))))
             .exists());
+    }
+
+    // ── git_count_subjects ───────────────────────────────────────────────
+
+    /// Write `rel` (so the commit has a change in its folder) and commit it with `subject`.
+    /// Returns the full sha of the new commit.
+    fn commit_file(dir: &Path, rel: &str, subject: &str) -> String {
+        let previous = fs::read_to_string(dir.join(rel)).unwrap_or_default();
+        write(dir, rel, &format!("{previous}{subject}\n"));
+        git(dir, &["add", "--", rel]);
+        git(
+            dir,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--no-verify",
+                "-m",
+                subject,
+            ],
+        );
+        git(dir, &["rev-parse", "HEAD"]).trim().to_string()
+    }
+
+    /// A repository with these commits, oldest first. Returns the repository and the sha of each commit.
+    fn repo_with_subjects(subjects: &[&str]) -> (PathBuf, Vec<String>) {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        let shas = subjects
+            .iter()
+            .map(|subject| commit_file(&dir, "wiki/a.md", subject))
+            .collect();
+        (dir, shas)
+    }
+
+    #[test]
+    fn count_subjects_counts_every_ingest_without_a_marker() {
+        let (dir, _) = repo_with_subjects(&[
+            "chore: start version history",
+            "ingest: first (1 pages)",
+            "chore: save changes before ingest",
+            "ingest: second (2 pages)",
+            "recut: move a page",
+            "ingest: third (1 pages)",
+        ]);
+
+        assert_eq!(
+            git_count_subjects_inner(&path_str(&dir), None, "ingest:").unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn count_subjects_counts_only_the_commits_after_since() {
+        let (dir, shas) = repo_with_subjects(&[
+            "ingest: first (1 pages)",
+            "ingest: second (1 pages)",
+            "chore: save changes before ingest",
+            "ingest: third (1 pages)",
+            "ingest: fourth (1 pages)",
+        ]);
+        let p = path_str(&dir);
+
+        assert_eq!(
+            git_count_subjects_inner(&p, Some(&shas[1]), "ingest:").unwrap(),
+            2
+        );
+        assert_eq!(
+            git_count_subjects_inner(&p, Some(&shas[0]), "ingest:").unwrap(),
+            3
+        );
+    }
+
+    #[test]
+    fn count_subjects_is_zero_when_since_is_head() {
+        let (dir, shas) =
+            repo_with_subjects(&["ingest: first (1 pages)", "ingest: second (1 pages)"]);
+
+        assert_eq!(
+            git_count_subjects_inner(&path_str(&dir), Some(&shas[1]), "ingest:").unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn count_subjects_accepts_a_short_and_an_upper_case_since() {
+        let (dir, shas) = repo_with_subjects(&[
+            "ingest: first (1 pages)",
+            "ingest: second (1 pages)",
+            "ingest: third (1 pages)",
+        ]);
+        let p = path_str(&dir);
+
+        assert_eq!(
+            git_count_subjects_inner(&p, Some(&shas[0][..7]), "ingest:").unwrap(),
+            2
+        );
+        assert_eq!(
+            git_count_subjects_inner(&p, Some(&shas[0].to_uppercase()), "ingest:").unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn count_subjects_counts_all_when_since_is_not_in_the_history() {
+        let (dir, _) = repo_with_subjects(&["ingest: first (1 pages)", "ingest: second (1 pages)"]);
+
+        assert_eq!(
+            git_count_subjects_inner(&path_str(&dir), Some("deadbeefdeadbeef"), "ingest:").unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn count_subjects_counts_all_when_since_is_not_an_ancestor_of_head() {
+        let (dir, shas) =
+            repo_with_subjects(&["ingest: first (1 pages)", "ingest: second (1 pages)"]);
+        // The history is rewritten: the old commit stays in the object store, but HEAD no longer reaches it.
+        git(&dir, &["reset", "--hard", "-q", "HEAD~1"]);
+        commit_file(&dir, "wiki/b.md", "ingest: other (1 pages)");
+
+        assert_eq!(
+            git_count_subjects_inner(&path_str(&dir), Some(&shas[1]), "ingest:").unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn count_subjects_rejects_a_since_that_is_not_a_sha() {
+        let (dir, _) = repo_with_subjects(&["ingest: first (1 pages)"]);
+        let p = path_str(&dir);
+        let planted = dir.join("planted");
+
+        for bad in [
+            "",
+            "abc123",
+            "HEAD",
+            "main",
+            "xyz1234",
+            "--output=planted",
+            "-p",
+            "abcdef0 --output=planted",
+            "abcdef0\n",
+            &"a".repeat(65),
+        ] {
+            let result = git_count_subjects_inner(&p, Some(bad), "ingest:");
+            assert!(result.is_err(), "{bad:?} must be refused, got {result:?}");
+        }
+        assert!(!planted.exists(), "git must not see the refused value");
+    }
+
+    #[test]
+    fn count_subjects_matches_the_prefix_at_the_start_of_the_subject_only() {
+        let (dir, _) = repo_with_subjects(&[
+            "ingest: first (1 pages)",
+            "chore: ingest: not a prefix",
+            "Ingest: other case",
+            " ingest: leading space",
+            "ingest:no space",
+            "reingest: other word",
+        ]);
+
+        assert_eq!(
+            git_count_subjects_inner(&path_str(&dir), None, "ingest:").unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn count_subjects_refuses_an_empty_prefix() {
+        let (dir, _) = repo_with_subjects(&["ingest: first (1 pages)"]);
+
+        assert!(git_count_subjects_inner(&path_str(&dir), None, "").is_err());
+    }
+
+    #[test]
+    fn count_subjects_is_zero_before_the_first_commit() {
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+
+        assert_eq!(
+            git_count_subjects_inner(&path_str(&dir), None, "ingest:").unwrap(),
+            0
+        );
+        assert_eq!(
+            git_count_subjects_inner(&path_str(&dir), Some("deadbeefdeadbeef"), "ingest:").unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn count_subjects_errors_outside_a_repo() {
+        assert!(git_count_subjects_inner(&path_str(&temp_dir()), None, "ingest:").is_err());
+    }
+
+    #[test]
+    fn count_subjects_counts_only_commits_that_touch_the_project_folder() {
+        let root = temp_dir();
+        init_repo_with_identity(&root);
+        let project = root.join("wiki-p");
+        fs::create_dir_all(&project).unwrap();
+        commit_file(&root, "other/a.md", "ingest: another folder (1 pages)");
+        let marker = commit_file(&root, "wiki-p/wiki/a.md", "ingest: first (1 pages)");
+        commit_file(
+            &root,
+            "other/a.md",
+            "ingest: another folder again (1 pages)",
+        );
+        commit_file(&root, "wiki-p/wiki/a.md", "ingest: second (1 pages)");
+        commit_file(
+            &root,
+            "wiki-p/wiki/b.md",
+            "chore: save changes before ingest",
+        );
+        let p = path_str(&project);
+
+        assert_eq!(git_count_subjects_inner(&p, None, "ingest:").unwrap(), 2);
+        // The marker is a commit of the bigger repository.
+        assert_eq!(
+            git_count_subjects_inner(&p, Some(&marker), "ingest:").unwrap(),
+            1
+        );
+    }
+
+    /// The bundle of `wiki-tool`, which the app and the skills share.
+    fn wiki_tool_bundle() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("plugins/llm-wiki/scripts/wiki-tool.mjs")
+    }
+
+    /// `ingestsSince` of `wiki-tool lint changed-domains` for the project, or `None` when node is not installed.
+    fn wiki_tool_ingests_since(project: &Path) -> Option<u32> {
+        let bundle = wiki_tool_bundle();
+        assert!(bundle.is_file(), "missing {}", bundle.display());
+        let output = match Command::new("node")
+            .arg(&bundle)
+            .args(["lint", "changed-domains", "--project"])
+            .arg(project)
+            .output()
+        {
+            Ok(output) => output,
+            Err(_) => return None,
+        };
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        let json: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|error| {
+            panic!(
+                "wiki-tool printed no JSON ({error}): {text} {}",
+                String::from_utf8_lossy(&output.stderr)
+            )
+        });
+        assert_eq!(json["ok"], serde_json::Value::Bool(true), "output: {text}");
+        Some(json["ingestsSince"].as_u64().expect("ingestsSince") as u32)
+    }
+
+    /// Make `dir` a mechanism wiki: the smallest `wiki.yaml` and `domains.yaml` that `wiki-tool lint` accepts.
+    fn make_mechanism_wiki(dir: &Path) {
+        write(dir, "wiki.yaml", "version: 1\nid: test\nrole: reading\n");
+        write(
+            dir,
+            "domains.yaml",
+            "version: 1\ndomains:\n  hardware/async-circuits:\n    lens: hardware\n    description: Placeholder domain\n",
+        );
+        fs::create_dir_all(dir.join("wiki")).unwrap();
+    }
+
+    #[test]
+    fn count_subjects_gives_the_number_of_wiki_tool_changed_domains() {
+        if Command::new("node").arg("--version").output().is_err() {
+            eprintln!("skipped: node is not installed, so the wiki-tool bundle cannot run");
+            return;
+        }
+        // Each case: the marker to write (if any) as a function of the commit shas, oldest first.
+        type Marker = Box<dyn Fn(&[String]) -> String>;
+        let cases: Vec<(&str, Option<Marker>)> = vec![
+            ("no marker", None),
+            ("full marker", Some(Box::new(|shas| shas[2].clone()))),
+            (
+                "short marker",
+                Some(Box::new(|shas| shas[1][..7].to_string())),
+            ),
+            (
+                "upper case marker",
+                Some(Box::new(|shas| shas[1].to_uppercase())),
+            ),
+            (
+                "marker at HEAD",
+                Some(Box::new(|shas| shas[shas.len() - 1].clone())),
+            ),
+            (
+                "marker not in history",
+                Some(Box::new(|_| "deadbeefdeadbeef".to_string())),
+            ),
+        ];
+        let subjects = [
+            "chore: start version history",
+            "ingest: first (1 pages)",
+            "chore: save changes before ingest",
+            "ingest: second (1 pages)",
+            "chore: ingest: not a prefix",
+            "ingest:third (2 pages)",
+            "recut: move a page",
+            "ingest: fourth (1 pages)",
+        ];
+
+        for (name, marker) in cases {
+            let dir = temp_dir();
+            init_repo_with_identity(&dir);
+            make_mechanism_wiki(&dir);
+            git(&dir, &["add", "wiki.yaml", "domains.yaml"]);
+            let mut shas = Vec::new();
+            for subject in subjects {
+                shas.push(commit_file(&dir, "wiki/a.md", subject));
+            }
+            let since = marker.map(|pick| pick(&shas));
+            if let Some(sha) = &since {
+                write(
+                    &dir,
+                    ".llm-wiki/semantic-lint.json",
+                    &format!("{{\"commit\":\"{sha}\",\"at\":\"2026-10-01T00:00:00.000Z\"}}"),
+                );
+            }
+
+            let ours =
+                git_count_subjects_inner(&path_str(&dir), since.as_deref(), "ingest:").unwrap();
+            let theirs = wiki_tool_ingests_since(&dir).expect("node ran a moment ago");
+            assert_eq!(ours, theirs, "{name}");
+        }
+    }
+
+    #[test]
+    fn count_subjects_gives_the_number_of_wiki_tool_for_other_histories() {
+        if Command::new("node").arg("--version").output().is_err() {
+            eprintln!("skipped: node is not installed, so the wiki-tool bundle cannot run");
+            return;
+        }
+
+        // The marker is a commit that is no ancestor of HEAD.
+        let dir = temp_dir();
+        init_repo_with_identity(&dir);
+        make_mechanism_wiki(&dir);
+        git(&dir, &["add", "wiki.yaml", "domains.yaml"]);
+        commit_file(&dir, "wiki/a.md", "ingest: first (1 pages)");
+        let stray = commit_file(&dir, "wiki/a.md", "ingest: second (1 pages)");
+        git(&dir, &["reset", "--hard", "-q", "HEAD~1"]);
+        commit_file(&dir, "wiki/b.md", "ingest: other (1 pages)");
+        write(
+            &dir,
+            ".llm-wiki/semantic-lint.json",
+            &format!("{{\"commit\":\"{stray}\",\"at\":\"2026-10-01T00:00:00.000Z\"}}"),
+        );
+        assert_eq!(
+            git_count_subjects_inner(&path_str(&dir), Some(&stray), "ingest:").unwrap(),
+            wiki_tool_ingests_since(&dir).unwrap(),
+            "marker is no ancestor of HEAD"
+        );
+
+        // No commit yet.
+        let empty = temp_dir();
+        init_repo_with_identity(&empty);
+        make_mechanism_wiki(&empty);
+        assert_eq!(
+            git_count_subjects_inner(&path_str(&empty), None, "ingest:").unwrap(),
+            wiki_tool_ingests_since(&empty).unwrap(),
+            "no commit"
+        );
+
+        // The wiki is a folder of a bigger repository.
+        let root = temp_dir();
+        init_repo_with_identity(&root);
+        let project = root.join("wiki-p");
+        make_mechanism_wiki(&project);
+        git(&root, &["add", "wiki-p/wiki.yaml", "wiki-p/domains.yaml"]);
+        git(
+            &root,
+            &[
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-q",
+                "--no-verify",
+                "-m",
+                "chore: start version history",
+            ],
+        );
+        commit_file(&root, "other/a.md", "ingest: another folder (1 pages)");
+        let marker = commit_file(&root, "wiki-p/wiki/a.md", "ingest: first (1 pages)");
+        commit_file(
+            &root,
+            "other/a.md",
+            "ingest: another folder again (1 pages)",
+        );
+        commit_file(&root, "wiki-p/wiki/a.md", "ingest: second (1 pages)");
+        write(
+            &project,
+            ".llm-wiki/semantic-lint.json",
+            &format!("{{\"commit\":\"{marker}\",\"at\":\"2026-10-01T00:00:00.000Z\"}}"),
+        );
+        assert_eq!(
+            git_count_subjects_inner(&path_str(&project), Some(&marker), "ingest:").unwrap(),
+            wiki_tool_ingests_since(&project).unwrap(),
+            "nested project"
+        );
+        assert_eq!(
+            git_count_subjects_inner(&path_str(&project), None, "ingest:").unwrap(),
+            2
+        );
     }
 }

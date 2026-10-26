@@ -49,6 +49,7 @@
     "copiedHint": "Incollalo in un terminale nella cartella del progetto.",
     "copyFailed": "Impossibile copiare il comando ({{reason}}). Copialo a mano.",
     "lastRun": "Ultima esecuzione",
+    "lintReminder": "{{count}} elaborazioni dall'ultimo controllo. Valuta di eseguire 健檢.",
     "status": { "running": "In corso", "done": "Fatto", "warning": "Fatto, con strumenti negati", "error": "Non riuscito" }
   },
   "updateBanner": {
@@ -945,6 +946,11 @@
           "rebuilt": "Indice ricostruito con {{pages}} pagine in {{groups}} gruppi.",
           "exported": "Progetto esportato in {{path}}",
           "imported": "{{name}} importato. Cambia progetto per aprirlo."
+        },
+        "gitHistory": {
+          "title": "Cronologia versioni (git)",
+          "hint": "Ogni elaborazione diventa un commit git che puoi annullare.",
+          "failed": "Impossibile attivare la cronologia versioni. Controlla che git sia installato e che questa cartella possa essere un repository."
         },
         "history": {
           "title": "Cronologia delle versioni dei file",

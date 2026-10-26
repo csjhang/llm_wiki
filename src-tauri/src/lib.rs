@@ -640,6 +640,7 @@ pub fn run() {
             commands::git_history::git_commit_paths,
             commands::git_history::git_restore_paths,
             commands::git_history::git_head,
+            commands::git_history::git_count_subjects,
             commands::fs::list_directory,
             commands::fs::copy_file,
             commands::fs::copy_directory,

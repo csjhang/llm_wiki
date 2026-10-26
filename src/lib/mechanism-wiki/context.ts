@@ -127,6 +127,15 @@ export async function loadMechanismContext(projectPath: string): Promise<Mechani
 }
 
 /**
+ * The identity of the wiki (`wiki.yaml`) alone, without the other files that `loadMechanismContext` reads.
+ * A missing, unreadable, or invalid file gives the default reading identity, as in `loadMechanismContext`.
+ */
+export async function loadWikiIdentity(projectPath: string): Promise<WikiIdentity> {
+  const wiki = await readWikiFile(`${projectBase(projectPath)}/${WIKI_FILE}`)
+  return resolveIdentity(wiki, []).identity
+}
+
+/**
  * Lens of a domain. A domain that is not listed uses its nearest listed
  * ancestor: `hardware/async-circuits/handshakes` uses `hardware/async-circuits`.
  * Null when no ancestor is listed or the lens has no file.

@@ -19,6 +19,7 @@ import {
   noticeForError,
   noticeForFallback,
   noticeForStart,
+  runJustEnded,
   shouldReloadWhiteboards,
   type SkillPanelProps,
 } from "./skills-view"
@@ -389,5 +390,54 @@ describe("latestRuns", () => {
     )
 
     expect(runs).toEqual({})
+  })
+})
+
+describe("lint reminder", () => {
+  it("shows the count of ingests when the reminder is due", () => {
+    const html = render({ lintReminder: 12 })
+
+    expect(html).toContain("data-lint-reminder")
+    expect(html).toContain("12 ingests since the last check. Consider running 健檢.")
+  })
+
+  it("says it in Traditional Chinese for the zh bundle", () => {
+    const zh = i18n.getFixedT("zh")
+
+    expect(zh("skillPanel.lintReminder", { count: 12 })).toBe("已累積 12 次收錄，建議執行健檢")
+  })
+
+  it("has the text in every language bundle with the count", () => {
+    for (const lng of ["en", "it", "ru", "zh"]) {
+      expect(i18n.getFixedT(lng)("skillPanel.lintReminder", { count: 12 }), lng).toContain("12")
+    }
+  })
+
+  it("shows no reminder when it is not due, or when the count is unknown", () => {
+    expect(render({ lintReminder: null })).not.toContain("data-lint-reminder")
+    expect(render({})).not.toContain("data-lint-reminder")
+  })
+
+  it("keeps the five cards beside the reminder", () => {
+    const html = render({ lintReminder: 10 })
+
+    for (const entry of PANEL_ENTRIES) expect(html).toContain(`data-skill="${entry.skill}"`)
+    // The reminder is above the cards.
+    expect(html.indexOf("data-lint-reminder")).toBeLessThan(html.indexOf('data-skill="'))
+  })
+})
+
+describe("runJustEnded", () => {
+  it("is true when a run leaves running, whatever the result", () => {
+    for (const next of ["done", "warning", "error", undefined] as const) {
+      expect(runJustEnded("running", next), String(next)).toBe(true)
+    }
+  })
+
+  it("is false for every other change", () => {
+    expect(runJustEnded(undefined, "running")).toBe(false)
+    expect(runJustEnded("running", "running")).toBe(false)
+    expect(runJustEnded("done", "error")).toBe(false)
+    expect(runJustEnded(undefined, undefined)).toBe(false)
   })
 })

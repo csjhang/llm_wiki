@@ -43,6 +43,7 @@ import {
   type FileHistoryStats,
 } from "@/commands/fs"
 import { addToRecentProjects } from "@/lib/project-store"
+import { GitHistorySetting } from "./git-history-setting"
 
 interface GroupUiEntry {
   group: DuplicateGroup
@@ -407,6 +408,8 @@ export function MaintenanceSection() {
         </div>
         {projectToolStatus && <p className="text-xs text-muted-foreground">{projectToolStatus}</p>}
       </div>
+
+      <GitHistorySetting />
 
       <div className="space-y-3 rounded-lg border border-border/60 bg-muted/20 p-4">
         <div className="flex items-center gap-2">

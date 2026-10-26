@@ -49,6 +49,7 @@
     "copiedHint": "Paste it in a terminal in the project folder.",
     "copyFailed": "The command could not be copied ({{reason}}). Copy it by hand.",
     "lastRun": "Last run",
+    "lintReminder": "{{count}} ingests since the last check. Consider running 健檢.",
     "status": { "running": "Running", "done": "Done", "warning": "Done with denied tools", "error": "Failed" }
   },
   "updateBanner": {
@@ -945,6 +946,11 @@
           "rebuilt": "Rebuilt index with {{pages}} pages in {{groups}} groups.",
           "exported": "Project exported to {{path}}",
           "imported": "Imported {{name}}. Switch projects to open it."
+        },
+        "gitHistory": {
+          "title": "Version history (git)",
+          "hint": "Each ingest becomes one git commit that you can undo.",
+          "failed": "Version history could not be turned on. Check that git is installed and that this folder can be a repository."
         },
         "history": {
           "title": "File version history",

@@ -56,3 +56,16 @@ export async function gitRestorePaths(
 export async function gitHead(projectPath: string): Promise<string | null> {
   return invoke<string | null>("git_head", { projectPath })
 }
+
+/**
+ * How many commits after `since` (every commit when it is null) touch the project folder and have a subject that starts with
+ * `prefix`. `since` is a commit sha of 7 to 64 hex digits. One that is not in the history of HEAD counts every commit, like
+ * `wiki-tool lint changed-domains`. A repository with no commit gives 0. Rejects when git fails or `since` is not a sha.
+ */
+export async function gitCountSubjects(
+  projectPath: string,
+  since: string | null,
+  prefix: string,
+): Promise<number> {
+  return invoke<number>("git_count_subjects", { projectPath, since, prefix })
+}

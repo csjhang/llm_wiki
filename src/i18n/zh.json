@@ -49,6 +49,7 @@
     "copiedHint": "请在项目文件夹的终端中粘贴运行。",
     "copyFailed": "无法复制命令（{{reason}}）。请手动复制。",
     "lastRun": "上次运行",
+    "lintReminder": "已累積 {{count}} 次收錄，建議執行健檢",
     "status": { "running": "运行中", "done": "完成", "warning": "完成，但有工具被拒绝", "error": "失败" }
   },
   "updateBanner": {
@@ -945,6 +946,11 @@
           "rebuilt": "已使用 {{pages}} 个页面、{{groups}} 个分组重建索引。",
           "exported": "项目已导出到 {{path}}",
           "imported": "已导入 {{name}}，请切换项目后打开。"
+        },
+        "gitHistory": {
+          "title": "版本历史（git）",
+          "hint": "每次摄取都会成为一个可撤销的 git 提交。",
+          "failed": "无法开启版本历史。请确认已安装 git，且此文件夹可用作仓库。"
         },
         "history": {
           "title": "文件版本历史",

@@ -11,11 +11,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import type { TFunction } from "i18next"
-import { AlertCircle, AlertTriangle, CheckCircle2, Loader2 } from "lucide-react"
+import { AlertCircle, AlertTriangle, CheckCircle2, Loader2, Stethoscope } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { openClaudeTerminal } from "@/commands/terminal"
 import { useMechanismWiki } from "@/hooks/use-mechanism-wiki"
 import { detectClaudeCode, spawnClaudeSkill } from "@/lib/skill-panel/claude-skill-spawn"
+import { loadLintReminder } from "@/lib/skill-panel/lint-reminder"
 import { PANEL_ENTRIES, type PanelEntry, type PanelInput } from "@/lib/skill-panel/panel-config"
 import { runSkill, SkillCopyError, type SkillFallback } from "@/lib/skill-panel/run-skill"
 import { loadWhiteboardOptions, type WhiteboardOption } from "@/lib/skill-panel/whiteboards"
@@ -72,13 +73,24 @@ export function isRunBlocked(
   return starting.has(skill) || runs[skill]?.status === "running"
 }
 
-/** True when the sync run just left `running`: it may have stored a new whiteboard list. */
-export function shouldReloadWhiteboards(
+/** True when a run just left `running`, whatever the result (or the run item was removed while it ran). */
+export function runJustEnded(
   previous: ActivityItem["status"] | undefined,
   next: ActivityItem["status"] | undefined,
 ): boolean {
   return previous === "running" && next !== "running"
 }
+
+/** True when the sync run just left `running`: it may have stored a new whiteboard list. */
+export function shouldReloadWhiteboards(
+  previous: ActivityItem["status"] | undefined,
+  next: ActivityItem["status"] | undefined,
+): boolean {
+  return runJustEnded(previous, next)
+}
+
+/** The skill whose run may mark the semantic lint. When it ends, the ingests since the last lint are counted again. */
+export const LINT_SKILL = "wiki-lint"
 
 // ---- notices ----
 
@@ -126,6 +138,8 @@ export interface SkillPanelProps {
   notices: Record<string, SkillNotice>
   /** The latest run of each skill. */
   runs: Record<string, SkillRunView>
+  /** The ingests since the last semantic lint, when the reminder is due. Null or absent: no reminder. */
+  lintReminder?: number | null
   onRun(entry: PanelEntry): void
 }
 
@@ -138,6 +152,16 @@ export function SkillPanel(props: SkillPanelProps) {
           <h2 className="text-lg font-semibold">{t("skillPanel.title")}</h2>
           <p className="text-sm text-muted-foreground">{t("skillPanel.intro")}</p>
         </div>
+        {props.lintReminder != null && (
+          <div
+            role="status"
+            data-lint-reminder=""
+            className="flex items-center gap-2 rounded-md bg-amber-500/10 px-3 py-2 text-sm text-amber-700 dark:text-amber-400"
+          >
+            <Stethoscope className="h-4 w-4 shrink-0" />
+            <span>{t("skillPanel.lintReminder", { count: props.lintReminder })}</span>
+          </div>
+        )}
         {props.entries.map((entry) => (
           <SkillCard key={entry.skill} entry={entry} {...props} />
         ))}
@@ -270,6 +294,8 @@ export function SkillPanelView() {
   const [values, setValues] = useState<Partial<Record<PanelInput, string>>>({})
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
   const [notices, setNotices] = useState<Record<string, SkillNotice>>({})
+  const [lintReminder, setLintReminder] = useState<number | null>(null)
+  const [lintReminderTick, setLintReminderTick] = useState(0)
   // Presses that are being handled. A second press in the same moment must not start a second run.
   const starting = useRef<Set<string>>(new Set())
 
@@ -279,6 +305,7 @@ export function SkillPanelView() {
     setWhiteboardsLoaded(false)
     setValues({})
     setNotices({})
+    setLintReminder(null)
   }, [projectPath])
 
   // The sync keeps the whiteboard list. Read it each time the panel opens, and again when a sync run ends.
@@ -296,6 +323,19 @@ export function SkillPanelView() {
     }
   }, [projectPath, mechanism, reloadTick])
 
+  // Count the ingests since the last semantic lint when the panel opens, and again when a lint run ends.
+  // A git error shows no reminder (`loadLintReminder` logs it); it never stops the panel.
+  useEffect(() => {
+    if (projectPath === null || mechanism !== true) return
+    let cancelled = false
+    void loadLintReminder(projectPath).then((reminder) => {
+      if (!cancelled) setLintReminder(reminder?.due ? reminder.count : null)
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [projectPath, mechanism, lintReminderTick])
+
   const runs = useMemo(() => latestRuns(activityItems, PANEL_ENTRIES, projectPath), [activityItems, projectPath])
 
   const syncStatus = runs[WHITEBOARD_SOURCE_SKILL]?.status
@@ -304,6 +344,13 @@ export function SkillPanelView() {
     if (shouldReloadWhiteboards(previousSyncStatus.current, syncStatus)) setReloadTick((tick) => tick + 1)
     previousSyncStatus.current = syncStatus
   }, [syncStatus])
+
+  const lintStatus = runs[LINT_SKILL]?.status
+  const previousLintStatus = useRef(lintStatus)
+  useEffect(() => {
+    if (runJustEnded(previousLintStatus.current, lintStatus)) setLintReminderTick((tick) => tick + 1)
+    previousLintStatus.current = lintStatus
+  }, [lintStatus])
 
   const handleValueChange = useCallback((name: PanelInput, value: string) => {
     setValues((current) => ({ ...current, [name]: value }))
@@ -367,6 +414,7 @@ export function SkillPanelView() {
       busy={busy}
       notices={notices}
       runs={runs}
+      lintReminder={lintReminder}
       onRun={(entry) => void handleRun(entry)}
     />
   )
