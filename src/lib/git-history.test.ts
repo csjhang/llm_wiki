@@ -50,6 +50,7 @@ import { createDeferred, waitFor } from "@/test-helpers/deferred"
 import {
   buildActionCommitMessage,
   commitIngest,
+  commitReviewAction,
   defaultGitHistoryDeps,
   getCachedGitHistory,
   isGitHistoryOnCached,
@@ -522,6 +523,51 @@ describe("commitIngest", () => {
     ])
     // The ingest itself succeeded: a later baseline must not undo it.
     expect(diskFiles.has(INFLIGHT)).toBe(false)
+    warn.mockRestore()
+  })
+})
+
+describe("commitReviewAction", () => {
+  const message = "recut: use example/gamma for example/alpha (1 pages)\n\n- wiki/concepts/a.md"
+
+  it("commits only the given paths, with the given message", async () => {
+    const sha = await commitReviewAction("/wiki", ["wiki/concepts/a.md", "wiki/index.md", "wiki/concepts/a.md"], message)
+    expect(sha).toBe("c".repeat(40))
+    expect(gitCommitPaths).toHaveBeenCalledTimes(1)
+    // No .gitignore, no baseline: the commit holds what the action changed and nothing else.
+    expect(gitCommitPaths).toHaveBeenCalledWith("/wiki", ["wiki/concepts/a.md", "wiki/index.md"], message)
+    expect(gitCommitAll).not.toHaveBeenCalled()
+  })
+
+  it("calls git for no path at all", async () => {
+    expect(await commitReviewAction("/wiki", [], message)).toBeNull()
+    expect(gitCommitPaths).not.toHaveBeenCalled()
+  })
+
+  it("waits for the git actions that are queued for the project", async () => {
+    const order: string[] = []
+    const gate = createDeferred<string | null>()
+    vi.mocked(gitCommitPaths).mockImplementation(async (_project, _paths, text) => {
+      order.push(`start ${text.split(":")[0]}`)
+      if (text.startsWith("ingest")) await gate.promise
+      order.push(`end ${text.split(":")[0]}`)
+      return "c".repeat(40)
+    })
+    const ingest = commitIngest("/wiki", "Report", ["wiki/sources/report.md"])
+    const review = commitReviewAction("/wiki", ["wiki/concepts/a.md"], message)
+    await waitFor(() => order.includes("start ingest"))
+    expect(order).toEqual(["start ingest"])
+    gate.resolve(null)
+    await Promise.all([ingest, review])
+    expect(order).toEqual(["start ingest", "end ingest", "start recut", "end recut"])
+  })
+
+  it("swallows an error, shows git's reason in the activity panel, and resolves null", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    vi.mocked(gitCommitPaths).mockRejectedValue(new Error("fatal: cannot lock\nmore text"))
+    await expect(commitReviewAction("/wiki", ["wiki/concepts/a.md"], message)).resolves.toBeNull()
+    expect(activityDetails()).toEqual(["Version history could not record this change: fatal: cannot lock"])
+    expect(warn).toHaveBeenCalled()
     warn.mockRestore()
   })
 })

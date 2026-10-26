@@ -11,12 +11,16 @@
  * - `mech:accept-research`: move a staged deep research result to `wiki/queries/`.
  * - `mech:start-fusion`: copy the command that starts a fusion for a candidate. The item stays open.
  * - `mech:dismiss-fusion`: record the candidates of the item as skipped, so they are never proposed again.
+ * - `mech:use-existing-domain`: give the pages of the ingest a domain of `domains.yaml` instead of the proposed one (spec 6.6).
+ * - `mech:discard-mirror-edit`: list the page of a `mirror-edited` item in `.llm-wiki/hepta/discard-edits.json`, so the next
+ *   `hepta plan-down` writes the text of the wiki over the edited card (spec 6.6).
  *
  * `stageResearchResult` is the other end of the last action: deep research calls it to hold a result
  * back for approval.
  */
 import yaml from "js-yaml"
-import { copyFile, deleteFile, fileExists, readFile, writeFile } from "@/commands/fs"
+import { copyFile, deleteFile, fileExists, readFile, writeFile, writeFileAtomic } from "@/commands/fs"
+import { buildActionCommitMessage } from "@/lib/commit-message"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { normalizePath } from "@/lib/path-utils"
 import { withProjectLock } from "@/lib/project-mutex"
@@ -27,7 +31,11 @@ import { hasOwn } from "@/lib/wiki-config/yaml-util"
 import type { ReviewItem } from "@/stores/review-store"
 import { listMarkdownFiles, loadMechanismContext } from "./context"
 import { SLUG_MAX_LENGTH, SLUG_WORD, slugProblem } from "./decisions"
+import { addDiscardEdit, DISCARD_EDITS_FILE, discardEditPage, parseDiscardEdits, renderDiscardEdits } from "./discard-edits"
+import { rebuildDomainIndex, scanWikiPagesWith } from "./domain-index"
 import { DISMISS_FUSION_ACTION, readCandidateLines, recordDismissedPairs, START_FUSION_ACTION } from "./fusion-candidates"
+import { pageOfMarkdown, planUseExistingDomain } from "./use-existing-domain"
+import type { UseDomainEdit } from "./use-existing-domain"
 
 /** The option actions of the mechanism review items start with this. */
 export const MECHANISM_ACTION_PREFIX = "mech:"
@@ -36,6 +44,8 @@ const APPROVE_DOMAIN = "mech:approve-domain"
 const PROPOSE_MECHANISM = "mech:propose-mechanism"
 const REPLACE_SOURCE = "mech:replace-source"
 const ACCEPT_RESEARCH = "mech:accept-research"
+const USE_EXISTING_DOMAIN = "mech:use-existing-domain"
+const DISCARD_MIRROR_EDIT = "mech:discard-mirror-edit"
 
 export interface ReviewActionContext {
   /** The open project. */
@@ -60,6 +70,17 @@ export interface ReviewActionContext {
    * the clipboard. The action does not resolve the item.
    */
   copied?(command: string): void
+  /**
+   * `mech:use-existing-domain` calls it with the domains of `domains.yaml` (the proposed domain is not among them) and
+   * the proposed domain. It shows a picker and returns the domain that the user chose, or null when the user cancels.
+   * Left out, the action throws an error: this screen cannot choose a domain.
+   */
+  chooseDomain?(domains: string[], proposed: string): Promise<string | null>
+  /**
+   * Record these project-relative paths as one commit of version history, with this message. `mech:use-existing-domain`
+   * calls it after it wrote the pages. Left out when version history is off. A failure is a warning and never fails the action.
+   */
+  commit?(paths: string[], message: string): Promise<void>
 }
 
 type ReviewDraft = Omit<ReviewItem, "id" | "resolved" | "createdAt">
@@ -91,6 +112,12 @@ export async function handleMechanismReviewAction(
       return true
     case DISMISS_FUSION_ACTION:
       await dismissFusion(requireItem(item, action), ctx)
+      return true
+    case USE_EXISTING_DOMAIN:
+      await useExistingDomain(requireItem(item, action), ctx)
+      return true
+    case DISCARD_MIRROR_EDIT:
+      await discardMirrorEdit(requireItem(item, action), ctx)
       return true
     default:
       return false
@@ -617,4 +644,116 @@ async function dismissFusion(item: ReviewItem, ctx: ReviewActionContext): Promis
   }
   await recordDismissedPairs(ctx.projectPath, domains.map((targetDomain) => ({ mechanism, targetDomain })))
   ctx.resolveItem(item.id, "Skipped")
+}
+
+// --- mech:use-existing-domain -------------------------------------------
+
+/**
+ * The user chose a domain of `domains.yaml` for a domain that an ingest proposed. The pages of that ingest get the chosen
+ * domain (`planUseExistingDomain` says which and how), the domain index is rebuilt, and version history gets one commit.
+ * The plan is made before anything is written: a page that the app cannot edit stops the action with an error that
+ * names it. A write that fails puts the pages that were written back. The item resolves last.
+ */
+async function useExistingDomain(item: ReviewItem, ctx: ReviewActionContext): Promise<void> {
+  const proposal = readProposal(item.description)
+  const source = (item.sourcePath ?? "").trim()
+  if (source === "") {
+    throw new Error("The review item does not name its source, so the pages of its ingest cannot be found.")
+  }
+  if (ctx.chooseDomain === undefined) throw new Error("This screen cannot choose a domain.")
+  const pp = projectRoot(ctx.projectPath)
+
+  const mechanism = await loadMechanismContext(pp)
+  if (mechanism === null) {
+    throw new Error(`${DOMAINS_FILE} does not exist, so this project is not a mechanism wiki and has no domain to use instead.`)
+  }
+  const domains = Object.keys(mechanism.domains.domains).filter((domain) => domain !== proposal.path)
+  if (domains.length === 0) {
+    throw new Error(`${DOMAINS_FILE} lists no domain to use instead. Approve the proposed domain, or add a domain by hand.`)
+  }
+  const chosen = await ctx.chooseDomain(domains, proposal.path)
+  if (chosen === null) return
+  if (!domains.includes(chosen)) throw new Error(`The domain "${chosen}" is not listed in ${DOMAINS_FILE}, so the pages cannot use it.`)
+
+  const { edits, indexFiles } = await withProjectLock(`${pp}\0wiki-pages`, async () => {
+    const pages = await scanWikiPagesWith(pp, pageOfMarkdown)
+    const plan = planUseExistingDomain(pages, { source, proposed: proposal.path, chosen })
+    if (plan.problems.length > 0) {
+      throw new Error(`Nothing was changed, because ${plan.problems.length === 1 ? "a page" : "some pages"} cannot be edited here:\n${plan.problems.join("\n")}`)
+    }
+    if (plan.edits.length === 0) {
+      throw new Error(`No page of ${source} uses the domain "${proposal.path}" any more, so there is nothing to change. Use Skip to close the item.`)
+    }
+    return { edits: plan.edits, indexFiles: await writeDomainChange(pp, mechanism, plan.edits) }
+  })
+
+  const pages = edits.map((edit) => edit.path)
+  if (ctx.commit !== undefined) {
+    try {
+      await ctx.commit([...pages, ...indexFiles], buildActionCommitMessage("recut", `use ${chosen} for ${proposal.path}`, pages))
+    } catch (err) {
+      // The pages are changed; the history misses one commit.
+      console.warn("[review-actions] could not commit the domain change:", err instanceof Error ? err.message : err)
+    }
+  }
+
+  ctx.resolveItem(item.id, `Used ${chosen}`)
+  await refresh(ctx)
+}
+
+/** Write the new text of the pages, then rebuild the domain index. A failure puts the pages back, and the error goes on. */
+async function writeDomainChange(
+  pp: string,
+  mechanism: NonNullable<Awaited<ReturnType<typeof loadMechanismContext>>>,
+  edits: readonly UseDomainEdit[],
+): Promise<string[]> {
+  const written: UseDomainEdit[] = []
+  try {
+    for (const edit of edits) {
+      await writeFile(`${pp}/${edit.path}`, edit.after)
+      written.push(edit)
+    }
+    // The index files are made from the pages, so the next rebuild repairs them if this one stops half way.
+    return await rebuildDomainIndex(pp, mechanism)
+  } catch (err) {
+    for (const edit of written.reverse()) {
+      try {
+        await writeFile(`${pp}/${edit.path}`, edit.before)
+      } catch (restoreError) {
+        console.warn(`[review-actions] could not put back ${edit.path}:`, restoreError instanceof Error ? restoreError.message : restoreError)
+      }
+    }
+    throw err
+  }
+}
+
+// --- mech:discard-mirror-edit -------------------------------------------
+
+/**
+ * Add the page of the item (`affectedPages[0]`) to `.llm-wiki/hepta/discard-edits.json`. The next `wiki-tool hepta plan-down`
+ * then plans the normal `update` for that page instead of `skip-edited`, and `hepta record` takes the page out again. The
+ * edit is already a source: the sync saved it as a feedback note, so "Keep as feedback" is a plain dismissal.
+ */
+async function discardMirrorEdit(item: ReviewItem, ctx: ReviewActionContext): Promise<void> {
+  const raw = (item.affectedPages?.[0] ?? "").trim()
+  const page = discardEditPage(raw)
+  if (page === null) {
+    throw new Error(
+      raw === ""
+        ? "The review item does not name its page, so the edit of its card cannot be discarded."
+        : `The page "${raw}" is not a page in wiki/, so the edit of its card cannot be discarded.`,
+    )
+  }
+  const pp = projectRoot(ctx.projectPath)
+  const file = `${pp}/${DISCARD_EDITS_FILE}`
+
+  // Two discards at once would each read the old list, and the second write would drop the first page.
+  await withProjectLock(`${pp}\0${DISCARD_EDITS_FILE}`, async () => {
+    const read = parseDiscardEdits((await fileExists(file)) ? await readFile(file) : "")
+    if (!read.ok) throw new Error(`${read.reason}. Fix or delete the file, then try again.`)
+    if (read.pages.includes(page)) return // discarded before
+    await writeFileAtomic(file, renderDiscardEdits(addDiscardEdit(read.pages, page)))
+  })
+
+  ctx.resolveItem(item.id, "Edit discarded")
 }

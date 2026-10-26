@@ -336,6 +336,80 @@ describe("hepta record", () => {
     })
   })
 
+  // Spec 6.6: the user chose "Discard the edit". The page is in `discard-edits.json` until its card is written.
+  describe("the list of discarded edits", () => {
+    const DISCARD_FILE = ".llm-wiki/hepta/discard-edits.json"
+    const OTHER = "wiki/mechanisms/other.md"
+    const listed = (project: string): unknown => JSON.parse(readFileSync(join(project, DISCARD_FILE), "utf8"))
+
+    it("record updated clears the discard", async () => {
+      const project = await createdProject()
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([OTHER, PAGE]))
+      const result = await record(project, { type: "updated", page: PAGE, cardUpdatedAt: EDITED, contentHash: HASH_B })
+      expect(result.exitCode).toBe(0)
+      expect(result.output).toMatchObject({ ok: true, event: "updated", page: PAGE, discardCleared: true })
+      // The other page stays in the list, and the map is saved as for any updated event.
+      expect(listed(project)).toEqual([OTHER])
+      expect(loadCardMap(project).pages[PAGE]).toMatchObject({ content_hash: HASH_B, card_updated_at: EDITED })
+    })
+
+    it("keeps an empty list as a valid file when the last page goes", async () => {
+      const project = await createdProject()
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([PAGE]))
+      await record(project, { type: "updated", page: PAGE, cardUpdatedAt: EDITED, contentHash: HASH_B })
+      expect(listed(project)).toEqual([])
+    })
+
+    it("makes the next plan-down plan nothing for the page that was updated", async () => {
+      const project = await createdProject()
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([PAGE]))
+      await record(project, { type: "updated", page: PAGE, cardUpdatedAt: NOW })
+      const next = await runCli(["hepta", "plan-down", "--project", project, "--now", NOW, ...quietMirrorArgs(project)])
+      expect(next.output.actions).toEqual([])
+    })
+
+    it("does not touch the file when the page is not in it, or when there is no file", async () => {
+      const project = await createdProject()
+      const quiet = await record(project, { type: "updated", page: PAGE, cardUpdatedAt: EDITED, contentHash: HASH_B })
+      expect(quiet.output).not.toHaveProperty("discardCleared")
+      expect(existsSync(join(project, DISCARD_FILE))).toBe(false)
+
+      const text = JSON.stringify([OTHER])
+      writeProjectFile(project, DISCARD_FILE, text)
+      await record(project, { type: "updated", page: PAGE, cardUpdatedAt: EDITED, contentHash: HASH_B })
+      expect(readFileSync(join(project, DISCARD_FILE), "utf8")).toBe(text)
+    })
+
+    it("is also cleared by retired and by forgotten, because those events write over the card", async () => {
+      const project = await createdProject()
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([PAGE, OTHER]))
+      await record(project, { type: "retired", page: PAGE, cardUpdatedAt: EDITED })
+      expect(listed(project)).toEqual([OTHER])
+
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([PAGE]))
+      await record(project, { type: "forgotten", page: PAGE })
+      expect(listed(project)).toEqual([])
+    })
+
+    it("is not cleared by an event that is refused", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([PAGE]))
+      const result = await record(project, { type: "updated", page: PAGE, cardUpdatedAt: EDITED, contentHash: HASH_B })
+      expect(result.exitCode).toBe(2)
+      expect(listed(project)).toEqual([PAGE])
+    })
+
+    it("saves the map and tells the user when the file cannot be read", async () => {
+      const project = await createdProject()
+      writeProjectFile(project, DISCARD_FILE, "{")
+      const result = await record(project, { type: "updated", page: PAGE, cardUpdatedAt: EDITED, contentHash: HASH_B })
+      expect(result.exitCode).toBe(0)
+      expect(loadCardMap(project).pages[PAGE].content_hash).toBe(HASH_B)
+      expect(result.output.discardWarning).toEqual(expect.stringContaining("discard-edits.json"))
+      expect(readFileSync(join(project, DISCARD_FILE), "utf8")).toBe("{")
+    })
+  })
+
   describe("placed", () => {
     it("adds the whiteboard once", async () => {
       const project = await createdProject()

@@ -10,6 +10,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
 import { runCli } from "../../../tools/wiki-tool/src/cli"
+import { isAllowedApiReviewAction } from "@/lib/review-option-actions"
 import { PANEL_ENTRIES } from "@/lib/skill-panel/panel-config"
 import { findLongSentences } from "@/test-helpers/ste-check"
 
@@ -110,6 +111,25 @@ describe("wiki-sync skill", () => {
     expect(call).toContain('"affectedPages": ["<page path>"]')
     expect(call).toContain("The changes are in <note path>.")
     expect(call).toContain("`<note path>` is the `note` of the `record` result.")
+  })
+
+  it("gives the mirror-edited item the two options of spec 6.6, and each action is one the app allows", () => {
+    const call = steps.slice(steps.indexOf("## llm_wiki_add_review"))
+    expect(call).toContain(
+      '"options": [{ "label": "Keep as feedback", "action": "dismiss" }, { "label": "Discard the edit", "action": "mech:discard-mirror-edit" }]',
+    )
+    expect(call).toContain("`Keep as feedback` only closes the item. The note is a source already.")
+    expect(call).toContain("`Discard the edit` makes the next sync write the text of the wiki over the card.")
+    // The actions are in the list of ruling S17, so the app takes the item.
+    const actions = [...call.matchAll(/"action": "([^"]+)"/g)].map((match) => match[1])
+    expect(actions).toEqual(["dismiss", "mech:discard-mirror-edit"])
+    for (const action of actions) expect(isAllowedApiReviewAction(action), action).toBe(true)
+  })
+
+  it("says that a discarded edit comes as a normal update, with nothing else to do", () => {
+    const update = skill.slice(skill.indexOf("### update and relink"), skill.indexOf("### retire"))
+    expect(update).toContain("Discard the edit")
+    expect(update).toContain("The `updated` event takes the page out of the list.")
   })
 
   it("passes project_id, the project folder, in every call to a project tool of the llm_wiki MCP", () => {

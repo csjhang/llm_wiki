@@ -21,7 +21,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { parseFrontmatter } from "@/lib/frontmatter"
 import { KNOWN_LENSES, parseDomainsYaml } from "@/lib/wiki-config/domains"
 import { UUID_PATTERN } from "@/lib/wiki-config/types"
-import { isRecord } from "@/lib/wiki-config/yaml-util"
+import { isRecord, yamlString } from "@/lib/wiki-config/yaml-util"
 import { parseArgs, parseNowOption } from "./args"
 import { type CardMap, loadCardMap, saveCardMap } from "./card-map"
 import { parentIndex, whiteboardChain } from "./cmd-plan-up"
@@ -219,7 +219,3 @@ export function knownLenses(project: string): string[] {
   return [...new Set([...KNOWN_LENSES, ...stems])]
 }
 
-/** A double-quoted YAML string. JSON text is one, except that YAML also breaks a line at these characters. */
-export function yamlString(value: string): string {
-  return JSON.stringify(value).replace(/[\u0085\u2028\u2029]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)
-}

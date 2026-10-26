@@ -43,6 +43,11 @@
  * It is for the `forget` action of plan-down and takes a retired entry only: the card of an active page is not gone.
  * A page that is mirrored again later gets a new card at the next plan.
  *
+ * An `updated`, `retired`, or `forgotten` event also takes the page out of `.llm-wiki/hepta/discard-edits.json`, the list of
+ * pages whose Heptabase edit the user chose to discard (spec 6.6). The write over the card has used up that choice; a later
+ * edit of the card is a new edit. The map is saved first. When the file cannot be read, the event still works and the
+ * result says so in `discardWarning`. The result has `"discardCleared": true` when the page was in the list.
+ *
  * An `up-decision` event keeps the user's answer to a question of `plan-up` (an `ask` action): `skip` leaves the
  * card out, `this-wiki` makes it a source of this wiki. `plan-up` plans no question for the card while the answer is
  * in the map and the card has no snapshot.
@@ -54,7 +59,7 @@ import { isRecord } from "@/lib/wiki-config/yaml-util"
 import { parseArgs, parseNowOption } from "./args"
 import { type CardMap, contentHash, loadCardMap, type PageEntry, saveCardMap } from "./card-map"
 import { cardToComparableText } from "./convert"
-import { outboxFile, sentFile } from "./hepta-files"
+import { clearDiscardEdit, outboxFile, sentFile } from "./hepta-files"
 import { type CommandResult, isDirectory, resolveInProject, writeFileAtomic } from "./io"
 import {
   cardHash,
@@ -91,12 +96,12 @@ type EventHandler = (context: RecordContext) => CommandResult
 
 const HANDLERS: Record<string, EventHandler> = {
   created: recordCreated,
-  updated: (context) => recordRewritten(context, "updated"),
+  updated: (context) => spendDiscard(context, recordRewritten(context, "updated")),
   relinked: (context) => recordRewritten(context, "relinked"),
   "setup-done": recordSetupDone,
   placed: recordPlaced,
-  retired: recordRetired,
-  forgotten: recordForgotten,
+  retired: (context) => spendDiscard(context, recordRetired(context)),
+  forgotten: (context) => spendDiscard(context, recordForgotten(context)),
   feedback: recordFeedback,
   "up-decision": recordUpDecision,
 }
@@ -224,6 +229,19 @@ class Fields {
     if (typeof value === "string" && value.trim() !== "") return value
     this.problems.push(`event "${key}" must be text that is not empty`)
     return ""
+  }
+}
+
+/**
+ * The card of the page was written over, or is gone: the user's choice to discard its edit is used up. The map is already
+ * saved. A list that cannot be read or written is a warning in the result and never fails the event.
+ */
+function spendDiscard(context: RecordContext, result: CommandResult): CommandResult {
+  if (!result.ok || typeof result.page !== "string") return result
+  try {
+    return clearDiscardEdit(context.project, result.page) ? { ...result, discardCleared: true } : result
+  } catch (error) {
+    return { ...result, discardWarning: `${error instanceof Error ? error.message : String(error)}; the page stays in the list` }
   }
 }
 

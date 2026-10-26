@@ -5,7 +5,7 @@
  * variants). The rest of the page must not change. Slugs and domains are placeholders.
  */
 import { describe, expect, it } from "vitest"
-import { rewriteInstanceLines } from "./instances"
+import { rewriteInstanceLines } from "./recut-instance-lines"
 
 const rename = (domain: string): string => (domain === "example/alpha" ? "example/gamma" : domain)
 

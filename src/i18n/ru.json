@@ -483,7 +483,12 @@
     "allClear": "Всё в порядке — нечего ревьюировать",
     "resolvedDivider": "— Решённые —",
     "actionFailed": "Действие не выполнено, элемент остаётся в ожидании. Можно повторить: {{error}}",
-    "fusionCopied": "Скопировано: {{command}}"
+    "fusionCopied": "Скопировано: {{command}}",
+    "useDomainTitle": "Использовать существующий домен",
+    "useDomainMessage": "Страницы этого источника, использующие {{proposed}}, получат домен, который вы выберете.",
+    "useDomainLabel": "Домен из domains.yaml",
+    "useDomainChoose": "Выберите домен",
+    "useDomainConfirm": "Использовать этот домен"
   },
   "settings": {
     "title": "Настройки",

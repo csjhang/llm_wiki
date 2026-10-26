@@ -12,7 +12,7 @@
  * `parseDomainsYaml`. A form this module cannot edit throws `DomainsFileError`.
  */
 import yaml from "js-yaml"
-import { yamlString } from "../cmd-snapshot"
+import { yamlString } from "@/lib/wiki-config/yaml-util"
 
 export class DomainsFileError extends Error {}
 

@@ -366,6 +366,7 @@ describe("enforceMechanismRules", () => {
     expect(review?.description.split("\n")).toContain("PROPOSAL: cognition/attention | ai | How attention works")
     expect(review?.options).toEqual([
       { label: "Approve", action: "mech:approve-domain" },
+      { label: "Use an existing domain", action: "mech:use-existing-domain" },
       { label: "Skip", action: "Skip" },
     ])
   })
@@ -753,6 +754,7 @@ describe("enforceMechanismRules", () => {
       expect(result.reviews[0].type).toBe("new-domain")
       expect(result.reviews[0].options).toEqual([
         { label: "Approve", action: "mech:approve-domain" },
+        { label: "Use an existing domain", action: "mech:use-existing-domain" },
         { label: "Skip", action: "Skip" },
       ])
       expect(result.reviews[0].description).toContain("PROPOSAL: cognition/attention | ai | How attention works")

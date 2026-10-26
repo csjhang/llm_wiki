@@ -546,6 +546,26 @@ export function commitIngest(
 }
 
 /**
+ * Commit the paths that a review action changed (for example "Use an existing domain"), with the message the action
+ * built. Only these paths go into the commit, and nothing else is saved first. It runs after the git actions that are
+ * queued for the project. Resolves the SHA, or `null` when there was nothing to commit or git failed (a warning in the
+ * activity panel then says why). Never rejects.
+ */
+export function commitReviewAction(projectPath: string, paths: readonly string[], message: string): Promise<string | null> {
+  return serialized(projectPath, async () => {
+    const unique = uniquePaths(paths)
+    if (unique.length === 0) return null
+    try {
+      return await gitCommitPaths(projectKey(projectPath), unique, message)
+    } catch (err) {
+      console.warn("[git-history] review action commit failed:", err)
+      showWarning(undefined, `Version history could not record this change: ${firstLine(err)}`, unique)
+      return null
+    }
+  })
+}
+
+/**
  * Undo a failed or cancelled ingest: put back only the paths it wrote (and its
  * media folder) as they are in HEAD. Paths outside `wiki/` are never touched.
  * Then forget the source's resume state, so a retry starts from the restored

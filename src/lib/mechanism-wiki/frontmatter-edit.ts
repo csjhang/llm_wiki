@@ -13,7 +13,7 @@
  */
 import yaml from "js-yaml"
 import { type FrontmatterValue, parseFrontmatter } from "@/lib/frontmatter"
-import { yamlString } from "../cmd-snapshot"
+import { yamlString } from "@/lib/wiki-config/yaml-util"
 
 export type SingleDomainKey = "domain" | "from_domain" | "to_domain"
 

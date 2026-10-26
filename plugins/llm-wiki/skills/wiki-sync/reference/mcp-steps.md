@@ -339,13 +339,17 @@ Use it for a `skip-edited` action when `note` is a path and `llm_wiki_status` sa
   "type": "mirror-edited",
   "title": "Mirror card edited: <page path> (<note file name>)",
   "description": "The user edited the mirror card of this page in Heptabase. The skill did not overwrite it. The changes are in <note path>.",
-  "affectedPages": ["<page path>"]
+  "affectedPages": ["<page path>"],
+  "options": [{ "label": "Keep as feedback", "action": "dismiss" }, { "label": "Discard the edit", "action": "mech:discard-mirror-edit" }]
 }
 ```
 
 - Use the full path of this project folder. The app can have another project open.
 - `<page path>` is the `page` of the action, for example `wiki/mechanisms/attention.md`.
 - `<note path>` is the `note` of the `record` result.
+- Give `options` exactly as shown. Do not change the labels or the actions. The app refuses any other action.
+- `Keep as feedback` only closes the item. The note is a source already.
+- `Discard the edit` makes the next sync write the text of the wiki over the card.
 - `<note file name>` is the base name of `<note path>`, for example `feedback-<card id>-<stamp>.md`.
 - Save as `llm_wiki_add_review-<card id>.json`.
 - The result holds the `id` of the item. The same title gives the same id. Each edit has its own note, so each edit adds its own item.

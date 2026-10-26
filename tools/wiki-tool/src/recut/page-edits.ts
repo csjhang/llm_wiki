@@ -15,8 +15,8 @@
  * Nothing is written here. A page whose frontmatter this module cannot edit safely is a problem with its path.
  */
 import { MECHANISM_TYPE } from "@/lib/mechanism-wiki/domain-index-render"
-import { editDomainKeys } from "./frontmatter-edit"
-import { rewriteInstanceLines } from "./instances"
+import { editDomainKeys } from "@/lib/mechanism-wiki/frontmatter-edit"
+import { rewriteInstanceLines } from "@/lib/mechanism-wiki/recut-instance-lines"
 import { HYPOTHESIS_TYPE, type RecutPage, recutPage } from "./page-refs"
 import { createMapper, type RecutPlan } from "./plan"
 

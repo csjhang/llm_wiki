@@ -483,7 +483,12 @@
     "allClear": "一切正常，无需审阅",
     "resolvedDivider": "— 已解决 —",
     "actionFailed": "操作失败，该条目仍保持待处理，可以重试：{{error}}",
-    "fusionCopied": "已复制：{{command}}"
+    "fusionCopied": "已复制：{{command}}",
+    "useDomainTitle": "使用已有领域",
+    "useDomainMessage": "此来源中使用 {{proposed}} 的页面将改用你选择的领域。",
+    "useDomainLabel": "domains.yaml 中的领域",
+    "useDomainChoose": "选择领域",
+    "useDomainConfirm": "使用此领域"
   },
   "settings": {
     "title": "设置",

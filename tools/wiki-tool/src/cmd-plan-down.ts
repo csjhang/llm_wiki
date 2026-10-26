@@ -29,7 +29,10 @@
  * card for ever, and a page that is back and mirrored would be stopped by a card that is gone.
  *
  * A mirror card that the user edited is never overwritten: its page gets a `skip-edited`, whether
- * the page changed or not, until `hepta record` saves the edit as feedback. The edit check needs the whole list
+ * the page changed or not, until `hepta record` saves the edit as feedback. The one way round it is the user's own word:
+ * a page that is in `.llm-wiki/hepta/discard-edits.json` (the "Discard the edit" option of the review item, spec 6.6) gets the
+ * normal `update` instead, also when the page did not change, so the card gets the text of the wiki again. `hepta record`
+ * takes the page out of that file when the card was written. The edit check needs the whole list
  * of the mirror tag, so `--mirror-cards` is required once a card is mapped, and a list that is a failed result or
  * stops before its last page is refused. A card of the map that the list does not hold (taken out of the tag, or
  * deleted) gets no action at all and a problem, so a half-read list never makes a write. Every action that writes
@@ -48,7 +51,7 @@ import { isRecord } from "@/lib/wiki-config/yaml-util"
 import { parseArgs, parseNowOption } from "./args"
 import { type CardMap, contentHash, loadCardMap, type PageEntry } from "./card-map"
 import { readDatabase } from "./cmd-init"
-import { outboxFile } from "./hepta-files"
+import { outboxFile, readDiscardEdits } from "./hepta-files"
 import { type CommandResult, isDirectory, resolveInProject, writeFileAtomic } from "./io"
 import {
   cardHash,
@@ -191,6 +194,7 @@ export function planDown(args: string[]): CommandResult {
     if (database) options = indexOptions(database.schema)
   }
   if (config && options) checkConfiguredProperties(config.heptabase, options, problems)
+  const discards = readDiscards(project, problems)
   if (problems.length > 0 || !config || !map || !now) return { ok: false, problems }
 
   // A project that has no active card yet may have no wiki folder. Otherwise a missing folder is an error,
@@ -208,6 +212,7 @@ export function planDown(args: string[]): CommandResult {
     wikiId: config.wiki.id,
     syncedOn: { start: `${now.toISOString().slice(0, 10)}T00:00:00.000Z` },
     allowMassRetire: parsed.flags["allow-mass-retire"],
+    discards,
   })
   writeOutbox(project, plan.actions)
   return {
@@ -268,6 +273,16 @@ function readMirrorCards(paths: readonly string[], problems: string[]): Map<stri
   return cards
 }
 
+/** The pages whose edit the user chose to discard. A file that cannot be read is a problem: the user's word must not be lost. */
+function readDiscards(project: string, problems: string[]): ReadonlySet<string> {
+  try {
+    return new Set(readDiscardEdits(project))
+  } catch (error) {
+    problems.push(error instanceof Error ? error.message : String(error))
+    return new Set()
+  }
+}
+
 interface SelectProperty {
   name: string
   options: Set<string>
@@ -316,6 +331,8 @@ interface PlanInput {
   syncedOn: { start: string }
   /** The user confirmed a plan that retires most of the cards. */
   allowMassRetire: boolean
+  /** The pages whose edit the user chose to discard: their cards get the text of the wiki, edited or not. */
+  discards: ReadonlySet<string>
 }
 
 interface PagePlan {
@@ -423,8 +440,10 @@ function planPage(input: PlanInput, renderer: MirrorRenderer, page: WikiPage, en
   })
   const hash = cardHash(body, pageProperties(page, input))
   let main: DownAction | undefined
-  if (entry.status !== "active" || hash !== entry.content_hash) {
-    const linksOnly = entry.status === "active" && onlyLinksChanged(input, renderer, page, entry.content_hash, resolved)
+  // A discarded edit is still in the card, so the card gets the text of the wiki even when the page did not change.
+  const discarded = entry.status === "active" && input.discards.has(page.path)
+  if (entry.status !== "active" || hash !== entry.content_hash || discarded) {
+    const linksOnly = !discarded && entry.status === "active" && onlyLinksChanged(input, renderer, page, entry.content_hash, resolved)
     main = linksOnly
       ? { op: "relink", page: page.path, cardId: entry.card_id, body, bodyFile: outboxFile(page.path), contentHash: hash }
       : {
@@ -512,7 +531,8 @@ function finish(
     if (!card) {
       return { blockers: [`card ${entry.card_id} of ${path} is not in the mirror tag (removed from the tag or deleted?)`], notes: [] }
     }
-    checked = editedCard(entry, path, card) ?? main
+    // The user chose to discard the edit: the card is overwritten as for a card nobody edited.
+    checked = (input.discards.has(path) ? null : editedCard(entry, path, card)) ?? main
     const stamp = card.updatedAt
     if (stamp !== undefined) {
       if (checked?.op === "update" || checked?.op === "relink" || checked?.op === "retire") checked = { ...checked, cardUpdatedAt: stamp }

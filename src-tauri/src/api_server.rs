@@ -1943,23 +1943,26 @@ const DISMISSAL_ACTION_WORDS: &[&str] = &[
     "no",
 ];
 
-/// The `mech:` actions that an API caller may put on a button. The other `mech:` actions write files
-/// (`mech:replace-source`, `mech:approve-domain`, `mech:accept-research`).
+/// The `mech:` actions that an API caller may put on a button. `mech:discard-mirror-edit` changes no page
+/// and no source: it adds a page of `wiki/` to a list that the `wiki-tool` reads, and the next sync writes
+/// the text of the wiki over the Heptabase card of that page. The other `mech:` actions write pages or
+/// sources (`mech:replace-source`, `mech:approve-domain`, `mech:use-existing-domain`, `mech:accept-research`).
 const API_MECHANISM_ACTIONS: &[&str] = &[
     "mech:propose-mechanism",
     "mech:start-fusion",
     "mech:dismiss-fusion",
+    "mech:discard-mirror-edit",
 ];
 
 /// The prefix of an action that opens a page. The path after it must be inside `wiki/`.
 const OPEN_ACTION_PREFIX: &str = "open:";
 
 /// What the 400 message lists as allowed.
-const ALLOWED_REVIEW_ACTIONS_TEXT: &str = "a dismissal word (skip, dismiss, ignore, approve, keep existing, no, 跳过, 忽略), mech:propose-mechanism, mech:start-fusion, mech:dismiss-fusion, or open:wiki/<path>";
+const ALLOWED_REVIEW_ACTIONS_TEXT: &str = "a dismissal word (skip, dismiss, ignore, approve, keep existing, no, 跳过, 忽略), mech:propose-mechanism, mech:start-fusion, mech:dismiss-fusion, mech:discard-mirror-edit, or open:wiki/<path>";
 
 /// Ruling S17. The caller of `POST /reviews` is an agent that reads text it does not trust, and the
 /// Review tab runs the action of a button with the rights of the app. So an item may carry only an
-/// action that cannot change or delete a file by accident: a dismissal word, one of the three
+/// action that cannot change or delete a file by accident: a dismissal word, one of the four
 /// `mech:` actions above, or `open:wiki/<path>`. Everything else (`delete:`, `save:`,
 /// `__deep_research__`, `__create_page__:`, `mech:replace-source`, and free text that the view
 /// would take for a request to create or research a page) is refused.
@@ -4969,6 +4972,7 @@ mod tests {
             "mech:replace-source",
             "mech:approve-domain",
             "mech:accept-research",
+            "mech:use-existing-domain",
             "mech:unknown",
             "Create page X",
             "research attention",
@@ -5004,6 +5008,7 @@ mod tests {
             "mech:propose-mechanism",
             "mech:start-fusion",
             "mech:dismiss-fusion",
+            "mech:discard-mirror-edit",
             "open:wiki/mechanisms/attention.md",
             "open:wiki/a b/c.md",
         ] {

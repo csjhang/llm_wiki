@@ -36,10 +36,10 @@ describe("isDismissalAction", () => {
 })
 
 describe("isAllowedApiReviewAction", () => {
-  it("allows the dismissal words, the three mech actions, and open:wiki paths", () => {
+  it("allows the dismissal words, the four mech actions, and open:wiki paths", () => {
     for (const action of [
       "Skip", "dismiss", "Keep existing", "跳过",
-      "mech:propose-mechanism", "mech:start-fusion", "mech:dismiss-fusion",
+      "mech:propose-mechanism", "mech:start-fusion", "mech:dismiss-fusion", "mech:discard-mirror-edit",
       "open:wiki/mechanisms/attention.md", "open:wiki/a b/c.md",
     ]) {
       expect(isAllowedApiReviewAction(action), action).toBe(true)
@@ -49,7 +49,7 @@ describe("isAllowedApiReviewAction", () => {
   it("refuses an action that deletes, writes, researches, or creates", () => {
     for (const action of [
       "delete:/home/user", "delete:wiki/a.md", "save:SGVsbG8=", "__deep_research__", "__create_page__:Attention",
-      "mech:replace-source", "mech:approve-domain", "mech:accept-research", "mech:unknown",
+      "mech:replace-source", "mech:approve-domain", "mech:accept-research", "mech:use-existing-domain", "mech:unknown",
       "Create page X", "research attention", "open", "view page",
     ]) {
       expect(isAllowedApiReviewAction(action), action).toBe(false)
@@ -65,8 +65,13 @@ describe("isAllowedApiReviewAction", () => {
     }
   })
 
-  it("keeps API mechanism actions to the three that write no file by themselves", () => {
-    expect([...API_MECHANISM_ACTIONS]).toEqual(["mech:propose-mechanism", "mech:start-fusion", "mech:dismiss-fusion"])
+  it("keeps API mechanism actions to the four that cannot change or delete a page of the wiki", () => {
+    expect([...API_MECHANISM_ACTIONS]).toEqual([
+      "mech:propose-mechanism",
+      "mech:start-fusion",
+      "mech:dismiss-fusion",
+      "mech:discard-mirror-edit",
+    ])
   })
 })
 

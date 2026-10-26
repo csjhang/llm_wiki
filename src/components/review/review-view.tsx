@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { queueResearch, queueResearchBatch } from "@/lib/deep-research"
 import {
   AlertTriangle,
@@ -33,8 +33,10 @@ import { useAppDialog } from "@/stores/app-dialog-store"
 import { useResearchStore } from "@/stores/research-store"
 import { reviewResearchQueries, reviewResearchTopic, selectedResearchReviews } from "@/lib/review-batch-research"
 import { enqueueSourceIngest } from "@/lib/source-lifecycle"
+import { commitReviewAction, resolveGitHistory } from "@/lib/git-history"
 import { handleMechanismReviewAction, MECHANISM_ACTION_PREFIX } from "@/lib/mechanism-wiki/review-actions"
 import { deleteReviewTarget, isDismissalAction } from "@/lib/review-option-actions"
+import { DomainPickerDialog, type DomainPickerRequest } from "./domain-picker"
 
 const typeConfig: Record<ReviewItem["type"], { icon: typeof AlertTriangle; color: string }> = {
   contradiction: { icon: AlertTriangle, color: "text-amber-500" },
@@ -64,6 +66,8 @@ export function ReviewView() {
   const [workingReviewIds, setWorkingReviewIds] = useState<Set<string>>(() => new Set())
   const [reviewErrors, setReviewErrors] = useState<Record<string, string>>({})
   const [reviewNotices, setReviewNotices] = useState<Record<string, string>>({})
+  const [domainPicker, setDomainPicker] = useState<DomainPickerRequest | null>(null)
+  const pendingPicker = useRef<DomainPickerRequest | null>(null)
   const researchTasks = useResearchStore((s) => s.tasks)
 
   const setReviewWorking = useCallback((id: string, working: boolean) => {
@@ -92,6 +96,28 @@ export function ReviewView() {
       return next
     })
   }, [])
+
+  // `mech:use-existing-domain` asks for a domain. The picker settles the request with the domain, or with null for Cancel.
+  const pickDomain = useCallback(
+    (domains: string[], proposed: string) =>
+      new Promise<string | null>((resolve) => {
+        const request: DomainPickerRequest = {
+          domains,
+          proposed,
+          resolve: (choice) => {
+            if (pendingPicker.current === request) pendingPicker.current = null
+            setDomainPicker(null)
+            resolve(choice)
+          },
+        }
+        pendingPicker.current = request
+        setDomainPicker(request)
+      }),
+    [],
+  )
+
+  // A picker that is still open when the view goes away is a Cancel, so the action does not wait for ever.
+  useEffect(() => () => pendingPicker.current?.resolve(null), [])
 
   // Reload review items from disk. The review pane has no equivalent of
   // lint's re-run, so external writers — the resolve API, another window,
@@ -133,6 +159,12 @@ export function ReviewView() {
           copyText: (text) => navigator.clipboard.writeText(text),
           // The item stays open, so the card says what is on the clipboard.
           copied: (command) => setReviewNotice(id, t("review.fusionCopied", { command })),
+          // `mech:use-existing-domain` shows a picker of the domains of domains.yaml.
+          chooseDomain: pickDomain,
+          // The pages it changed become one commit, when version history is on for this project.
+          commit: async (paths, message) => {
+            if (await resolveGitHistory(project.id, pp)) await commitReviewAction(pp, paths, message)
+          },
         })
         if (handled) return
       } catch (err) {
@@ -366,7 +398,7 @@ export function ReviewView() {
     } else {
       resolveItem(id, action)
     }
-  }, [appDialog, project, items, resolveItem, setReviewError, setReviewNotice, setReviewWorking, t])
+  }, [appDialog, project, items, pickDomain, resolveItem, setReviewError, setReviewNotice, setReviewWorking, t])
 
   const pending = items.filter((i) => !i.resolved)
   const resolved = items.filter((i) => i.resolved)
@@ -561,6 +593,7 @@ export function ReviewView() {
           </div>
         )}
       </div>
+      {domainPicker && <DomainPickerDialog request={domainPicker} />}
     </div>
   )
 }

@@ -7,7 +7,7 @@
  * change or delete a file by accident:
  *
  * - a dismissal word (`isDismissalAction`), which only closes the card,
- * - `mech:propose-mechanism`, `mech:start-fusion`, or `mech:dismiss-fusion`, or
+ * - `mech:propose-mechanism`, `mech:start-fusion`, `mech:dismiss-fusion`, or `mech:discard-mirror-edit`, or
  * - `open:wiki/<path>`, which opens a page of the wiki in the preview.
  *
  * The API route refuses every other action with a 400. The same rule is in `review_action_allowed` of
@@ -25,8 +25,18 @@ import { normalizePath } from "@/lib/path-utils"
  */
 export const DISMISSAL_ACTION_WORDS = ["skip", "dismiss", "ignore", "跳过", "忽略", "approve", "keep existing", "no"] as const
 
-/** The `mech:` actions that an API caller may use. The other `mech:` actions write files. */
-export const API_MECHANISM_ACTIONS = ["mech:propose-mechanism", "mech:start-fusion", "mech:dismiss-fusion"] as const
+/**
+ * The `mech:` actions that an API caller may use. `mech:discard-mirror-edit` changes no page and no source: it adds a page
+ * of `wiki/` (checked by `discardEditPage`) to `.llm-wiki/hepta/discard-edits.json`, and the next sync writes the text of
+ * the wiki over the Heptabase card of that page. The other `mech:` actions write pages or sources (`mech:replace-source`,
+ * `mech:approve-domain`, `mech:use-existing-domain`, `mech:accept-research`).
+ */
+export const API_MECHANISM_ACTIONS = [
+  "mech:propose-mechanism",
+  "mech:start-fusion",
+  "mech:dismiss-fusion",
+  "mech:discard-mirror-edit",
+] as const
 
 const OPEN_PREFIX = "open:"
 const WIKI_FOLDER = "wiki/"

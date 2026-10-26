@@ -364,8 +364,11 @@ function checkCrossDomain(pages: StructurePage[]): StructureFinding[] {
   return findings
 }
 
-/** The raw file name of a source reference: no `raw/sources/` prefix, forward slashes, lower case. */
-function sourceKey(reference: string): string {
+/**
+ * The raw file name of a source reference: no `raw/sources/` prefix, forward slashes, lower case. The lint and the
+ * review action "Use an existing domain" compare raw names with it.
+ */
+export function sourceKey(reference: string): string {
   const key = reference.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase()
   if (key.startsWith(RAW_SOURCES_DIR)) return key.slice(RAW_SOURCES_DIR.length)
   const at = key.indexOf(`/${RAW_SOURCES_DIR}`)

@@ -272,6 +272,7 @@ const DANGEROUS_ACTIONS = [
   "mech:replace-source",
   "mech:approve-domain",
   "mech:accept-research",
+  "mech:use-existing-domain",
   "Create page X",
   "research attention",
   "open",
@@ -306,10 +307,10 @@ test("parseAddReviewArgs checks every option, not only the first", () => {
   )
 })
 
-test("parseAddReviewArgs accepts the dismissal words, the three mech actions, and open:wiki paths", () => {
+test("parseAddReviewArgs accepts the dismissal words, the four mech actions, and open:wiki paths", () => {
   const allowed = [
     "skip", "Skip", "DISMISS", "Ignore", "跳过", "忽略", "approve", "Keep existing", "No",
-    "mech:propose-mechanism", "mech:start-fusion", "mech:dismiss-fusion",
+    "mech:propose-mechanism", "mech:start-fusion", "mech:dismiss-fusion", "mech:discard-mirror-edit",
     "open:wiki/mechanisms/attention.md", "open:wiki/a b/c.md",
   ]
   for (const action of allowed) {
@@ -352,7 +353,7 @@ test("add_review refuses a dangerous action before any call to the app", async (
 })
 
 test("the tool description lists what an option action may be", () => {
-  for (const word of ["skip", "dismiss", "mech:propose-mechanism", "mech:start-fusion", "mech:dismiss-fusion", "open:wiki/<path>"]) {
+  for (const word of ["skip", "dismiss", "mech:propose-mechanism", "mech:start-fusion", "mech:dismiss-fusion", "mech:discard-mirror-edit", "open:wiki/<path>"]) {
     assert.ok(ADD_REVIEW_ACTION_HELP.includes(word), word)
   }
   assert.doesNotMatch(ADD_REVIEW_ACTION_HELP, /Action id that the Review tab runs/)

@@ -664,7 +664,7 @@ describe("ingest prompts and the mechanism context", () => {
     expect(page).toMatch(/^domain: cognition\/attention$/m)
     expect(reviewSummary()).toEqual([["new-domain", "New domain: cognition/attention"]])
     const [review] = useReviewStore.getState().items
-    expect(review.options.map((option) => option.action)).toEqual(["mech:approve-domain", "Skip"])
+    expect(review.options.map((option) => option.action)).toEqual(["mech:approve-domain", "mech:use-existing-domain", "Skip"])
     expect(review.description).toContain("PROPOSAL: cognition/attention | ai | How attention works")
   })
 
@@ -715,7 +715,7 @@ describe("ingest prompts and the mechanism context", () => {
 
     expect(reviewSummary()).toEqual([["new-domain", "New domain: cognition/attention"]])
     const [review] = useReviewStore.getState().items
-    expect(review.options.map((option) => option.action)).toEqual(["mech:approve-domain", "Skip"])
+    expect(review.options.map((option) => option.action)).toEqual(["mech:approve-domain", "mech:use-existing-domain", "Skip"])
     expect(review.description).toContain("PROPOSAL: cognition/attention | ai | How attention works")
   })
 

@@ -2140,6 +2140,13 @@ function readUuid(value, path, issues) {
 	});
 	return "";
 }
+/**
+* A double-quoted YAML string. JSON text is one, except that YAML also breaks a line at these characters. The `wiki-tool`
+* and the app both write frontmatter with it, so there is one copy.
+*/
+function yamlString(value) {
+	return JSON.stringify(value).replace(/[\u0085\u2028\u2029]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
 
 //#endregion
 //#region src/lib/wiki-config/heptabase-config.ts
@@ -3182,6 +3189,68 @@ function isSyncable(page) {
 }
 
 //#endregion
+//#region src/lib/mechanism-wiki/discard-edits.ts
+/**
+* The list of mirror pages whose Heptabase edit the user chose to discard (spec 6.6, "Discard the edit").
+*
+* `.llm-wiki/hepta/discard-edits.json` is a JSON array of page paths. The review action `mech:discard-mirror-edit`
+* adds the page of a `mirror-edited` item. The next `wiki-tool hepta plan-down` plans the normal `update` for a listed
+* page, instead of `skip-edited`, so the card gets the text of the wiki again. `hepta record` takes the page out of
+* the list when the card was written (`updated`, `retired`, or `forgotten`).
+*
+* This module is pure. The app and the `wiki-tool` both import it, so there is one reader and one writer of the
+* format.
+*/
+const DISCARD_EDITS_FILE = ".llm-wiki/hepta/discard-edits.json";
+/**
+* The page path in the form that the card map uses: forward slashes, no leading `./`, inside `wiki/`, and a `.md`
+* file. Null for any other text.
+*/
+function discardEditPage(path) {
+	const page = path.trim().replace(/\\/g, "/").replace(/^(\.\/)+/, "");
+	if (!page.startsWith("wiki/") || !page.toLowerCase().endsWith(".md")) return null;
+	if (page.split("/").some((segment) => segment === "" || segment === "." || segment === "..")) return null;
+	return page;
+}
+/** The pages of the file text. An empty text is an empty list. A page is listed once, in the order of the file. */
+function parseDiscardEdits(text) {
+	const body = text.replace(/^﻿/, "");
+	if (body.trim() === "") return {
+		ok: true,
+		pages: []
+	};
+	const unreadable = (why) => ({
+		ok: false,
+		reason: `${DISCARD_EDITS_FILE} ${why}`
+	});
+	let value;
+	try {
+		value = JSON.parse(body);
+	} catch (error) {
+		return unreadable(`is not valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	if (!Array.isArray(value)) return unreadable("must be a JSON array of page paths");
+	const pages = [];
+	for (const item of value) {
+		const page = typeof item === "string" ? discardEditPage(item) : null;
+		if (page === null) return unreadable(`has an item that is not a page path in wiki/: ${JSON.stringify(item)}`);
+		if (!pages.includes(page)) pages.push(page);
+	}
+	return {
+		ok: true,
+		pages
+	};
+}
+/** The list without `page`. */
+function removeDiscardEdit(pages, page) {
+	return pages.filter((other) => other !== page);
+}
+/** The text of the file for a list of pages. */
+function renderDiscardEdits(pages) {
+	return `${JSON.stringify(pages, null, 2)}\n`;
+}
+
+//#endregion
 //#region tools/wiki-tool/src/hepta-files.ts
 /**
 * Where wiki-tool keeps the text of the cards it sends, under `<project>/.llm-wiki/hepta/` (git-ignored).
@@ -3190,6 +3259,10 @@ function isSyncable(page) {
 * file's text to Heptabase, so the text is never typed again. `sent/<card id>.md` is the text of the last write that
 * `hepta record` saw for a card. A user's edit is the difference between the card now and this file, so the text the
 * wiki wrote is never taken for the user's change.
+*
+* `discard-edits.json` lists the pages whose Heptabase edit the user chose to discard in the review tab (spec 6.6). The app
+* writes it (`mech:discard-mirror-edit`), `hepta plan-down` reads it, and `hepta record` takes a page out of it once the
+* card was written. The format is in `src/lib/mechanism-wiki/discard-edits.ts`, which the app shares.
 */
 const HEPTA_DIRECTORY = ".llm-wiki/hepta";
 /** The project-relative path of the outbox file of a page. */
@@ -3199,6 +3272,30 @@ function outboxFile(page) {
 /** The project-relative path of the sent file of a card. */
 function sentFile(cardId) {
 	return `${HEPTA_DIRECTORY}/sent/${cardId}.md`;
+}
+/**
+* The pages whose edit the user chose to discard. A missing file is an empty list. A file that cannot be read or is not a
+* list of page paths throws an Error with a message for the user.
+*/
+function readDiscardEdits(project) {
+	let text;
+	try {
+		text = readFileSync(resolveInProject(project, DISCARD_EDITS_FILE), "utf8");
+	} catch (error) {
+		if (error.code === "ENOENT") return [];
+		throw new Error(`cannot read ${DISCARD_EDITS_FILE}: ${error instanceof Error ? error.message : String(error)}`);
+	}
+	const read = parseDiscardEdits(text);
+	if (!read.ok) throw new Error(read.reason);
+	return read.pages;
+}
+/** Take a page out of the list of discarded edits. True when the page was in the list. The file is written atomically. */
+function clearDiscardEdit(project, page) {
+	const key = discardEditPage(page);
+	const pages = readDiscardEdits(project);
+	if (key === null || !pages.includes(key)) return false;
+	writeFileAtomic(resolveInProject(project, DISCARD_EDITS_FILE), renderDiscardEdits(removeDiscardEdit(pages, key)));
+	return true;
 }
 
 //#endregion
@@ -4331,7 +4428,10 @@ function cardHash(body, properties) {
 * card for ever, and a page that is back and mirrored would be stopped by a card that is gone.
 *
 * A mirror card that the user edited is never overwritten: its page gets a `skip-edited`, whether
-* the page changed or not, until `hepta record` saves the edit as feedback. The edit check needs the whole list
+* the page changed or not, until `hepta record` saves the edit as feedback. The one way round it is the user's own word:
+* a page that is in `.llm-wiki/hepta/discard-edits.json` (the "Discard the edit" option of the review item, spec 6.6) gets the
+* normal `update` instead, also when the page did not change, so the card gets the text of the wiki again. `hepta record`
+* takes the page out of that file when the card was written. The edit check needs the whole list
 * of the mirror tag, so `--mirror-cards` is required once a card is mapped, and a list that is a failed result or
 * stops before its last page is refused. A card of the map that the list does not hold (taken out of the tag, or
 * deleted) gets no action at all and a problem, so a half-read list never makes a write. Every action that writes
@@ -4415,6 +4515,7 @@ function planDown(args) {
 		if (database) options = indexOptions(database.schema);
 	}
 	if (config && options) checkConfiguredProperties(config.heptabase, options, problems);
+	const discards = readDiscards(project, problems);
 	if (problems.length > 0 || !config || !map || !now) return {
 		ok: false,
 		problems
@@ -4430,7 +4531,8 @@ function planDown(args) {
 		properties: config.heptabase.properties,
 		wikiId: config.wiki.id,
 		syncedOn: { start: `${now.toISOString().slice(0, 10)}T00:00:00.000Z` },
-		allowMassRetire: parsed.flags["allow-mass-retire"]
+		allowMassRetire: parsed.flags["allow-mass-retire"],
+		discards
 	});
 	writeOutbox(project, plan.actions);
 	return {
@@ -4480,6 +4582,15 @@ function readMirrorCards(paths, problems) {
 	const trailer = last === null ? null : parsePagingTrailer(last);
 	if (trailer) problems.push(`the last --mirror-cards file has a next page (showing ${trailer.shown[0]}-${trailer.shown[1]} of ${trailer.total}); pass every page of the list`);
 	return cards;
+}
+/** The pages whose edit the user chose to discard. A file that cannot be read is a problem: the user's word must not be lost. */
+function readDiscards(project, problems) {
+	try {
+		return new Set(readDiscardEdits(project));
+	} catch (error) {
+		problems.push(error instanceof Error ? error.message : String(error));
+		return /* @__PURE__ */ new Set();
+	}
 }
 function indexOptions(schema) {
 	const index = /* @__PURE__ */ new Map();
@@ -4601,7 +4712,8 @@ function planPage(input, renderer, page, entry) {
 	});
 	const hash = cardHash(body, pageProperties(page, input));
 	let main;
-	if (entry.status !== "active" || hash !== entry.content_hash) main = entry.status === "active" && onlyLinksChanged(input, renderer, page, entry.content_hash, resolved) ? {
+	const discarded = entry.status === "active" && input.discards.has(page.path);
+	if (entry.status !== "active" || hash !== entry.content_hash || discarded) main = !discarded && entry.status === "active" && onlyLinksChanged(input, renderer, page, entry.content_hash, resolved) ? {
 		op: "relink",
 		page: page.path,
 		cardId: entry.card_id,
@@ -4692,7 +4804,7 @@ function finish(input, path, main, place, notes) {
 			blockers: [`card ${entry.card_id} of ${path} is not in the mirror tag (removed from the tag or deleted?)`],
 			notes: []
 		};
-		checked = editedCard(entry, path, card) ?? main;
+		checked = (input.discards.has(path) ? null : editedCard(entry, path, card)) ?? main;
 		const stamp = card.updatedAt;
 		if (stamp !== void 0) {
 			if (checked?.op === "update" || checked?.op === "relink" || checked?.op === "retire") checked = {
@@ -5089,6 +5201,11 @@ function readContentFiles(paths, cardId, problems) {
 * It is for the `forget` action of plan-down and takes a retired entry only: the card of an active page is not gone.
 * A page that is mirrored again later gets a new card at the next plan.
 *
+* An `updated`, `retired`, or `forgotten` event also takes the page out of `.llm-wiki/hepta/discard-edits.json`, the list of
+* pages whose Heptabase edit the user chose to discard (spec 6.6). The write over the card has used up that choice; a later
+* edit of the card is a new edit. The map is saved first. When the file cannot be read, the event still works and the
+* result says so in `discardWarning`. The result has `"discardCleared": true` when the page was in the list.
+*
 * An `up-decision` event keeps the user's answer to a question of `plan-up` (an `ask` action): `skip` leaves the
 * card out, `this-wiki` makes it a source of this wiki. `plan-up` plans no question for the card while the answer is
 * in the map and the card has no snapshot.
@@ -5105,12 +5222,12 @@ const FEEDBACK_DIRECTORY = "raw/sources/heptabase";
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const HANDLERS = {
 	created: recordCreated,
-	updated: (context) => recordRewritten(context, "updated"),
+	updated: (context) => spendDiscard(context, recordRewritten(context, "updated")),
 	relinked: (context) => recordRewritten(context, "relinked"),
 	"setup-done": recordSetupDone,
 	placed: recordPlaced,
-	retired: recordRetired,
-	forgotten: recordForgotten,
+	retired: (context) => spendDiscard(context, recordRetired(context)),
+	forgotten: (context) => spendDiscard(context, recordForgotten(context)),
 	feedback: recordFeedback,
 	"up-decision": recordUpDecision
 };
@@ -5239,6 +5356,24 @@ var Fields = class {
 		return "";
 	}
 };
+/**
+* The card of the page was written over, or is gone: the user's choice to discard its edit is used up. The map is already
+* saved. A list that cannot be read or written is a warning in the result and never fails the event.
+*/
+function spendDiscard(context, result) {
+	if (!result.ok || typeof result.page !== "string") return result;
+	try {
+		return clearDiscardEdit(context.project, result.page) ? {
+			...result,
+			discardCleared: true
+		} : result;
+	} catch (error) {
+		return {
+			...result,
+			discardWarning: `${error instanceof Error ? error.message : String(error)}; the page stays in the list`
+		};
+	}
+}
 function fail(problems) {
 	return {
 		ok: false,
@@ -5886,10 +6021,6 @@ function knownLenses(project) {
 	} catch {}
 	const stems = names.filter((name) => name.toLowerCase().endsWith(".md")).map((name) => name.slice(0, -3));
 	return [...new Set([...KNOWN_LENSES, ...stems])];
-}
-/** A double-quoted YAML string. JSON text is one, except that YAML also breaks a line at these characters. */
-function yamlString(value) {
-	return JSON.stringify(value).replace(/[\u0085\u2028\u2029]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
 //#endregion
@@ -7625,7 +7756,10 @@ function checkCrossDomain(pages) {
 	}
 	return findings;
 }
-/** The raw file name of a source reference: no `raw/sources/` prefix, forward slashes, lower case. */
+/**
+* The raw file name of a source reference: no `raw/sources/` prefix, forward slashes, lower case. The lint and the
+* review action "Use an existing domain" compare raw names with it.
+*/
 function sourceKey(reference) {
 	const key = reference.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
 	if (key.startsWith(RAW_SOURCES_DIR)) return key.slice(12);
@@ -8613,7 +8747,7 @@ function scalar(value) {
 }
 
 //#endregion
-//#region tools/wiki-tool/src/recut/frontmatter-edit.ts
+//#region src/lib/mechanism-wiki/frontmatter-edit.ts
 /**
 * The in-place edit of the domain keys in the frontmatter of a page.
 *
@@ -8964,7 +9098,7 @@ function readBackProblem(before, after, expected) {
 }
 
 //#endregion
-//#region tools/wiki-tool/src/recut/instances.ts
+//#region src/lib/mechanism-wiki/recut-instance-lines.ts
 /**
 * The `(<domain>)` of the Known instances lines of a mechanism page (ruling U4).
 *

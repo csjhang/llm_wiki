@@ -360,12 +360,13 @@ export function proposedDomainReview(decisions: AnalysisDecisions, sourcePath: s
     type: "new-domain",
     title: `New domain: ${proposal.path}`,
     description: [
-      "The analysis proposes a domain that domains.yaml does not list. Approve it to add the domain.",
+      "The analysis proposes a domain that domains.yaml does not list. Approve it to add the domain, or use a domain that is listed.",
       `PROPOSAL: ${proposal.path} | ${proposal.lens} | ${oneLine(proposal.description)}`,
     ].join("\n"),
     sourcePath,
     options: [
       { label: "Approve", action: "mech:approve-domain" },
+      { label: "Use an existing domain", action: "mech:use-existing-domain" },
       { label: "Skip", action: "Skip" },
     ],
   }

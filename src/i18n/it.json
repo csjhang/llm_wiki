@@ -483,7 +483,12 @@
     "allClear": "Tutto a posto — niente da revisionare",
     "resolvedDivider": "— Risolti —",
     "actionFailed": "L'azione non è riuscita e resta in sospeso. Puoi riprovare: {{error}}",
-    "fusionCopied": "Copiato: {{command}}"
+    "fusionCopied": "Copiato: {{command}}",
+    "useDomainTitle": "Usa un dominio esistente",
+    "useDomainMessage": "Le pagine di questa fonte che usano {{proposed}} useranno il dominio che scegli.",
+    "useDomainLabel": "Dominio di domains.yaml",
+    "useDomainChoose": "Scegli un dominio",
+    "useDomainConfirm": "Usa questo dominio"
   },
   "settings": {
     "title": "Impostazioni",

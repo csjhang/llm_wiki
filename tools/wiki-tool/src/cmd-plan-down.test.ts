@@ -1246,6 +1246,82 @@ describe("hepta plan-down", () => {
     })
   })
 
+  describe("a discarded edit (spec 6.6, mech:discard-mirror-edit)", () => {
+    const DISCARD_FILE = ".llm-wiki/hepta/discard-edits.json"
+    const EDITED_AT = "2026-10-24T09:00:00.000Z"
+
+    /** A mapped page whose card the user edited after the last write. */
+    async function editedProject(extra: Record<string, string> = {}): Promise<{ project: string; list: string }> {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven"), ...extra })
+      await recordCreated(project, (await plan(project)).output.actions[0], id(21))
+      return { project, list: writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: EDITED_AT }]) }
+    }
+
+    it("discard-edit makes plan-down plan an update", async () => {
+      const { project, list } = await editedProject()
+      expect((await plan(project, ["--mirror-cards", list])).output.actions.map((a) => a.op)).toEqual(["skip-edited"])
+
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([MECHANISM_PATH]))
+      const result = await plan(project, ["--mirror-cards", list])
+      expect(result.exitCode).toBe(0)
+      // The page did not change, and the card still gets the text of the wiki: the edit is gone.
+      expect(result.output.actions).toEqual([
+        expect.objectContaining({ op: "update", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: EDITED_AT, title: "Event Driven" }),
+      ])
+      const [action] = result.output.actions
+      expect(action.op === "update" && readFileSync(join(project, action.bodyFile), "utf8")).toBe(action.op === "update" ? action.body : "")
+    })
+
+    it("plans the update also after the edit was saved as feedback", async () => {
+      const { project, list } = await editedProject()
+      const card = cardFile(project, "card.json", "# Event Driven\n\nEdited.")
+      await record(project, { type: "feedback", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: EDITED_AT }, NOW, [card])
+      // The edit is handled, so there is no skip-edited, and the page did not change: no action at all.
+      expect((await plan(project, ["--mirror-cards", list])).output.actions).toEqual([])
+
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([MECHANISM_PATH]))
+      expect((await plan(project, ["--mirror-cards", list])).output.actions.map((a) => a.op)).toEqual(["update"])
+    })
+
+    it("plans one update for a listed page that also changed", async () => {
+      const { project, list } = await editedProject()
+      writeProjectFile(project, MECHANISM_PATH, mechanism("Event Driven", "Changed body."))
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([MECHANISM_PATH]))
+      const { actions } = (await plan(project, ["--mirror-cards", list])).output
+      expect(actions.map((a) => a.op)).toEqual(["update"])
+      expect(actions[0].op === "update" && actions[0].body).toContain("Changed body.")
+    })
+
+    it("still gives skip-edited to a page that is not listed", async () => {
+      const other = "wiki/mechanisms/other.md"
+      const { project, list } = await editedProject()
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([other]))
+      expect((await plan(project, ["--mirror-cards", list])).output.actions.map((a) => a.op)).toEqual(["skip-edited"])
+    })
+
+    it("plans a create for a listed page that has no card yet", async () => {
+      const project = makeProject({ [MECHANISM_PATH]: mechanism("Event Driven") })
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([MECHANISM_PATH]))
+      expect((await plan(project)).output.actions.map((a) => a.op)).toEqual(["create"])
+    })
+
+    it("stops with a problem when the file is not a list of page paths", async () => {
+      const { project, list } = await editedProject()
+      for (const text of ["{", '{"pages": []}', '["raw/sources/a.md"]']) {
+        writeProjectFile(project, DISCARD_FILE, text)
+        const result = await plan(project, ["--mirror-cards", list])
+        expect(result.exitCode, text).toBe(2)
+        expect(JSON.stringify(result.output.problems), text).toContain("discard-edits.json")
+      }
+    })
+
+    it("treats an empty list as no discard", async () => {
+      const { project, list } = await editedProject()
+      writeProjectFile(project, DISCARD_FILE, "[]")
+      expect((await plan(project, ["--mirror-cards", list])).output.actions.map((a) => a.op)).toEqual(["skip-edited"])
+    })
+  })
+
   describe("the outbox", () => {
     const outboxPath = (page: string): string => `.llm-wiki/hepta/outbox/${contentHash(page)}.md`
     const textOf = (project: string, page: string): string => readFileSync(join(project, outboxPath(page)), "utf8")

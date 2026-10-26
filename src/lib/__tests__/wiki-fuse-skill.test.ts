@@ -170,11 +170,14 @@ describe("wiki-fuse skill: option actions of review items (ruling S17)", () => {
     }
   })
 
-  it("keeps wiki-sync mirror-edited items and verify items on the default Dismiss button", () => {
+  it("gives wiki-sync mirror-edited items the two options of spec 6.6 (ruling W4), both accepted by the review API", () => {
     const steps = readFileSync(join(SKILLS_DIR, "wiki-sync/reference/mcp-steps.md"), "utf8")
     const mirror = jsonBlocks(steps, "mcp-steps.md").find((block) => block.json.type === "mirror-edited")
     expect(mirror, "mirror-edited call").toBeDefined()
-    expect(mirror?.json.options).toBeUndefined()
+    expect(mirror?.json.options).toEqual([
+      { label: "Keep as feedback", action: "dismiss" },
+      { label: "Discard the edit", action: "mech:discard-mirror-edit" },
+    ])
   })
 
   it("sends a new-mechanism item to the reading wiki only from a work wiki", () => {

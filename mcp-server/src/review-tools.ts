@@ -44,15 +44,24 @@ export const REVIEW_TYPES = [
  */
 export const DISMISSAL_ACTION_WORDS = ["skip", "dismiss", "ignore", "跳过", "忽略", "approve", "keep existing", "no"] as const
 
-/** The `mech:` actions that an option may have. The other `mech:` actions write files, so the app refuses them. */
-export const MECHANISM_ACTIONS = ["mech:propose-mechanism", "mech:start-fusion", "mech:dismiss-fusion"] as const
+/**
+ * The `mech:` actions that an option may have. The other `mech:` actions write pages or sources, so the app refuses them.
+ * `mech:discard-mirror-edit` changes no page and no source: it adds a page of `wiki/` to a list that the `wiki-tool` reads,
+ * and the next sync writes the text of the wiki over the Heptabase card of that page (ruling S17, spec 6.6).
+ */
+export const MECHANISM_ACTIONS = [
+  "mech:propose-mechanism",
+  "mech:start-fusion",
+  "mech:dismiss-fusion",
+  "mech:discard-mirror-edit",
+] as const
 
 const OPEN_ACTION_PREFIX = "open:"
 
 /** What an option `action` may be, as text for a tool description and for an error. */
 export const ADD_REVIEW_ACTION_HELP =
   "What the button does. It must be a dismissal word (skip, dismiss, ignore, approve, keep existing, no, 跳过, 忽略), " +
-  "mech:propose-mechanism, mech:start-fusion, mech:dismiss-fusion, or open:wiki/<path> (a path in wiki/ with no .. " +
+  "mech:propose-mechanism, mech:start-fusion, mech:dismiss-fusion, mech:discard-mirror-edit, or open:wiki/<path> (a path in wiki/ with no .. " +
   "segment). The app refuses every other action, because the Review tab runs it with the rights of the app."
 
 /** A project-relative path in `wiki/`. The prefix rule also keeps out a leading `/` and a drive letter. */

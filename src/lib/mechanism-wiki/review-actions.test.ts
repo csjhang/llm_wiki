@@ -4,13 +4,26 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTempProject, fileExists, readFileRaw, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
+import { buildActionCommitMessage } from "@/lib/commit-message"
+import { readDiscardEdits } from "../../../tools/wiki-tool/src/hepta-files"
 import { MECHANISM_TEMPLATE_FILES } from "@/lib/mechanism-template"
 import { parseDomainsYaml } from "@/lib/wiki-config/domains"
 import type { ReviewItem } from "@/stores/review-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import type { MechanismContext } from "./context"
+import { domainIndexPath } from "./domain-index-render"
 
-vi.mock("@/commands/fs", () => realFs)
+/** A test can make the n-th call of `writeFile` fail (n counts from 1; 0 means never). */
+const writes = vi.hoisted(() => ({ failAt: 0, count: 0 }))
+
+vi.mock("@/commands/fs", () => ({
+  ...realFs,
+  writeFile: async (path: string, contents: string): Promise<void> => {
+    writes.count += 1
+    if (writes.failAt === writes.count) throw new Error("disk full")
+    return realFs.writeFile(path, contents)
+  },
+}))
 
 /** The embedding module talks to a vector store; the tests only look at the calls. */
 const embedding = vi.hoisted(() => ({ embedPage: vi.fn(async (..._args: unknown[]) => true) }))
@@ -48,6 +61,8 @@ beforeEach(async () => {
   reading = `${root}/reading`
   work = `${root}/work`
   loader.override = undefined
+  writes.failAt = 0
+  writes.count = 0
   embedding.embedPage.mockClear()
 })
 
@@ -1353,5 +1368,290 @@ describe("fusion candidates", () => {
       expect(await fileExists(`${reading}/${DISMISSED}`)).toBe(false)
       expect(resolveItem).not.toHaveBeenCalled()
     })
+  })
+})
+
+describe("mech:use-existing-domain", () => {
+  const PROPOSED = "hardware/proposed"
+  const CHOSEN = "hardware/async-circuits"
+  const OTHER = "ai/architecture"
+
+  const fm = (lines: string[], body = "Body."): string => ["---", ...lines, "---", "", body, ""].join("\n")
+
+  const PAGES: Record<string, string> = {
+    "wiki/sources/note.md": fm(["type: source", "title: Note", `domain: ${PROPOSED}`, 'sources: ["note.md"]'], "# Note"),
+    "wiki/concepts/alpha.md": fm(
+      ["type: concept", "title: Alpha", `domain: ${PROPOSED}`, 'sources: ["note.md"]', `also: [${OTHER}]`],
+      "# Alpha",
+    ),
+    "wiki/entities/beta.md": fm(["type: entity", "title: Beta", `domain: ${OTHER}`, 'sources: ["note.md"]', `also: [${PROPOSED}]`], "# Beta"),
+    "wiki/concepts/gamma.md": fm(["type: concept", "title: Gamma", `domain: ${PROPOSED}`, 'sources: ["elsewhere.md"]'], "# Gamma"),
+    "wiki/mechanisms/handshake.md": [
+      "---",
+      "type: mechanism",
+      "title: Handshake",
+      "---",
+      "",
+      "# Handshake",
+      "",
+      "## Known instances",
+      "",
+      `- [[alpha]] (${PROPOSED}): this ingest`,
+      `- [[gamma]] (${PROPOSED}): another ingest`,
+      `- [[beta]] (${OTHER}): not the proposed domain`,
+      "",
+    ].join("\n"),
+  }
+  const CHANGED = ["wiki/concepts/alpha.md", "wiki/entities/beta.md", "wiki/mechanisms/handshake.md", "wiki/sources/note.md"]
+
+  async function setUpIngest(overrides: Record<string, string> = {}): Promise<void> {
+    await setUpReading()
+    await setUpWork()
+    for (const [path, text] of Object.entries({ ...PAGES, ...overrides })) await writeFileRaw(`${work}/${path}`, text)
+  }
+
+  function domainItem(patch: Partial<ReviewItem> = {}): ReviewItem {
+    return makeReview({
+      type: "new-domain",
+      title: `New domain: ${PROPOSED}`,
+      description: `The analysis proposes a domain.\nPROPOSAL: ${PROPOSED} | hardware | Circuits with a new idea`,
+      sourcePath: "raw/sources/note.md",
+      options: [
+        { label: "Approve", action: "mech:approve-domain" },
+        { label: "Use an existing domain", action: "mech:use-existing-domain" },
+        { label: "Skip", action: "Skip" },
+      ],
+      ...patch,
+    })
+  }
+
+  function chooser(choice: string | null) {
+    return vi.fn(async (_domains: string[], _proposed: string): Promise<string | null> => choice)
+  }
+
+  const read = (path: string): Promise<string> => readFileRaw(`${work}/${path}`)
+
+  it("use-existing-domain rewrites the ingest pages and commits", async () => {
+    await setUpIngest()
+    const chooseDomain = chooser(CHOSEN)
+    const commit = vi.fn(async (_paths: string[], _message: string) => {})
+    const { ctx, resolveItem, refresh } = makeCtx(work, { chooseDomain, commit })
+
+    expect(await handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", ctx)).toBe(true)
+
+    // The picker got the domains of domains.yaml and the proposed domain.
+    expect(chooseDomain).toHaveBeenCalledWith(["hardware/async-circuits", "ai/architecture"], PROPOSED)
+
+    expect(await read("wiki/sources/note.md")).toBe(PAGES["wiki/sources/note.md"].replace(`domain: ${PROPOSED}`, `domain: ${CHOSEN}`))
+    expect(await read("wiki/concepts/alpha.md")).toBe(PAGES["wiki/concepts/alpha.md"].replace(`domain: ${PROPOSED}`, `domain: ${CHOSEN}`))
+    expect(await read("wiki/entities/beta.md")).toBe(PAGES["wiki/entities/beta.md"].replace(`also: [${PROPOSED}]`, `also: [${CHOSEN}]`))
+    expect(await read("wiki/mechanisms/handshake.md")).toBe(
+      PAGES["wiki/mechanisms/handshake.md"].replace(`- [[alpha]] (${PROPOSED})`, `- [[alpha]] (${CHOSEN})`),
+    )
+    // A page of another ingest with the same proposed domain is not touched.
+    expect(await read("wiki/concepts/gamma.md")).toBe(PAGES["wiki/concepts/gamma.md"])
+
+    // The domain index is rebuilt: the chosen domain lists the pages of the ingest.
+    const index = await read(domainIndexPath(CHOSEN))
+    expect(index).toContain("Alpha")
+    expect(index).not.toContain("Gamma")
+
+    // One commit with the message of a recut, the changed pages in its body, and the pages plus the index files as paths.
+    expect(commit).toHaveBeenCalledTimes(1)
+    const [paths, message] = commit.mock.calls[0]
+    expect(message).toBe(buildActionCommitMessage("recut", `use ${CHOSEN} for ${PROPOSED}`, CHANGED))
+    expect(message.split("\n")[0]).toBe(`recut: use ${CHOSEN} for ${PROPOSED} (4 pages)`)
+    expect(paths).toEqual(expect.arrayContaining([...CHANGED, domainIndexPath(CHOSEN), "wiki/index.md"]))
+    expect(paths).not.toContain("wiki/concepts/gamma.md")
+
+    expect(resolveItem).toHaveBeenCalledWith("review-abc", `Used ${CHOSEN}`)
+    expect(refresh).toHaveBeenCalledTimes(1)
+  })
+
+  it("compares the raw name of an absolute source path with the sources of the pages", async () => {
+    await setUpIngest()
+    const { ctx, resolveItem } = makeCtx(work, { chooseDomain: chooser(CHOSEN) })
+    await handleMechanismReviewAction(domainItem({ sourcePath: `${work}/raw/sources/note.md` }), "mech:use-existing-domain", ctx)
+    expect(await read("wiki/concepts/alpha.md")).toContain(`domain: ${CHOSEN}`)
+    expect(resolveItem).toHaveBeenCalledTimes(1)
+  })
+
+  it("changes nothing and keeps the item open when the user cancels the picker", async () => {
+    await setUpIngest()
+    const commit = vi.fn(async () => {})
+    const { ctx, resolveItem, refresh } = makeCtx(work, { chooseDomain: chooser(null), commit })
+
+    expect(await handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", ctx)).toBe(true)
+
+    for (const [path, text] of Object.entries(PAGES)) expect(await read(path), path).toBe(text)
+    expect(await fileExists(`${work}/${domainIndexPath(CHOSEN)}`)).toBe(false)
+    expect(commit).not.toHaveBeenCalled()
+    expect(resolveItem).not.toHaveBeenCalled()
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
+  it("writes no page and commits nothing when a page cannot be edited, and the error names the page", async () => {
+    await setUpIngest({
+      "wiki/concepts/flow.md": fm([`{type: concept, domain: ${PROPOSED}, sources: [note.md]}`]),
+    })
+    const commit = vi.fn(async () => {})
+    const { ctx, resolveItem } = makeCtx(work, { chooseDomain: chooser(CHOSEN), commit })
+
+    await expect(handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", ctx)).rejects.toThrow(/wiki\/concepts\/flow\.md/)
+
+    for (const [path, text] of Object.entries(PAGES)) expect(await read(path), path).toBe(text)
+    expect(await fileExists(`${work}/${domainIndexPath(CHOSEN)}`)).toBe(false)
+    expect(commit).not.toHaveBeenCalled()
+    expect(resolveItem).not.toHaveBeenCalled()
+  })
+
+  it("puts the pages back when a write fails, and keeps the item open", async () => {
+    await setUpIngest()
+    const commit = vi.fn(async () => {})
+    const { ctx, resolveItem } = makeCtx(work, { chooseDomain: chooser(CHOSEN), commit })
+    writes.count = 0
+    // The third page write fails: the first two are written, then put back.
+    writes.failAt = 3
+
+    await expect(handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", ctx)).rejects.toThrow(/disk full/)
+
+    for (const [path, text] of Object.entries(PAGES)) expect(await read(path), path).toBe(text)
+    expect(commit).not.toHaveBeenCalled()
+    expect(resolveItem).not.toHaveBeenCalled()
+  })
+
+  it("refuses a chosen domain that domains.yaml does not list, or that is the proposed one", async () => {
+    await setUpIngest()
+    for (const choice of ["business/franchising", PROPOSED, ""]) {
+      const { ctx, resolveItem } = makeCtx(work, { chooseDomain: chooser(choice) })
+      await expect(handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", ctx), choice).rejects.toThrow(/domains\.yaml/)
+      expect(resolveItem).not.toHaveBeenCalled()
+    }
+    for (const [path, text] of Object.entries(PAGES)) expect(await read(path), path).toBe(text)
+  })
+
+  it("throws when this screen has no picker, or the item has no PROPOSAL line", async () => {
+    await setUpIngest()
+    const noPicker = makeCtx(work).ctx
+    await expect(handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", noPicker)).rejects.toThrow(/choose a domain/i)
+    const { ctx } = makeCtx(work, { chooseDomain: chooser(CHOSEN) })
+    await expect(
+      handleMechanismReviewAction(domainItem({ description: "No proposal here." }), "mech:use-existing-domain", ctx),
+    ).rejects.toThrow(/PROPOSAL/)
+    await expect(handleMechanismReviewAction(domainItem({ sourcePath: undefined }), "mech:use-existing-domain", ctx)).rejects.toThrow(/source/)
+    await expect(handleMechanismReviewAction(undefined, "mech:use-existing-domain", ctx)).rejects.toThrow(/no longer in the review list/)
+  })
+
+  it("throws when the project has no domains to choose from", async () => {
+    await setUpIngest()
+    await writeFileRaw(`${work}/domains.yaml`, "version: 1\ndomains: {}\n")
+    const chooseDomain = chooser(CHOSEN)
+    const { ctx } = makeCtx(work, { chooseDomain })
+    await expect(handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", ctx)).rejects.toThrow(/lists no domain/)
+    expect(chooseDomain).not.toHaveBeenCalled()
+  })
+
+  it("throws, and keeps the item open, when no page of the ingest names the proposed domain", async () => {
+    await setUpIngest()
+    const { ctx, resolveItem } = makeCtx(work, { chooseDomain: chooser(CHOSEN) })
+    await expect(
+      handleMechanismReviewAction(domainItem({ sourcePath: "raw/sources/unknown.md" }), "mech:use-existing-domain", ctx),
+    ).rejects.toThrow(/nothing to change/)
+    expect(resolveItem).not.toHaveBeenCalled()
+  })
+
+  it("works without version history, and a failed commit does not fail the action", async () => {
+    await setUpIngest()
+    const first = makeCtx(work, { chooseDomain: chooser(CHOSEN) })
+    await handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", first.ctx)
+    expect(first.resolveItem).toHaveBeenCalledTimes(1)
+
+    await setUpIngest()
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    const commit = vi.fn(async () => {
+      throw new Error("git is busy")
+    })
+    const second = makeCtx(work, { chooseDomain: chooser(CHOSEN), commit })
+    await handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", second.ctx)
+    expect(commit).toHaveBeenCalledTimes(1)
+    expect(second.resolveItem).toHaveBeenCalledTimes(1)
+    expect(warn).toHaveBeenCalled()
+  })
+})
+
+describe("mech:discard-mirror-edit", () => {
+  const FILE = ".llm-wiki/hepta/discard-edits.json"
+  const PAGE = "wiki/mechanisms/event-driven.md"
+
+  function mirrorItem(patch: Partial<ReviewItem> = {}): ReviewItem {
+    return makeReview({
+      type: "mirror-edited",
+      title: `Mirror card edited: ${PAGE} (feedback-1.md)`,
+      description: "The user edited the mirror card of this page in Heptabase.",
+      affectedPages: [PAGE],
+      options: [
+        { label: "Keep as feedback", action: "dismiss" },
+        { label: "Discard the edit", action: "mech:discard-mirror-edit" },
+      ],
+      ...patch,
+    })
+  }
+
+  const listed = async (): Promise<unknown> => JSON.parse(await readFileRaw(`${work}/${FILE}`))
+
+  it("adds the page to the list of discarded edits and resolves the item", async () => {
+    await setUpReading()
+    await setUpWork()
+    const { ctx, resolveItem } = makeCtx(work)
+
+    expect(await handleMechanismReviewAction(mirrorItem(), "mech:discard-mirror-edit", ctx)).toBe(true)
+
+    expect(await listed()).toEqual([PAGE])
+    expect(resolveItem).toHaveBeenCalledWith("review-abc", "Edit discarded")
+    // The wiki-tool reads the file the app wrote.
+    expect(readDiscardEdits(work)).toEqual([PAGE])
+  })
+
+  it("keeps the pages that are in the list, adds a page once, and ignores the form of the path", async () => {
+    await setUpReading()
+    await setUpWork()
+    await writeFileRaw(`${work}/${FILE}`, JSON.stringify(["wiki/concepts/other.md"]))
+    const { ctx } = makeCtx(work)
+
+    await handleMechanismReviewAction(mirrorItem(), "mech:discard-mirror-edit", ctx)
+    await handleMechanismReviewAction(mirrorItem({ affectedPages: [`./${PAGE.replace(/\//g, "\\")}`] }), "mech:discard-mirror-edit", ctx)
+
+    expect(await listed()).toEqual(["wiki/concepts/other.md", PAGE])
+  })
+
+  it("throws, and writes nothing, for an item without a page, a page outside wiki/, or a list that is not valid", async () => {
+    await setUpReading()
+    await setUpWork()
+    const { ctx, resolveItem } = makeCtx(work)
+
+    for (const affectedPages of [undefined, [], ["  "], ["raw/sources/a.md"], ["wiki/../raw/a.md"]]) {
+      await expect(handleMechanismReviewAction(mirrorItem({ affectedPages }), "mech:discard-mirror-edit", ctx), String(affectedPages)).rejects.toThrow(
+        /page/,
+      )
+    }
+    expect(await fileExists(`${work}/${FILE}`)).toBe(false)
+
+    await writeFileRaw(`${work}/${FILE}`, "{")
+    await expect(handleMechanismReviewAction(mirrorItem(), "mech:discard-mirror-edit", ctx)).rejects.toThrow(/discard-edits\.json/)
+    expect(await readFileRaw(`${work}/${FILE}`)).toBe("{")
+    expect(resolveItem).not.toHaveBeenCalled()
+  })
+
+  it("two discards at once keep both pages", async () => {
+    await setUpReading()
+    await setUpWork()
+    const { ctx } = makeCtx(work)
+    const second = "wiki/concepts/other.md"
+    await Promise.all([
+      handleMechanismReviewAction(mirrorItem(), "mech:discard-mirror-edit", ctx),
+      handleMechanismReviewAction(mirrorItem({ id: "review-def", affectedPages: [second] }), "mech:discard-mirror-edit", ctx),
+    ])
+    expect((await listed()) as string[]).toHaveLength(2)
+    expect(await listed()).toEqual(expect.arrayContaining([PAGE, second]))
   })
 })

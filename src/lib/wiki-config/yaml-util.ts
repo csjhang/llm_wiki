@@ -87,3 +87,11 @@ export function readUuid(value: unknown, path: string, issues: ConfigIssue[]): s
   issues.push({ path, message: "must be a lowercase UUID (8-4-4-4-12 hex digits)" })
   return ""
 }
+
+/**
+ * A double-quoted YAML string. JSON text is one, except that YAML also breaks a line at these characters. The `wiki-tool`
+ * and the app both write frontmatter with it, so there is one copy.
+ */
+export function yamlString(value: string): string {
+  return JSON.stringify(value).replace(/[\u0085\u2028\u2029]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)
+}

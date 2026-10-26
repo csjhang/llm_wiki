@@ -4,7 +4,7 @@
  * must see the new domains and no old one. Domains and slugs are placeholders.
  */
 import { describe, expect, it, vi } from "vitest"
-import { rewriteInstanceLines } from "../../../tools/wiki-tool/src/recut/instances"
+import { rewriteInstanceLines } from "./recut-instance-lines"
 
 // fusion-candidates.ts reads files through the Tauri bridge; this test reads no file.
 vi.mock("@/commands/fs", () => ({ readFile: vi.fn(), writeFileAtomic: vi.fn() }))

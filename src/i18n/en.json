@@ -483,7 +483,12 @@
     "allClear": "All clear — nothing to review",
     "resolvedDivider": "— Resolved —",
     "actionFailed": "The action failed and remains pending. You can retry: {{error}}",
-    "fusionCopied": "Copied: {{command}}"
+    "fusionCopied": "Copied: {{command}}",
+    "useDomainTitle": "Use an existing domain",
+    "useDomainMessage": "The pages of this source that use {{proposed}} will use the domain that you choose.",
+    "useDomainLabel": "Domain of domains.yaml",
+    "useDomainChoose": "Choose a domain",
+    "useDomainConfirm": "Use this domain"
   },
   "settings": {
     "title": "Settings",
