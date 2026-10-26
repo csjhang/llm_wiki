@@ -449,6 +449,88 @@ describe("mergeDuplicateGroup", () => {
     ])
   })
 
+  it("keeps the instances and lenses of both mechanism pages in a merge", async () => {
+    const pageA = PAGE(
+      'type: mechanism\ntitle: Event-driven computing\nlenses: [hardware]\ninstances: [async-handshake]\nsources: ["a.md"]',
+      "body a",
+    )
+    const pageB = PAGE(
+      'type: mechanism\ntitle: Event driven computation\nlenses: [ai, hardware]\ninstances: [spiking-network, async-handshake]\nsources: ["b.md"]',
+      "body b",
+    )
+    // The model returns a page with one instance and one lens only.
+    const llm = vi
+      .fn()
+      .mockResolvedValue(
+        PAGE("type: mechanism\ntitle: Event-driven computing\nlenses: [hardware]\ninstances: [async-handshake]", "merged"),
+      )
+
+    const result = await mergeDuplicateGroup(
+      {
+        group: [
+          { slug: "event-driven-computing", path: "wiki/mechanisms/event-driven-computing.md", content: pageA },
+          { slug: "event-driven-computation", path: "wiki/mechanisms/event-driven-computation.md", content: pageB },
+        ],
+        canonicalSlug: "event-driven-computing",
+        otherWikiPages: [],
+      },
+      llm,
+      { today: FIXED_TODAY },
+    )
+
+    expect(parseFrontmatterArray(result.canonicalContent, "instances").sort()).toEqual(
+      ["async-handshake", "spiking-network"].sort(),
+    )
+    expect(parseFrontmatterArray(result.canonicalContent, "lenses").sort()).toEqual(["ai", "hardware"].sort())
+  })
+
+  it("keeps also_from entry points of both source pages in a merge", async () => {
+    const pageA = PAGE('type: source\ntitle: A\nalso_from: ["raw/sources/a-copy.md"]\nsources: ["a.md"]', "body a")
+    const pageB = PAGE('type: source\ntitle: B\nalso_from: ["raw/sources/b-copy.md"]\nsources: ["b.md"]', "body b")
+    const llm = vi.fn().mockResolvedValue(PAGE("type: source\ntitle: A", "merged"))
+
+    const result = await mergeDuplicateGroup(
+      {
+        group: [
+          { slug: "a", path: "wiki/sources/a.md", content: pageA },
+          { slug: "b", path: "wiki/sources/b.md", content: pageB },
+        ],
+        canonicalSlug: "a",
+        otherWikiPages: [],
+      },
+      llm,
+      { today: FIXED_TODAY },
+    )
+
+    expect(parseFrontmatterArray(result.canonicalContent, "also_from").sort()).toEqual(
+      ["raw/sources/a-copy.md", "raw/sources/b-copy.md"].sort(),
+    )
+  })
+
+  it("gives a plain page the same frontmatter as before (no instances, lenses, or also_from added)", async () => {
+    const pageA = PAGE("type: entity\ntitle: A\ntags: [x]\nsources: [\"a.md\"]", "body a")
+    const pageB = PAGE("type: entity\ntitle: B\ntags: [y]\nsources: [\"b.md\"]", "body b")
+    const llmOutput = PAGE("type: entity\ntitle: A\ntags: [x]\nsources: [\"a.md\"]", "merged")
+    const llm = vi.fn().mockResolvedValue(llmOutput)
+
+    const result = await mergeDuplicateGroup(
+      {
+        group: [
+          { slug: "a", path: "wiki/entities/a.md", content: pageA },
+          { slug: "b", path: "wiki/entities/b.md", content: pageB },
+        ],
+        canonicalSlug: "a",
+        otherWikiPages: [],
+      },
+      llm,
+      { today: FIXED_TODAY },
+    )
+
+    expect(result.canonicalContent).toBe(
+      PAGE('type: entity\ntitle: A\ntags: ["y", "x"]\nsources: ["b.md", "a.md"]\nupdated: 2026-04-30', "merged"),
+    )
+  })
+
   it("rewrites cross-references in other wiki pages", async () => {
     const pageA = PAGE("type: entity\ntitle: A\nrelated: [bar]", "body a")
     const pageB = PAGE("type: entity\ntitle: B\nrelated: [bar]", "body b")

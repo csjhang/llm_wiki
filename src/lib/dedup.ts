@@ -330,12 +330,17 @@ Rules:
 - Frontmatter: keep the standard fields (type, title, created, updated, tags, related, sources). The caller will overwrite sources / tags / related / updated with deterministic unions afterward — your job is to produce a sensible body and reasonable frontmatter shape.
 - Pick the most descriptive title. If the inputs use different languages, prefer the language that matches the majority of the body content.`
 
-const FIELDS_TO_UNION = ["sources", "tags", "related"] as const
+/**
+ * The list fields that a merge keeps from every page of the group. `instances` and `lenses` are the
+ * lists of a mechanism page, and `also_from` is the list of other entry points of a source page
+ * (ruling T18). A page without a field adds nothing, so a plain page merges as before.
+ */
+const FIELDS_TO_UNION = ["sources", "tags", "related", "instances", "lenses", "also_from"] as const
 
 /**
  * Compute everything needed to merge a confirmed duplicate group:
  *   - LLM call to produce the merged canonical body
- *   - Deterministic frontmatter union (sources, tags, related)
+ *   - Deterministic frontmatter union (sources, tags, related, instances, lenses, also_from)
  *   - Canonical slug enforcement on title path
  *   - Cross-reference rewrites across every other wiki page
  *   - Backup snapshot of all touched files
