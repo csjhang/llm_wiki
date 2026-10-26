@@ -122,11 +122,15 @@ describe("materializeSampleWiki", () => {
     const target = await makeTempDir()
     await materializeSampleWiki(target)
 
-    // Template files are present. The agent entry files are there, and the sample README is not.
+    // Template files are present. The agent entry files are there. README.md is the README of the
+    // template, not the sample README. The permission allowlist of the skills is there too.
     expect(existsSync(join(target, "CLAUDE.md"))).toBe(true)
     expect(existsSync(join(target, "schema.md"))).toBe(true)
     expect(existsSync(join(target, "AGENTS.md"))).toBe(true)
-    expect(existsSync(join(target, "README.md"))).toBe(false)
+    expect(readFileSync(join(target, "README.md"), "utf-8")).toBe(
+      readFileSync(join(REPO_ROOT, "templates", "mechanism-wiki", "README.md"), "utf-8"),
+    )
+    expect(existsSync(join(target, ".claude", "settings.json"))).toBe(true)
     expect(existsSync(join(target, "lenses", "hardware.md"))).toBe(true)
     expect(existsSync(join(target, "schema", "page-types", "source.md"))).toBe(true)
 

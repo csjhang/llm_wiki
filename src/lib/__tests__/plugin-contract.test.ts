@@ -32,6 +32,14 @@ function licenseSpdxId(): string {
   throw new Error("Unrecognized root LICENSE")
 }
 
+/** Paths, relative to the repo root with "/" separators, of every file under a folder of the repo, dot folders included. */
+function filesUnder(folder: string): string[] {
+  return readdirSync(join(REPO_ROOT, folder), { withFileTypes: true }).flatMap((entry) => {
+    const relative = `${folder}/${entry.name}`
+    return entry.isDirectory() ? filesUnder(relative) : [relative]
+  })
+}
+
 function skillFolders(): string[] {
   if (!existsSync(SKILLS_DIR)) return []
   return readdirSync(SKILLS_DIR)
@@ -105,6 +113,28 @@ describe("llm-wiki plugin contract", () => {
     expect(statSync(join(SKILLS_DIR, "wiki")).isDirectory()).toBe(true)
   })
 
+  it("the wiki menu lists every skill with one line, in panel order, itself last, and runs the choice with the Skill tool", () => {
+    const text = readFileSync(join(SKILLS_DIR, "wiki", "SKILL.md"), "utf8")
+    const rows = [...text.matchAll(/^\|\s*`([a-z-]+)`\s*\|\s*([^|]+?)\s*\|\s*$/gm)].map((match) => ({
+      name: match[1],
+      summary: match[2],
+    }))
+    const panel = yaml.load(readFileSync(join(PLUGIN_DIR, "panel.yaml"), "utf8")) as {
+      buttons: Array<{ skill: string }>
+    }
+    // The skills of the panel come first, in the order of the panel. The menu skill is the last row.
+    expect(rows.map((row) => row.name)).toEqual([...panel.buttons.map((button) => button.skill), "wiki"])
+    // A skill folder without a row, or a row without a folder, fails here.
+    expect(rows.map((row) => row.name).sort()).toEqual(skillFolders())
+    for (const row of rows) {
+      expect(row.summary.split(/\s+/).length, `${row.name}: one short line`).toBeLessThanOrEqual(25)
+      expect(row.summary.length, `${row.name}: summary`).toBeGreaterThan(0)
+    }
+    // The menu runs the skill that the user selects with the Skill tool, and does not follow its file by hand.
+    expect(text).toMatch(/Skill tool/)
+    expect(text).toMatch(/Do not (?:read|follow)[^.]*SKILL\.md/)
+  })
+
   it("every panel entry names an existing skill folder", () => {
     const panel = yaml.load(readFileSync(join(PLUGIN_DIR, "panel.yaml"), "utf8")) as {
       buttons: Array<{ skill: string }>
@@ -171,12 +201,21 @@ describe("llm-wiki plugin contract", () => {
   })
 
   it("no template file is git-ignored", () => {
-    const paths = ["templates/mechanism-wiki/docs/glossary.md", "templates/mechanism-wiki/AGENTS.md"]
+    // Every file under templates/, examples/, and plugins/ ships with the repo. A dot folder such as
+    // `.claude/` is easy to lose to a broad ignore rule, so the check covers each file on disk.
+    const files = ["templates", "examples", "plugins"].flatMap((folder) => filesUnder(folder))
+    // The guard fails when the walk stops finding the files that most need the check.
+    expect(files).toContain("templates/mechanism-wiki/.claude/settings.json")
+    expect(files).toContain("templates/mechanism-wiki/docs/glossary.md")
+    expect(files).toContain("templates/mechanism-wiki/AGENTS.md")
+    expect(files).toContain("plugins/llm-wiki/skills/wiki/SKILL.md")
+    expect(files).toContain("examples/sample-wiki/domains.yaml")
     let ignored = ""
     try {
-      ignored = execFileSync("git", ["check-ignore", "--no-index", ...paths], {
+      ignored = execFileSync("git", ["check-ignore", "--no-index", "--stdin"], {
         cwd: REPO_ROOT,
         encoding: "utf8",
+        input: files.join("\n"),
       })
     } catch (error) {
       // Exit code 1 means no path is ignored. That is the passing case.

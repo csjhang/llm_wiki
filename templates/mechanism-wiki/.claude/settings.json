@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__plugin_heptabase_heptabase__*",
+      "mcp__Heptabase",
+      "mcp__llm-wiki",
+      "Bash(node */scripts/wiki-tool.mjs *)",
+      "Bash(node */skills/wiki-undo/scripts/undo.mjs *)",
+      "Bash(git *)",
+      "Bash(mkdir -p */.llm-wiki/hepta*)",
+      "Bash(cp * */.llm-wiki/hepta/*)",
+      "Edit(/.llm-wiki/**)"
+    ]
+  }
+}

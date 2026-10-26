@@ -1242,6 +1242,80 @@ describe("mechanism template: sentence length", () => {
   })
 })
 
+/**
+ * The permission allowlist of the template (`.claude/settings.json`). A background run of a skill
+ * (`claude -p`) cannot ask, so a tool that is not on this list is denied. The list names only what
+ * the skills need. Every rule was checked against the Claude Code docs (permissions and MCP):
+ * - `mcp__<server>` allows every tool of that server, and `mcp__<server>__*` does the same for one server.
+ * - The tools of a plugin server are named `mcp__plugin_<plugin>_<server>__<tool>`.
+ * - A `*` can be anywhere in a Bash rule and matches spaces.
+ * - `Edit(/x/**)` is anchored at the project folder in a project settings file, and an Edit rule covers Write.
+ */
+const ALLOWED_PERMISSIONS = [
+  "mcp__plugin_heptabase_heptabase__*",
+  "mcp__Heptabase",
+  "mcp__llm-wiki",
+  "Bash(node */scripts/wiki-tool.mjs *)",
+  "Bash(node */skills/wiki-undo/scripts/undo.mjs *)",
+  "Bash(git *)",
+  "Bash(mkdir -p */.llm-wiki/hepta*)",
+  "Bash(cp * */.llm-wiki/hepta/*)",
+  "Edit(/.llm-wiki/**)",
+]
+
+describe("mechanism template: permission allowlist", () => {
+  const settings = (): unknown => JSON.parse(readTemplate(".claude/settings.json"))
+
+  it("settings.json allows exactly the tools that the skills need, and sets nothing else", () => {
+    expect(settings()).toEqual({ permissions: { allow: ALLOWED_PERMISSIONS } })
+  })
+
+  it("settings.json keeps the order of the allow list, so a diff shows what changed", () => {
+    const allow = (settings() as { permissions: { allow: string[] } }).permissions.allow
+    expect(allow).toEqual(ALLOWED_PERMISSIONS)
+    expect(new Set(allow).size).toBe(allow.length)
+  })
+
+  it("no rule opens a whole tool: every Bash rule names a program, and Edit is limited to .llm-wiki/", () => {
+    const allow = (settings() as { permissions: { allow: string[] } }).permissions.allow
+    for (const rule of allow) {
+      expect(rule, rule).not.toMatch(/^(Bash|Edit|Write|Read|WebFetch|WebSearch)(\(\*\))?$/)
+      if (rule.startsWith("Bash(")) {
+        expect(rule, rule).toMatch(/^Bash\((?:node \*\/|git |mkdir -p \*\/\.llm-wiki\/|cp \* \*\/\.llm-wiki\/)/)
+      }
+      if (rule.startsWith("Edit(")) expect(rule).toBe("Edit(/.llm-wiki/**)")
+    }
+    expect(allow.filter((rule) => rule.startsWith("Write("))).toEqual([])
+  })
+
+  it("every script that a Bash rule names is a script of the plugin", () => {
+    const plugin = join(REPO_ROOT, "plugins", "llm-wiki")
+    expect(existsSync(join(plugin, "scripts", "wiki-tool.mjs"))).toBe(true)
+    expect(existsSync(join(plugin, "skills", "wiki-undo", "scripts", "undo.mjs"))).toBe(true)
+  })
+
+  it("the template README has a setup section: server name, Heptabase prefix, and the trust prompt", () => {
+    const readme = readTemplate("README.md")
+    const setup = sectionBody(readme, "Set up Claude Code")
+    expect(setup).not.toBe("")
+    // The allow list names the llm_wiki server `llm-wiki`.
+    expect(setup).toContain("`llm-wiki`")
+    expect(setup).toContain("mcp-server/README.md")
+    // The Heptabase rule uses a plugin prefix that depends on the install. The README says how to check it.
+    expect(setup).toContain("`mcp__plugin_heptabase_heptabase__*`")
+    expect(setup).toContain("`/mcp`")
+    expect(setup).toContain(".claude/settings.json")
+    // A background run ignores the allow list until the folder is trusted (ruling W10).
+    expect(setup).toMatch(/Run `claude` in this folder/)
+    expect(setup).toMatch(/trust prompt/)
+    expect(setup).toMatch(/before the first background run/)
+  })
+
+  it("the template README keeps sentences short", () => {
+    expect(findLongSentences("README.md", readTemplate("README.md"))).toEqual([])
+  })
+})
+
 describe("ste-check", () => {
   const words26 = Array.from({ length: 26 }, (_, i) => `word${i + 1}`).join(" ")
   const words25 = Array.from({ length: 25 }, (_, i) => `word${i + 1}`).join(" ")

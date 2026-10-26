@@ -13,6 +13,8 @@ import { streamChat } from "@/lib/llm-client"
 import { refreshProjectFileTree } from "@/lib/project-file-tree-refresh"
 import { searchWiki, type SearchResult } from "@/lib/search"
 import { normalizePath } from "@/lib/path-utils"
+import { useMechanismWiki } from "@/hooks/use-mechanism-wiki"
+import { READ_ONLY_NOTICE, isReadOnlyPage } from "@/lib/mechanism-wiki/read-only"
 
 interface EditorSelectionRequest {
   id: string
@@ -48,7 +50,7 @@ export function WikiEditor({ content, onSave, filePath }: WikiEditorProps) {
   // Default to read mode (ReactMarkdown render). Edit mode is a raw Markdown
   // textarea so metadata/frontmatter can be edited without a WYSIWYG serializer
   // rewriting YAML, wikilinks, or other wiki-specific source syntax.
-  const [mode, setMode] = useState<"read" | "edit">("read")
+  const [requestedMode, setMode] = useState<"read" | "edit">("read")
   const [selectionRequest, setSelectionRequest] = useState<EditorSelectionRequest | null>(null)
   const [selectionInstruction, setSelectionInstruction] = useState("")
   // The first action defines the interaction for this selection. Mixing Q&A
@@ -65,6 +67,12 @@ export function WikiEditor({ content, onSave, filePath }: WikiEditorProps) {
   const selectionRunIdRef = useRef(0)
   const project = useWikiStore((state) => state.project)
   const llmConfig = useWikiStore((state) => state.llmConfig)
+  // In a mechanism wiki the AI keeps the pages under wiki/. They open read-only: no raw edit and no
+  // AI rewrite of a selection. Until the check "is this a mechanism wiki" answers, such a page is read-only too.
+  const mechanism = useMechanismWiki(project?.path ?? null)
+  const readOnly = isReadOnlyPage(project?.path, filePath, mechanism)
+  const showReadOnlyNotice = readOnly && mechanism === true
+  const mode = readOnly ? "read" : requestedMode
 
   // Read mode renders frontmatter as UI plus the Markdown body. Edit mode uses
   // a plain-text Markdown editor for the full file so frontmatter can be edited
@@ -168,9 +176,9 @@ export function WikiEditor({ content, onSave, filePath }: WikiEditorProps) {
   const submitSelectionToAgent = useCallback(async (intent: "ask" | "edit") => {
     if (!selectionRequest || !selectionInstruction.trim() || selectionRunning) return
     if (selectionMode && selectionMode !== intent) return
-    if (intent === "edit" && !selectionRequest.sourceMapped) return
+    if (intent === "edit" && (readOnly || !selectionRequest.sourceMapped)) return
     setSelectionMode(intent)
-    if (selectionRequest.sourceMapped) {
+    if (!readOnly && selectionRequest.sourceMapped) {
       onSave(`${selectionRequest.prefix}${selectionRequest.selectedText}${selectionRequest.suffix}`, { immediate: true })
     }
     const runId = ++selectionRunIdRef.current
@@ -255,10 +263,10 @@ export function WikiEditor({ content, onSave, filePath }: WikiEditorProps) {
       setSelectionError(t("editor.selection.requestFailed"))
       setSelectionRunning(false)
     }
-  }, [llmConfig, onSave, project, selectionInstruction, selectionMode, selectionRequest, selectionRunning, selectionTurns, t])
+  }, [llmConfig, onSave, project, readOnly, selectionInstruction, selectionMode, selectionRequest, selectionRunning, selectionTurns, t])
 
   const acceptSelectionEdit = useCallback(async () => {
-    if (!project || !selectionRequest?.sourceMapped || selectionResult?.intent !== "edit") return
+    if (readOnly || !project || !selectionRequest?.sourceMapped || selectionResult?.intent !== "edit") return
     const replacement = normalizeSelectionReplacement(selectionResult.content)
     try {
       setSelectionError("")
@@ -285,7 +293,7 @@ export function WikiEditor({ content, onSave, filePath }: WikiEditorProps) {
           : t("editor.selection.applyFailed"),
       )
     }
-  }, [project, selectionRequest, selectionResult, t])
+  }, [project, readOnly, selectionRequest, selectionResult, t])
 
   const closeSelectionPanel = useCallback(() => {
     selectionRunIdRef.current += 1
@@ -340,29 +348,41 @@ export function WikiEditor({ content, onSave, filePath }: WikiEditorProps) {
             {t("editor.pageLinks.button")}
           </button>
         )}
-        <button
-          type="button"
-          onClick={() => {
-            if (mode === "edit") saveLatestNow()
-            if (mode === "read") {
-              // Seed edit mode from the latest raw file content before switching;
-              // the sync effect intentionally does not reset drafts while editing.
-              const normalized = normalizeEditableMarkdown(editableMarkdown)
-              setDraftMarkdown(normalized)
-              latestMarkdownRef.current = normalized
-            }
-            setMode((m) => (m === "read" ? "edit" : "read"))
-          }}
-          title={mode === "read" ? t("editor.editRaw") : t("editor.doneEditing")}
-          className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-background/90 px-2 py-1 text-xs text-muted-foreground shadow-sm hover:bg-accent hover:text-foreground"
-        >
-          {mode === "read" ? <Pencil className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
-          {mode === "read" ? t("editor.edit") : t("editor.done")}
-        </button>
+        {!readOnly && (
+          <button
+            type="button"
+            data-action="edit-toggle"
+            onClick={() => {
+              if (mode === "edit") saveLatestNow()
+              if (mode === "read") {
+                // Seed edit mode from the latest raw file content before switching;
+                // the sync effect intentionally does not reset drafts while editing.
+                const normalized = normalizeEditableMarkdown(editableMarkdown)
+                setDraftMarkdown(normalized)
+                latestMarkdownRef.current = normalized
+              }
+              setMode((m) => (m === "read" ? "edit" : "read"))
+            }}
+            title={mode === "read" ? t("editor.editRaw") : t("editor.doneEditing")}
+            className="inline-flex items-center gap-1 rounded-md border border-border/60 bg-background/90 px-2 py-1 text-xs text-muted-foreground shadow-sm hover:bg-accent hover:text-foreground"
+          >
+            {mode === "read" ? <Pencil className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+            {mode === "read" ? t("editor.edit") : t("editor.done")}
+          </button>
+        )}
       </div>
 
       {mode === "read" ? (
         <div ref={readerRef} className="h-full overflow-auto px-6 py-6" onMouseUp={captureRenderedSelection}>
+          {showReadOnlyNotice && (
+            <div
+              role="note"
+              data-read-only-notice=""
+              className="mb-4 rounded-md border border-border/60 bg-muted/40 px-3 py-2 pr-28 text-xs text-muted-foreground"
+            >
+              {READ_ONLY_NOTICE}
+            </div>
+          )}
           {frontmatter && <StableFrontmatterPanel data={frontmatter} />}
           <StableWikiReader
             body={body}
@@ -494,7 +514,7 @@ export function WikiEditor({ content, onSave, filePath }: WikiEditorProps) {
                   {selectionMode !== "edit" && (
                     <button type="button" onClick={() => void submitSelectionToAgent("ask")} disabled={!selectionInstruction.trim()} className="rounded-md border border-border px-2 py-1 text-xs text-foreground hover:bg-accent disabled:opacity-50">{t("editor.selection.ask")}</button>
                   )}
-                  {selectionMode !== "ask" && (
+                  {selectionMode !== "ask" && !readOnly && (
                     <button type="button" onClick={() => void submitSelectionToAgent("edit")} disabled={!selectionInstruction.trim() || !selectionRequest.sourceMapped} title={!selectionRequest.sourceMapped ? t("editor.selection.askOnlyHint") : undefined} className="rounded-md bg-primary px-2 py-1 text-xs text-primary-foreground disabled:opacity-50">{t("editor.selection.edit")}</button>
                   )}
                 </>

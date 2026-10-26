@@ -53,3 +53,4 @@ pnpm-debug.log*
 # Mechanism wiki template ships these files
 !/templates/mechanism-wiki/docs/
 !/templates/mechanism-wiki/AGENTS.md
+!/templates/mechanism-wiki/.claude/

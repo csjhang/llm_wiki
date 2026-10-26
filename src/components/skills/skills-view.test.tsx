@@ -393,6 +393,49 @@ describe("latestRuns", () => {
   })
 })
 
+describe("trust hint", () => {
+  const HINT =
+    "Before the first background run, open Claude Code once in the wiki folder (run claude there) and accept the trust prompt."
+
+  /** The hint element of a card, with its text. */
+  function hintOf(cardHtml: string): string | null {
+    const match = /<p[^>]*data-trust-hint[^>]*>([\s\S]*?)<\/p>/.exec(cardHtml)
+    return match ? match[1] : null
+  }
+
+  it("tells under each background button to trust the folder once", () => {
+    const html = render()
+
+    for (const entry of PANEL_ENTRIES.filter((candidate) => candidate.mode === "background")) {
+      expect(hintOf(card(html, entry.skill)), entry.skill).toBe(HINT)
+    }
+    // The hint sits under the button row, not above it.
+    const sync = card(html, "wiki-sync")
+    expect(sync.indexOf("data-trust-hint")).toBeGreaterThan(sync.indexOf('data-action="run"'))
+  })
+
+  it("shows no hint on a card that opens a terminal, because a terminal asks for trust itself", () => {
+    const html = render({ whiteboards: WHITEBOARDS })
+
+    for (const entry of PANEL_ENTRIES.filter((candidate) => candidate.mode === "conversation")) {
+      expect(hintOf(card(html, entry.skill)), entry.skill).toBeNull()
+    }
+  })
+
+  it("names the command and the trust prompt in every language", () => {
+    for (const lng of ["en", "it", "ru", "zh"]) {
+      const text = i18n.getFixedT(lng)("skillPanel.trustHint")
+      expect(text, lng).toContain("Claude Code")
+      expect(text, lng).toContain("claude")
+    }
+    expect(i18n.getFixedT("en")("skillPanel.trustHint")).toBe(HINT)
+    // zh.json is Simplified (ruling W11).
+    expect(i18n.getFixedT("zh")("skillPanel.trustHint")).toBe(
+      "首次后台运行前，请先在 wiki 文件夹中打开一次 Claude Code（在该文件夹中运行 claude），并接受信任提示。",
+    )
+  })
+})
+
 describe("lint reminder", () => {
   it("shows the count of ingests when the reminder is due", () => {
     const html = render({ lintReminder: 12 })

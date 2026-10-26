@@ -12,11 +12,16 @@ import type { WikiTemplate } from "@/lib/templates"
 
 const TEMPLATE_ROOT = "/templates/mechanism-wiki/"
 
-const rawFiles = import.meta.glob("/templates/mechanism-wiki/**/*", {
-  query: "?raw",
-  import: "default",
-  eager: true,
-}) as Record<string, string>
+// A glob skips dot folders unless its pattern names one, so `.claude/` has its own pattern.
+// It holds `settings.json`, the permission allowlist of the skills.
+const rawFiles = import.meta.glob(
+  ["/templates/mechanism-wiki/**/*", "/templates/mechanism-wiki/.claude/**/*"],
+  {
+    query: "?raw",
+    import: "default",
+    eager: true,
+  },
+) as Record<string, string>
 
 /** Template files keyed by path relative to `templates/mechanism-wiki/`, with "/" separators. */
 export const MECHANISM_TEMPLATE_FILES: Readonly<Record<string, string>> = Object.freeze(

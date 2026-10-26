@@ -50,6 +50,7 @@
     "copyFailed": "Impossibile copiare il comando ({{reason}}). Copialo a mano.",
     "lastRun": "Ultima esecuzione",
     "lintReminder": "{{count}} elaborazioni dall'ultimo controllo. Valuta di eseguire 健檢.",
+    "trustHint": "Prima della prima esecuzione in background, apri Claude Code una volta nella cartella del wiki (esegui claude lì) e accetta la richiesta di fiducia.",
     "status": { "running": "In corso", "done": "Fatto", "warning": "Fatto, con strumenti negati", "error": "Non riuscito" }
   },
   "updateBanner": {
@@ -183,6 +184,10 @@
     "general": {
       "name": "Generale",
       "description": "Configurazione minima — una pagina bianca per qualsiasi scopo"
+    },
+    "mechanism": {
+      "name": "Wiki dei meccanismi",
+      "description": "Meccanismi trasversali ai domini, ipotesi di fusione e sincronizzazione con Heptabase"
     }
   },
   "sources": {

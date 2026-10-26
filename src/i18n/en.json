@@ -50,6 +50,7 @@
     "copyFailed": "The command could not be copied ({{reason}}). Copy it by hand.",
     "lastRun": "Last run",
     "lintReminder": "{{count}} ingests since the last check. Consider running 健檢.",
+    "trustHint": "Before the first background run, open Claude Code once in the wiki folder (run claude there) and accept the trust prompt.",
     "status": { "running": "Running", "done": "Done", "warning": "Done with denied tools", "error": "Failed" }
   },
   "updateBanner": {
@@ -183,6 +184,10 @@
     "general": {
       "name": "General",
       "description": "Minimal setup — a blank slate for any purpose"
+    },
+    "mechanism": {
+      "name": "Mechanism Wiki",
+      "description": "Cross-domain mechanisms, fusion hypotheses, and Heptabase sync"
     }
   },
   "sources": {

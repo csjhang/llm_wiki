@@ -211,6 +211,13 @@ function SkillCard({
         </Button>
       </div>
 
+      {entry.mode === "background" && (
+        // Claude Code uses the allow list of the folder in a background run only after the user trusted the folder once.
+        <p data-trust-hint="" className="text-xs text-muted-foreground">
+          {t("skillPanel.trustHint")}
+        </p>
+      )}
+
       {showPicker && (
         <label className="block space-y-1 text-xs">
           <span className="text-muted-foreground">{t("skillPanel.whiteboard")}</span>

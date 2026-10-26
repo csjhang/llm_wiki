@@ -50,6 +50,7 @@
     "copyFailed": "无法复制命令（{{reason}}）。请手动复制。",
     "lastRun": "上次运行",
     "lintReminder": "已累积 {{count}} 次收录，建议执行“健檢”",
+    "trustHint": "首次后台运行前，请先在 wiki 文件夹中打开一次 Claude Code（在该文件夹中运行 claude），并接受信任提示。",
     "status": { "running": "运行中", "done": "完成", "warning": "完成，但有工具被拒绝", "error": "失败" }
   },
   "updateBanner": {
@@ -183,6 +184,10 @@
     "general": {
       "name": "通用",
       "description": "最小化初始结构，适合从空白开始"
+    },
+    "mechanism": {
+      "name": "机制 Wiki",
+      "description": "跨领域机制、融合假设与 Heptabase 同步"
     }
   },
   "sources": {

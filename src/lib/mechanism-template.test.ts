@@ -6,7 +6,7 @@
  * that the bundled text equals the file on disk, and that the template is
  * registered in the template list.
  */
-import { readFileSync } from "node:fs"
+import { readFileSync, readdirSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
@@ -31,6 +31,8 @@ describe("mechanism template files", () => {
       "schema/writing-rules.md",
       "schema/page-types/mechanism.md",
       "lenses/hardware.md",
+      ".claude/settings.json",
+      "README.md",
     ]) {
       expect(keys).toContain(expected)
     }
@@ -44,6 +46,21 @@ describe("mechanism template files", () => {
     const onDisk = readFileSync(join(TEMPLATE_DIR, "docs", "glossary.md"), "utf-8")
     expect(onDisk.length).toBeGreaterThan(0)
     expect(MECHANISM_TEMPLATE_FILES["docs/glossary.md"]).toBe(onDisk)
+  })
+
+  it("loads the files of a dot folder: .claude/settings.json is in the bundle and equals the file", () => {
+    const onDisk = readFileSync(join(TEMPLATE_DIR, ".claude", "settings.json"), "utf-8")
+    expect(onDisk.length).toBeGreaterThan(0)
+    expect(MECHANISM_TEMPLATE_FILES[".claude/settings.json"]).toBe(onDisk)
+  })
+
+  it("bundles every file of the template folder, dot folders included", () => {
+    const walk = (directory: string): string[] =>
+      readdirSync(join(TEMPLATE_DIR, directory), { withFileTypes: true }).flatMap((entry) => {
+        const relative = directory === "" ? entry.name : `${directory}/${entry.name}`
+        return entry.isDirectory() ? walk(relative) : [relative]
+      })
+    expect(Object.keys(MECHANISM_TEMPLATE_FILES).sort()).toEqual(walk("").sort())
   })
 
   it("loads yaml files as raw text", () => {
