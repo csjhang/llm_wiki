@@ -16,6 +16,7 @@ import {
   trackIngestPath,
 } from "@/lib/git-history"
 import { clampUserConcurrency } from "@/lib/concurrency-limits"
+import { useLintStore } from "@/stores/lint-store"
 
 // ── Types ─────────────────────────────────────────────────────────────────
 
@@ -103,6 +104,8 @@ let processedSinceDrain = false
 // Abort controller for the review-sweep LLM call so switching projects
 // cancels a long-running judgment instead of burning tokens.
 let sweepAbortController: AbortController | null = null
+/** The structural lint that runs after the last drain. At most one runs: a new one aborts the old. */
+let structuralLintController: AbortController | null = null
 let inactiveQueueWrite: Promise<void> = Promise.resolve()
 interface QueueWriteRequest {
   path: string
@@ -875,6 +878,8 @@ export function clearQueueState(): void {
   if (sweepAbortController) {
     sweepAbortController.abort()
   }
+  structuralLintController?.abort()
+  structuralLintController = null
   queue = []
   cancelledInFlightTaskIds.clear()
   activeRuns.clear()
@@ -922,6 +927,8 @@ export async function pauseQueue(): Promise<void> {
     sweepAbortController.abort()
     sweepAbortController = null
   }
+  structuralLintController?.abort()
+  structuralLintController = null
   scheduling = false
 
   // Preparation is safe to abandon after abort, but a commit may already be
@@ -1081,6 +1088,9 @@ async function onQueueDrained(projectId: string, projectPath: string, epoch: num
   if (currentProjectId !== projectId || queueEpoch !== epoch) return
   processedSinceDrain = false
 
+  // The ingests are committed. The structural lint is an extra: it starts here, on its own.
+  startStructuralLint(projectId, projectPath, epoch)
+
   sweepAbortController = new AbortController()
   const signal = sweepAbortController.signal
 
@@ -1095,6 +1105,66 @@ async function onQueueDrained(projectId: string, projectPath: string, epoch: num
       sweepAbortController = null
     }
   }
+}
+
+// ── Structural lint after a drain ─────────────────────────────────────────
+
+/** The structural lint steps that are running. */
+const structuralLintSteps = new Set<Promise<void>>()
+
+/**
+ * The structural lint steps that are still running, for a caller that has to wait for them (a test, or a
+ * shutdown). Each promise resolves when its step ends and never rejects. The queue does not wait for them.
+ */
+export function pendingStructuralLints(): Promise<void>[] {
+  return [...structuralLintSteps]
+}
+
+/**
+ * Run the layer-1 lint of a mechanism wiki once the queue has drained, and put its findings in the lint
+ * store in place of the old ones of type "structure" (ruling U8). It runs once for the whole batch of
+ * ingests, not once for each source. The step starts after the commit of the last ingest and returns at
+ * once: it never holds, fails, or rolls back an ingest, and every error is logged and goes no further.
+ *
+ * The step ends without storing anything when the open project changed, when the queue state was
+ * cleared, or when a newer step started. A project that is not a mechanism wiki has no findings, and
+ * the lint store stays as it is.
+ */
+function startStructuralLint(projectId: string, projectPath: string, epoch: number): void {
+  structuralLintController?.abort()
+  const controller = new AbortController()
+  structuralLintController = controller
+  const isCurrent = (): boolean =>
+    !controller.signal.aborted && structuralLintController === controller && currentProjectId === projectId && queueEpoch === epoch
+
+  const step: Promise<void> = (async () => {
+    try {
+      const [{ runMechanismStructuralLint }, { structureFindingToLintResult }] = await Promise.all([
+        import("@/lib/mechanism-wiki/lint-run"),
+        import("@/lib/lint"),
+      ])
+      if (!isCurrent()) return
+      const findings = await runMechanismStructuralLint(projectPath, { signal: controller.signal })
+      if (!isCurrent()) return
+      useLintStore.getState().replaceItemsOfType("structure", findings.map(structureFindingToLintResult))
+    } catch (err) {
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === "AbortError")) return
+      console.warn("[Ingest Queue] Structural lint failed:", err instanceof Error ? err.message : err)
+    }
+  })()
+    // Whatever goes wrong, the promise of the step resolves: a caller that waits for it never gets a rejection.
+    .catch((err: unknown) => {
+      try {
+        console.warn("[Ingest Queue] Structural lint step failed:", err instanceof Error ? err.message : err)
+      } catch {
+        // The log is broken too. There is nothing more to do, and the promise must still resolve.
+      }
+    })
+    .finally(() => {
+      if (structuralLintController === controller) structuralLintController = null
+      structuralLintSteps.delete(step)
+    })
+  structuralLintSteps.add(step)
 }
 
 async function runTask(

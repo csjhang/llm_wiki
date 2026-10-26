@@ -11,6 +11,8 @@ export interface LintItem {
   brokenTarget?: string
   suggestedTarget?: string
   suggestedSource?: string
+  /** Only for type "structure": the id of the check. */
+  check?: string
   createdAt: number
 }
 
@@ -24,6 +26,7 @@ function lintResultToItem(result: LintResult): LintItem {
     brokenTarget: result.brokenTarget,
     suggestedTarget: result.suggestedTarget,
     suggestedSource: result.suggestedSource,
+    check: result.check,
     id: `lint-${++counter}`,
     createdAt: Date.now(),
   }
@@ -47,6 +50,8 @@ interface LintState {
   removeItem: (id: string) => void
   removeItems: (ids: string[]) => void
   clearItems: () => void
+  /** Remove every item of `type` and add `results`, in one step. Every item of another type stays. */
+  replaceItemsOfType: (type: LintResult["type"], results: LintResult[]) => void
 }
 
 let counter = 0
@@ -78,4 +83,12 @@ export const useLintStore = create<LintState>((set) => ({
     }),
 
   clearItems: () => set({ items: [] }),
+
+  replaceItemsOfType: (type, results) =>
+    set((state) => {
+      const kept = state.items.filter((item) => item.type !== type)
+      // Nothing to remove and nothing to add: keep the same array, so nothing is saved again.
+      if (kept.length === state.items.length && results.length === 0) return state
+      return { items: [...kept, ...results.map(lintResultToItem)] }
+    }),
 }))

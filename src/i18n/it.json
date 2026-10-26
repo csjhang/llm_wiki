@@ -436,7 +436,8 @@
       "orphan": "Pagina orfana",
       "broken-link": "Link non valido",
       "no-outlinks": "Nessun link in uscita",
-      "semantic": "Problema semantico"
+      "semantic": "Problema semantico",
+      "structure": "Problema di struttura"
     },
     "issues": "{{count}} problema",
     "issues_plural": "{{count}} problemi"

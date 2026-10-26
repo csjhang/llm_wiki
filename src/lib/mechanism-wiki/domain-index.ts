@@ -45,6 +45,17 @@ const READ_BATCH_SIZE = 32
  * left out too. A project without a `wiki/` folder has no pages.
  */
 export async function scanWikiPages(projectPath: string): Promise<IndexedPage[]> {
+  return scanWikiPagesWith(projectPath, indexedPageFromMarkdown)
+}
+
+/**
+ * The same scan as `scanWikiPages`, with the page built by `build` from the project path of the file
+ * and its text. The structural lint uses it to read more fields of each page.
+ */
+export async function scanWikiPagesWith<T extends IndexedPage>(
+  projectPath: string,
+  build: (path: string, markdown: string) => T,
+): Promise<T[]> {
   const base = trimTrailingSlashes(projectPath)
   let tree: FileNode[]
   try {
@@ -54,13 +65,13 @@ export async function scanWikiPages(projectPath: string): Promise<IndexedPage[]>
   }
 
   const paths = collectPagePaths(tree, "wiki").sort(compareText)
-  const pages: IndexedPage[] = []
+  const pages: T[] = []
   for (let start = 0; start < paths.length; start += READ_BATCH_SIZE) {
     const batch = paths.slice(start, start + READ_BATCH_SIZE)
     const read = await Promise.all(
       batch.map(async (path) => {
         try {
-          return indexedPageFromMarkdown(path, await readFile(`${base}/${path}`))
+          return build(path, await readFile(`${base}/${path}`))
         } catch {
           return null
         }

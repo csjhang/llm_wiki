@@ -12,16 +12,35 @@ import {
   type StructuralLintPage,
 } from "@/lib/lint-structural-core"
 import type { LintConfig } from "@/lib/lint-config"
+import { runMechanismStructuralLint } from "@/lib/mechanism-wiki/lint-run"
+import type { StructureFinding } from "@/lib/mechanism-wiki/lint-structure"
 
 export interface LintResult {
-  type: "orphan" | "broken-link" | "no-outlinks" | "semantic"
+  type: "orphan" | "broken-link" | "no-outlinks" | "semantic" | "structure"
   severity: "warning" | "info"
+  /** A path relative to `wiki/` for the other types. For `structure`: a path from the project folder, or "" for a finding about a domain. */
   page: string
   detail: string
   affectedPages?: string[]
   brokenTarget?: string
   suggestedTarget?: string
   suggestedSource?: string
+  /** Only for `structure`: the id of the check, such as `domain-unknown`. */
+  check?: string
+}
+
+/** The structure checks whose finding is a warning. The others are information. */
+const STRUCTURE_WARNING_CHECKS: ReadonlySet<string> = new Set(["domain-unknown", "map-missing-page", "concept-cross-domain"])
+
+/** A finding of the structural checks of a mechanism wiki, as an item of the lint view. */
+export function structureFindingToLintResult(finding: StructureFinding): LintResult {
+  return {
+    type: "structure",
+    severity: STRUCTURE_WARNING_CHECKS.has(finding.check) ? "warning" : "info",
+    page: finding.page ?? "",
+    detail: finding.message,
+    check: finding.check,
+  }
 }
 
 const SUGGESTION_TOKEN_WINDOW = 4000
@@ -191,10 +210,26 @@ export async function runStructuralLint(
     }
     options.onProgress?.(index + 1, contentFiles.length * 2)
   }
-  return runStructuralWorker(pages, {
+  const results = await runStructuralWorker(pages, {
     ...options,
     onProgress: (completed, total) => options.onProgress?.(contentFiles.length + completed, contentFiles.length + total),
   })
+  return [...results, ...(await runStructureChecks(projectPath, options.signal))]
+}
+
+/**
+ * The structural checks of a mechanism wiki, as lint results. A project that is not a mechanism wiki has
+ * none. A failure of these checks is logged and gives none: the other results of the lint stay. A cancel
+ * goes on to the caller.
+ */
+async function runStructureChecks(projectPath: string, signal: AbortSignal | undefined): Promise<LintResult[]> {
+  try {
+    return (await runMechanismStructuralLint(projectPath, { signal })).map(structureFindingToLintResult)
+  } catch (err) {
+    if (signal?.aborted || (err instanceof DOMException && err.name === "AbortError")) throw err
+    console.warn("[lint] Structure checks failed:", err instanceof Error ? err.message : err)
+    return []
+  }
 }
 
 // ── Semantic lint ─────────────────────────────────────────────────────────────

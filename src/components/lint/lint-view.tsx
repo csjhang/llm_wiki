@@ -8,6 +8,7 @@ import {
   RefreshCw,
   CheckCircle2,
   BrainCircuit,
+  Network,
   Wrench,
   Trash2,
   Link,
@@ -71,6 +72,7 @@ export function LintView() {
     "broken-link": { icon: Link2Off, label: t("lint.typeLabels.broken-link") },
     "no-outlinks": { icon: ArrowUpRight, label: t("lint.typeLabels.no-outlinks") },
     semantic: { icon: BrainCircuit, label: t("lint.typeLabels.semantic") },
+    structure: { icon: Network, label: t("lint.typeLabels.structure") },
   }), [t])
 
   const items = useLintStore((s) => s.items)
@@ -194,6 +196,8 @@ export function LintView() {
     const candidates = [
       `${pp}/wiki/${page}`,
       `${pp}/wiki/${page}.md`,
+      // A structure item names its page from the project folder: `wiki/concepts/a.md`.
+      ...(page.startsWith("wiki/") ? [`${pp}/${page}`] : []),
     ]
     for (const path of candidates) {
       try {
@@ -716,12 +720,15 @@ function LintCard({
           }`}
         />
         <div className="flex-1 min-w-0">
-          <div className="font-medium truncate">{item.page}</div>
+          <div className="font-medium truncate">{item.page || config.label}</div>
           <div className="text-[11px] text-muted-foreground">{config.label}</div>
         </div>
       </div>
 
-      <p className="mb-2 text-xs text-muted-foreground">{item.detail}</p>
+      <p className="mb-2 text-xs text-muted-foreground">
+        {item.check && <span className="mr-1 font-mono text-[11px]">[{item.check}]</span>}
+        {item.detail}
+      </p>
 
       {(item.suggestedTarget || item.suggestedSource) && (
         <div className="mb-2 rounded-md border border-emerald-500/20 bg-emerald-500/5 px-2 py-1.5 text-xs text-emerald-700 dark:text-emerald-300">
@@ -758,6 +765,7 @@ function LintCard({
           variant="outline"
           size="sm"
           className="h-6 text-xs gap-1"
+          disabled={!item.page}
           onClick={() => onOpenPage(item.page)}
         >
           {t("lint.open")}
