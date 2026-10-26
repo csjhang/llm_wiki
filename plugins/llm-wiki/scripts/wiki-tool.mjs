@@ -2496,7 +2496,7 @@ function emptyCardMap() {
 * cannot be read as a card map throws an error that names the file and says to
 * repair or remove it.
 */
-function loadCardMap(projectPath) {
+function loadCardMap$1(projectPath) {
 	const path = resolveInProject(projectPath, CARD_MAP_FILE);
 	if (!existsSync(path)) return emptyCardMap();
 	try {
@@ -3008,14 +3008,14 @@ function init(args) {
 	if (existsSync(configPath) && !parsed.flags.force) problems.push(`${HEPTABASE_YAML} already exists; pass --force to replace it`);
 	let map = null;
 	try {
-		map = loadCardMap(project);
+		map = loadCardMap$1(project);
 	} catch (error) {
 		problems.push(error instanceof Error ? error.message : String(error));
 	}
 	const database = readDatabase(databasePath, problems);
 	const properties = database ? mapProperties(database.schema, problems, warnings) : {};
 	if (database?.tagId && database.tagId !== tags.mirror) warnings.push(`the database belongs to tag ${database.tagId}, but --mirror-tag is ${tags.mirror}`);
-	const pages = whiteboardsPaths.map((path) => readText$1("--whiteboards", path, problems));
+	const pages = whiteboardsPaths.map((path) => readText$2("--whiteboards", path, problems));
 	let list = null;
 	if (pages.every((page) => page !== null)) {
 		list = readWhiteboardList(pages);
@@ -3069,7 +3069,7 @@ function init(args) {
 function unique(values) {
 	return [...new Set(values)];
 }
-function readText$1(option, path, problems) {
+function readText$2(option, path, problems) {
 	try {
 		return readFileSync(path, "utf8").replace(/^\uFEFF/, "");
 	} catch {
@@ -3079,7 +3079,7 @@ function readText$1(option, path, problems) {
 }
 /** The schema and tag id of a `read_database` result: the parsed object, or the JSON text in `content`. */
 function readDatabase(path, problems) {
-	const text = readText$1("--database", path, problems);
+	const text = readText$2("--database", path, problems);
 	if (text === null) return null;
 	let raw;
 	try {
@@ -3719,7 +3719,7 @@ function replaceUnsupportedBlocks(text) {
 * and the snapshot files the card map names, and every path goes through resolveInProject.
 */
 /** Title prefix of a card whose page is gone. */
-const RETIRED_TITLE_PREFIX = "🗄 已停用｜";
+const RETIRED_TITLE_PREFIX$1 = "🗄 已停用｜";
 /** Body of a card whose page is gone. No replacement is known. */
 const RETIRED_BODY = "此頁已從 wiki 移除。";
 /** Page types that are always synced. A `concept` is synced when it has two sources. */
@@ -3737,17 +3737,17 @@ const SKIPPED_PAGES = new Set([
 ]);
 const SKIPPED_DIRECTORY = "wiki/indexes";
 /** Orders text by code unit, the same on every machine. */
-function compareText(a, b) {
+function compareText$1(a, b) {
 	return a < b ? -1 : a > b ? 1 : 0;
 }
-function oneLine(text) {
+function oneLine$1(text) {
 	return text.replace(/\s+/g, " ").trim();
 }
 /** The file stem of a page path: `event-driven` for `wiki/mechanisms/event-driven.md`. */
 function slugOfPath(path) {
-	return fileStem(path);
+	return fileStem$1(path);
 }
-function fileStem(path) {
+function fileStem$1(path) {
 	const name = posix.basename(path);
 	return name.toLowerCase().endsWith(".md") ? name.slice(0, -3) : name;
 }
@@ -3758,12 +3758,12 @@ function parseWikiPage(path, markdown) {
 		const value = frontmatter?.[key];
 		return typeof value === "string" ? value.trim() : "";
 	};
-	const slug = fileStem(path);
+	const slug = fileStem$1(path);
 	const heading = /^#[ \t]+(.+)$/m.exec(body)?.[1] ?? "";
 	return {
 		path,
 		slug,
-		title: oneLine(field("title")) || oneLine(heading) || slug,
+		title: oneLine$1(field("title")) || oneLine$1(heading) || slug,
 		type: field("type"),
 		sources: sourceNames(frontmatter?.sources),
 		hasFrontmatter: frontmatter !== null,
@@ -3806,7 +3806,7 @@ function readWikiPages(project, options = {}) {
 		throw error;
 	}
 	collectMarkdown(project, "wiki", visited, paths);
-	return paths.sort(compareText).map((path) => loadWikiPage(project, path));
+	return paths.sort(compareText$1).map((path) => loadWikiPage(project, path));
 }
 function errorCode(error) {
 	return error instanceof Error ? error.code : void 0;
@@ -3876,7 +3876,7 @@ function sourceCardsOf(page, cardsByName) {
 /** The source cards of the footer, by the file name of their snapshot. */
 function sourceCardsByName(project, map) {
 	const byName = /* @__PURE__ */ new Map();
-	for (const cardId of Object.keys(map.sources).sort(compareText)) {
+	for (const cardId of Object.keys(map.sources).sort(compareText$1)) {
 		const rawPath = map.sources[cardId].raw_path;
 		const name = posix.basename(rawPath);
 		if (!byName.has(name)) byName.set(name, {
@@ -3891,9 +3891,9 @@ function snapshotTitle(project, rawPath) {
 	try {
 		const { frontmatter } = parseFrontmatter(readFileSync(resolveInProject(project, rawPath), "utf8"));
 		const title = frontmatter?.title;
-		if (typeof title === "string" && oneLine(title) !== "") return oneLine(title);
+		if (typeof title === "string" && oneLine$1(title) !== "") return oneLine$1(title);
 	} catch {}
-	return fileStem(rawPath);
+	return fileStem$1(rawPath);
 }
 /**
 * heptabase.yaml and wiki.yaml of a project. Every issue of a parser becomes a problem, and a
@@ -4108,7 +4108,7 @@ function planDown(args) {
 	const config = readProjectConfig(project, problems);
 	let map = null;
 	try {
-		map = loadCardMap(project);
+		map = loadCardMap$1(project);
 	} catch (error) {
 		problems.push(error instanceof Error ? error.message : String(error));
 	}
@@ -4208,7 +4208,7 @@ function checkConfiguredProperties(config, options, problems) {
 function planPages(input) {
 	const pageByPath = new Map(input.pages.map((page) => [page.path, page]));
 	const renderer = createRenderer(input.project, input.map, input.pages);
-	const paths = [...new Set([...pageByPath.keys(), ...Object.keys(input.map.pages)])].sort(compareText);
+	const paths = [...new Set([...pageByPath.keys(), ...Object.keys(input.map.pages)])].sort(compareText$1);
 	const actions = [];
 	const relinks = [];
 	const problems = [];
@@ -4232,7 +4232,7 @@ function planPages(input) {
 	});
 	const pending = actions.some((action) => action.op === "create" || action.op === "update" || action.op === "retire");
 	if (!pending) actions.push(...relinks);
-	actions.sort((a, b) => compareText(a.page, b.page) || OP_ORDER.indexOf(a.op) - OP_ORDER.indexOf(b.op));
+	actions.sort((a, b) => compareText$1(a.page, b.page) || OP_ORDER.indexOf(a.op) - OP_ORDER.indexOf(b.op));
 	return {
 		pass: !pending && relinks.length > 0 ? 2 : 1,
 		actions,
@@ -4333,12 +4333,12 @@ function create(input, renderer, page) {
 	};
 }
 function retire(input, path, entry, title) {
-	const base = title.startsWith("🗄 已停用｜") ? title.slice(RETIRED_TITLE_PREFIX.length) : title;
+	const base = title.startsWith("🗄 已停用｜") ? title.slice(RETIRED_TITLE_PREFIX$1.length) : title;
 	return {
 		op: "retire",
 		page: path,
 		cardId: entry.card_id,
-		title: `${RETIRED_TITLE_PREFIX}${base}`,
+		title: `${RETIRED_TITLE_PREFIX$1}${base}`,
 		body: RETIRED_BODY,
 		bodyFile: outboxFile(path),
 		contentHash: contentHash(RETIRED_BODY),
@@ -4511,7 +4511,7 @@ function planUp(args) {
 	const config = readHeptabaseConfig(project, problems);
 	let map = null;
 	try {
-		map = loadCardMap(project);
+		map = loadCardMap$1(project);
 	} catch (error) {
 		problems.push(error instanceof Error ? error.message : String(error));
 	}
@@ -4800,7 +4800,7 @@ function record(args) {
 	const event = parseEvent(eventText, problems);
 	let map = null;
 	try {
-		map = loadCardMap(project);
+		map = loadCardMap$1(project);
 	} catch (error) {
 		problems.push(error instanceof Error ? error.message : String(error));
 	}
@@ -5352,7 +5352,7 @@ const OPTION_SPEC$2 = {
 	lists: ["content"]
 };
 const SNAPSHOT_DIRECTORY = "raw/sources/heptabase";
-const DOMAINS_FILE = "domains.yaml";
+const DOMAINS_FILE$1 = "domains.yaml";
 const LENSES_DIRECTORY = "lenses";
 /** The card types whose source is an article by an outside author. */
 const ARTICLE_TYPES = ["webCard", "pdfCard"];
@@ -5391,7 +5391,7 @@ function snapshot(args) {
 	const config = readHeptabaseConfig(project, problems);
 	let map = null;
 	try {
-		map = loadCardMap(project);
+		map = loadCardMap$1(project);
 	} catch (error) {
 		problems.push(error instanceof Error ? error.message : String(error));
 	}
@@ -5496,19 +5496,19 @@ function overwriteProblem(project, rawPath, cardId, map) {
 * distance. A domains.yaml that cannot be read adds a warning and no domain: the snapshot is still worth saving.
 */
 function domainOf(project, boards, parents, warnings) {
-	const path = resolveInProject(project, DOMAINS_FILE);
+	const path = resolveInProject(project, DOMAINS_FILE$1);
 	if (!existsSync(path)) return null;
 	let text;
 	try {
 		text = readFileSync(path, "utf8").replace(/^\uFEFF/, "");
 	} catch {
-		warnings.push(`cannot read ${DOMAINS_FILE}, so no domain was added`);
+		warnings.push(`cannot read ${DOMAINS_FILE$1}, so no domain was added`);
 		return null;
 	}
 	const result = parseDomainsYaml(text, knownLenses(project));
 	if (!result.ok) {
 		const issue = result.issues[0];
-		warnings.push(`${DOMAINS_FILE} is not valid, so no domain was added: ${issue.path === "" ? "" : `${issue.path}: `}${issue.message}`);
+		warnings.push(`${DOMAINS_FILE$1} is not valid, so no domain was added: ${issue.path === "" ? "" : `${issue.path}: `}${issue.message}`);
 		return null;
 	}
 	const distances = /* @__PURE__ */ new Map();
@@ -5902,7 +5902,7 @@ function checkVerify(pages, section, status) {
 	if (table === null) return ["What to verify has no table"];
 	const last = table.header.length - 1;
 	table.rows.forEach((row, index) => {
-		if (isBlank(row[last] ?? "")) problems.push(`What to verify ${rowName(row, index)}: the last column (${JSON.stringify(table.header[last])}) is empty`);
+		if (isBlank$1(row[last] ?? "")) problems.push(`What to verify ${rowName(row, index)}: the last column (${JSON.stringify(table.header[last])}) is empty`);
 	});
 	if (status !== "testing" && status !== "supported" && status !== "refuted") return problems;
 	if (status !== "testing" && table.rows.length === 0) {
@@ -6059,7 +6059,7 @@ function splitRow(line) {
 	return cells;
 }
 /** True for a cell with no word in it: nothing, a dash, or a line break. */
-function isBlank(cell) {
+function isBlank$1(cell) {
 	return !/[\p{L}\p{N}]/u.test(cell.replace(/<br\s*\/?>/gi, " "));
 }
 
@@ -6123,7 +6123,7 @@ const LOCK_TOOL = "wiki-tool";
 const DEFAULT_WAIT_MS = 3e4;
 const DEFAULT_STALE_MS = 10 * 6e4;
 const POLL_MS = 200;
-function readText(path) {
+function readText$1(path) {
 	try {
 		return readFileSync(path, "utf8");
 	} catch {
@@ -6190,7 +6190,7 @@ function holderIsGone(text) {
 * to take the lock again right away: the lock was removed, is gone, or was replaced.
 */
 function removeLockIfUnchanged(path, judged) {
-	const current = readText(path);
+	const current = readText$1(path);
 	if (current === null) return !pathExists(path);
 	if (current !== judged) return true;
 	try {
@@ -6202,7 +6202,7 @@ function removeLockIfUnchanged(path, judged) {
 }
 /** Remove the lock when it is stale. Returns true when the caller should try to take it again right away. */
 function clearStaleLock(path, staleMs) {
-	const text = readText(path);
+	const text = readText$1(path);
 	if (text === null) return !pathExists(path);
 	const age = lockAgeMs(path, text);
 	if (age === null) return true;
@@ -6216,7 +6216,7 @@ function tryCreate(path) {
 		fd = openSync(path, "wx");
 	} catch (error) {
 		const code = error.code;
-		if (code === "EEXIST" || code === "EPERM" && readText(path) !== null) return null;
+		if (code === "EEXIST" || code === "EPERM" && readText$1(path) !== null) return null;
 		throw error;
 	}
 	const text = JSON.stringify({
@@ -6254,7 +6254,7 @@ async function acquire(path, waitMs, staleMs) {
 }
 /** Remove the lock, but only while it is still the one this call wrote. */
 function release(path, text) {
-	if (readText(path) !== text) return;
+	if (readText$1(path) !== text) return;
 	try {
 		unlinkSync(path);
 	} catch {}
@@ -6339,6 +6339,14 @@ function runGit(project, args) {
 			stderr: failure.stderr ?? ""
 		};
 	}
+}
+/**
+* Run a read-only git command in the project: `git -C <project> --literal-pathspecs <args>`. For `git log`,
+* `git diff`, `git show`, `git rev-parse` and the like. A non-zero exit is a result, not an error. It takes
+* no lock, so it must not write: use commitPathsLocked for a change.
+*/
+function readGit(projectPath, args) {
+	return runGit(resolve(projectPath), ["--literal-pathspecs", ...args]);
 }
 /** Run git and return stdout. A non-zero exit throws git's own message. */
 function git(project, args) {
@@ -6762,7 +6770,7 @@ function readWiki(path, problems) {
 		return {
 			id: identity.id,
 			path,
-			map: loadCardMap(path)
+			map: loadCardMap$1(path)
 		};
 	} catch (error) {
 		problems.push(`wiki ${path}: ${error instanceof Error ? error.message : String(error)}`);
@@ -6872,7 +6880,7 @@ function resolveCards(placed, wikis, problems) {
 					...card,
 					status: retired ? "retired" : "mirror",
 					wiki: first.wiki.id,
-					pages: pages.sort(compareText)
+					pages: pages.sort(compareText$1)
 				};
 			}
 		}
@@ -6924,6 +6932,1067 @@ const FUSE_GROUP = {
 };
 
 //#endregion
+//#region src/lib/wiki-page-types.ts
+const GENERATION_WIKI_TYPES = [
+	"source",
+	"entity",
+	"concept",
+	"comparison",
+	"query",
+	"synthesis",
+	"thesis",
+	"methodology",
+	"finding",
+	"mechanism",
+	"hypothesis"
+];
+/** Types that only a mechanism wiki lists. Other wikis keep the upstream type list. */
+const MECHANISM_WIKI_TYPES = ["mechanism", "hypothesis"];
+/** `GENERATION_WIKI_TYPES` without the mechanism wiki types. */
+const BASE_GENERATION_WIKI_TYPES = GENERATION_WIKI_TYPES.filter((type) => !MECHANISM_WIKI_TYPES.includes(type));
+const WIKI_TYPE_DIRS = [
+	{
+		dir: "entities",
+		type: "entity"
+	},
+	{
+		dir: "concepts",
+		type: "concept"
+	},
+	{
+		dir: "sources",
+		type: "source"
+	},
+	{
+		dir: "queries",
+		type: "query"
+	},
+	{
+		dir: "comparisons",
+		type: "comparison"
+	},
+	{
+		dir: "synthesis",
+		type: "synthesis"
+	},
+	{
+		dir: "findings",
+		type: "finding"
+	},
+	{
+		dir: "standards",
+		type: "standard"
+	},
+	{
+		dir: "playbooks",
+		type: "playbook"
+	},
+	{
+		dir: "thesis",
+		type: "thesis"
+	},
+	{
+		dir: "methodology",
+		type: "methodology"
+	},
+	{
+		dir: "mechanisms",
+		type: "mechanism"
+	},
+	{
+		dir: "hypotheses",
+		type: "hypothesis"
+	}
+];
+function inferWikiTypeFromPath(path, fileName) {
+	const normalized = path.replace(/\\/g, "/").toLowerCase();
+	for (const { dir, type } of WIKI_TYPE_DIRS) if (normalized.includes(`/wiki/${dir}/`) || normalized.includes(`/${dir}/`) || normalized.startsWith(`wiki/${dir}/`)) return type;
+	if ((fileName ?? normalized.split("/").pop() ?? "").toLowerCase() === "overview.md" || normalized.includes("/overview.md")) return "overview";
+	const customDir = normalized.match(/(?:^|\/)wiki\/([^/.][^/]*)\/[^/]+\.md$/)?.[1];
+	if (customDir) return customDir;
+	return null;
+}
+
+//#endregion
+//#region src/lib/mechanism-wiki/domain-index-render.ts
+/**
+* Domain-first index of a mechanism wiki: the text of the index files.
+*
+* `wiki/index.md` lists the domain tree with page counts. `wiki/indexes/<domain>.md`
+* lists the pages of one domain, and `wiki/indexes/_mechanisms.md` lists the
+* mechanism pages. Everything here is pure: the same pages give the same bytes,
+* and nothing reads a file. It imports no Tauri code, so the `wiki-tool` CLI can
+* reuse it. The file reading and writing is in `domain-index.ts`.
+*/
+/** The folder of the index files, with a trailing slash. */
+const DOMAIN_INDEX_DIR = "wiki/indexes/";
+/** The mechanism index. */
+const MECHANISM_INDEX_FILE = "_mechanisms.md";
+const MECHANISM_INDEX_PATH = `${DOMAIN_INDEX_DIR}${MECHANISM_INDEX_FILE}`;
+const MECHANISM_TYPE = "mechanism";
+/** True for a file in `wiki/indexes/`. These files are made by the app, so they are never pages. */
+function isDomainIndexPath(relativePath) {
+	return relativePath.replace(/\\/g, "/").toLowerCase().startsWith(DOMAIN_INDEX_DIR);
+}
+/** The page that `markdown` is, at `path`. */
+function indexedPageFromMarkdown(path, markdown) {
+	const normalized = path.replace(/\\/g, "/");
+	const slug = fileStem(normalized);
+	const { frontmatter, body } = parseFrontmatter(markdown);
+	const field = (key) => {
+		const value = frontmatter?.[key];
+		if (typeof value !== "string") return null;
+		const trimmed = value.trim();
+		return trimmed === "" ? null : trimmed;
+	};
+	const type = field("type") ?? inferWikiTypeFromPath(normalized) ?? "";
+	const heading = /^#[ \t]+(.+)$/m.exec(body)?.[1];
+	return {
+		path: normalized,
+		slug,
+		type,
+		title: oneLine(field("title") ?? "") || oneLine(heading ?? "") || slug,
+		domain: type === "hypothesis" ? field("to_domain") : field("domain")
+	};
+}
+function fileStem(path) {
+	const name = path.slice(path.lastIndexOf("/") + 1);
+	return name.toLowerCase().endsWith(".md") ? name.slice(0, -3) : name;
+}
+/** Collapse every run of white space to one space, so a title stays on one line. */
+function oneLine(text) {
+	return text.replace(/\s+/g, " ").trim();
+}
+/** UTF-16 code unit order. Unlike `localeCompare`, it gives the same result on every machine. */
+function compareText(a, b) {
+	return a < b ? -1 : a > b ? 1 : 0;
+}
+
+//#endregion
+//#region src/lib/mechanism-wiki/lint-structure.ts
+/**
+* Layer-1 lint of a mechanism wiki: structural checks that need no model.
+*
+* `checkStructure` takes the pages, the domain files, the identity, the card map, and today's
+* date. It returns a list of findings and changes nothing. It is pure: no file access, no Tauri,
+* no store. The `wiki-tool` CLI bundles this file, so it may import only pure modules.
+* The index module `domain-index.ts` reads files, so it is not imported here.
+*
+* Check ids: `domain-missing`, `domain-unknown`, `concept-cross-domain`, `mechanism-no-instance`,
+* `mirror-retired`, `map-missing-page`, `hypothesis-stale-draft`, `domain-too-large`,
+* `domain-too-small`, and `config-invalid` (ruling U14). A hypothesis page counts under its `to_domain`
+* for every check (ruling R19).
+* A hypothesis page that lacks `from_domain` or `to_domain` gets `domain-missing` (ruling U10).
+*/
+/** Starts the text of a problem in a file of the reading wiki. */
+const LIBRARY_PROBLEM_PREFIX = "reading wiki ";
+/**
+* The text of one config problem for `StructureInput.configProblems`. `issue.path` starts with the
+* name of the file, as `ConfigIssue` paths do. A problem in a file of the reading wiki gets the
+* prefix "reading wiki ".
+*/
+function configProblemText(issue, source) {
+	const text = issue.path === "" ? issue.message : `${issue.path}: ${issue.message}`;
+	return source === "library" ? `${LIBRARY_PROBLEM_PREFIX}${text}` : text;
+}
+function classifyProblem(problem) {
+	const library = problem.startsWith(LIBRARY_PROBLEM_PREFIX);
+	return /^domains\.yaml(?:$|[:\s])/.test(library ? problem.slice(13) : problem) ? library ? "library-domains" : "domains" : "other";
+}
+/** Files of `wiki/` that are not pages. The app keeps them. */
+const NON_PAGE_PATHS$1 = new Set([
+	"wiki/index.md",
+	"wiki/log.md",
+	"wiki/overview.md"
+]);
+/** Shown in the title of a retired mirror card. The tool puts the full prefix before the title. */
+const RETIRED_TITLE_PREFIX = "🗄 已停用";
+const RAW_SOURCES_DIR = "raw/sources/";
+const HYPOTHESIS_TYPE = "hypothesis";
+/** The fields of a hypothesis page that may name a domain of the reading wiki. */
+const HYPOTHESIS_DOMAIN_FIELDS = ["from_domain", "to_domain"];
+const SOURCE_TYPE = "source";
+const CROSS_DOMAIN_TYPES = ["concept", "entity"];
+const MS_PER_DAY = 864e5;
+/** The page that `markdown` is, at `path`, with the fields that the checks read. */
+function structurePageFromMarkdown(path, markdown) {
+	const base = indexedPageFromMarkdown(path, markdown);
+	const { frontmatter } = parseFrontmatter(markdown);
+	const text = (key) => {
+		const value = frontmatter?.[key];
+		if (typeof value !== "string") return void 0;
+		const trimmed = value.trim();
+		return trimmed === "" ? void 0 : trimmed;
+	};
+	const list = (key) => {
+		const value = frontmatter?.[key];
+		return (Array.isArray(value) ? value : typeof value === "string" ? [value] : []).map((item) => item.trim()).filter((item) => item !== "");
+	};
+	const page = {
+		...base,
+		sources: list("sources"),
+		also: list("also")
+	};
+	const status = text("status");
+	if (status !== void 0) page.status = status;
+	const updated = text("updated");
+	if (updated !== void 0) page.updated = updated;
+	const created = text("created");
+	if (created !== void 0) page.created = created;
+	if (frontmatter !== null && frontmatter !== void 0 && "instances" in frontmatter) page.instances = list("instances");
+	page.fromDomain = base.type === HYPOTHESIS_TYPE ? text("from_domain") ?? null : null;
+	return page;
+}
+/** Run every check. The findings are sorted by check id, then by page path, so the output is stable. */
+function checkStructure(input) {
+	if (utcDay(input.today) === null) throw new Error(`today must be a date in YYYY-MM-DD form, got "${input.today}"`);
+	const pages = input.pages.filter((page) => isWikiPage(page.path));
+	const problems = (input.configProblems ?? []).map((problem) => problem.trim()).filter((problem) => problem !== "");
+	const kinds = problems.map(classifyProblem);
+	const domainsBroken = kinds.includes("domains");
+	const libraryBroken = kinds.includes("library-domains");
+	return [
+		...checkConfigProblems(problems, kinds),
+		...checkDomainMissing(pages),
+		...domainsBroken ? [] : checkDomainUnknown(pages, input, libraryBroken),
+		...checkCrossDomain(pages),
+		...checkMechanismInstances(pages, input.identity),
+		...checkCardMap(input),
+		...checkStaleDrafts(pages, input),
+		...domainsBroken ? [] : checkDomainSizes(pages, input)
+	].sort(compareFindings);
+}
+function isWikiPage(path) {
+	const key = path.replace(/\\/g, "/").toLowerCase();
+	return key.startsWith("wiki/") && !isDomainIndexPath(key) && !NON_PAGE_PATHS$1.has(key);
+}
+/** One finding for each config problem. The text of the problem is in the message. */
+function checkConfigProblems(problems, kinds) {
+	return problems.map((problem, index) => {
+		const kind = kinds[index];
+		const consequence = kind === "domains" ? "The domain checks are skipped until you fix the file." : kind === "library-domains" ? "The domains of the reading wiki are not checked until you fix the file." : "Fix the file.";
+		return {
+			check: "config-invalid",
+			page: null,
+			message: `A config file has a problem: ${problem.replace(/[.\s]+$/, "")}. ${consequence}`
+		};
+	});
+}
+/**
+* A page without `domain`. Mechanism pages apply to many domains, so they have none. A hypothesis page
+* has `from_domain` and `to_domain` instead, and a missing one is named (ruling U10).
+*/
+function checkDomainMissing(pages) {
+	const findings = [];
+	for (const page of pages) {
+		if (page.type === "mechanism") continue;
+		if (page.type === HYPOTHESIS_TYPE) {
+			if (isBlank(page.fromDomain)) findings.push(missingHypothesisDomain(page, "from_domain"));
+			if (isBlank(page.domain)) findings.push(missingHypothesisDomain(page, "to_domain"));
+		} else if (isBlank(page.domain)) findings.push({
+			check: "domain-missing",
+			page: page.path,
+			message: "This page has no domain. Set domain to a path from domains.yaml."
+		});
+	}
+	return findings;
+}
+function missingHypothesisDomain(page, key) {
+	return {
+		check: "domain-missing",
+		page: page.path,
+		message: `This hypothesis has no ${key}. Set it to a path from domains.yaml.`
+	};
+}
+/**
+* A domain, an `also` entry, or a hypothesis `from_domain` or `to_domain` that no domains file lists.
+* Ruling U9: in a work wiki, the domains of the reading wiki are known only as the `from_domain` and
+* `to_domain` of a hypothesis. Every other field must name a domain of this wiki.
+*/
+function checkDomainUnknown(pages, input, libraryBroken) {
+	const own = new Set(Object.keys(input.domains.domains));
+	const isWork = input.identity.role === "work";
+	const library = isWork && input.libraryDomains ? new Set(Object.keys(input.libraryDomains.domains)) : null;
+	const libraryUnreadable = isWork && libraryBroken;
+	const isKnown = (domain, field) => own.has(domain) || HYPOTHESIS_DOMAIN_FIELDS.includes(field) && (libraryUnreadable || library !== null && library.has(domain));
+	const findings = [];
+	for (const page of pages) {
+		const unknown = /* @__PURE__ */ new Map();
+		const check = (domain, field) => {
+			if (typeof domain !== "string" || domain === "" || isKnown(domain, field)) return;
+			const fields = unknown.get(domain) ?? [];
+			if (!fields.includes(field)) fields.push(field);
+			unknown.set(domain, fields);
+		};
+		if (page.type === HYPOTHESIS_TYPE) {
+			check(page.fromDomain, "from_domain");
+			check(page.domain, "to_domain");
+		} else check(page.domain, "domain");
+		for (const domain of page.also) check(domain, "also");
+		for (const [domain, fields] of unknown) {
+			const where = library !== null && fields.some((field) => HYPOTHESIS_DOMAIN_FIELDS.includes(field)) ? "It is in neither domains.yaml of this wiki nor domains.yaml of the reading wiki. Add it to domains.yaml, or fix the page." : "Add it to domains.yaml, or fix the page.";
+			findings.push({
+				check: "domain-unknown",
+				page: page.path,
+				message: `Unknown domain "${domain}" in ${fields.length === 1 ? "field" : "fields"} ${fields.join(", ")}. ${where}`,
+				domains: [domain]
+			});
+		}
+	}
+	return findings;
+}
+/**
+* A concept or entity page whose sources are in two or more domains. A page lists the raw file names
+* in `sources`. A source page lists the raw file it summarizes in its own `sources`, so the raw
+* file name links the two. The domain of each source page is its `domain`.
+*
+* A name matches the whole raw name (`heptabase/<card-id>.md`). When the page gives a bare name
+* (`<card-id>.md`) and no source page has that whole name, the name matches by base name, but only
+* when exactly one source page has that base name.
+*/
+function checkCrossDomain(pages) {
+	const domainsOfName = /* @__PURE__ */ new Map();
+	const pagesOfBaseName = /* @__PURE__ */ new Map();
+	for (const page of pages) {
+		if (page.type !== SOURCE_TYPE) continue;
+		for (const file of page.sources) {
+			const key = sourceKey(file);
+			const domains = domainsOfName.get(key) ?? /* @__PURE__ */ new Set();
+			if (hasDomain(page)) domains.add(page.domain);
+			domainsOfName.set(key, domains);
+			const base = key.slice(key.lastIndexOf("/") + 1);
+			pagesOfBaseName.set(base, (pagesOfBaseName.get(base) ?? /* @__PURE__ */ new Set()).add(page));
+		}
+	}
+	const domainsOfReference = (reference) => {
+		const key = sourceKey(reference);
+		const exact = domainsOfName.get(key);
+		if (exact) return exact;
+		const candidates = key.includes("/") ? void 0 : pagesOfBaseName.get(key);
+		if (candidates?.size !== 1) return [];
+		const [only] = candidates;
+		return hasDomain(only) ? [only.domain] : [];
+	};
+	const findings = [];
+	for (const page of pages) {
+		if (!CROSS_DOMAIN_TYPES.includes(page.type)) continue;
+		const domains = /* @__PURE__ */ new Set();
+		for (const file of page.sources) for (const domain of domainsOfReference(file)) domains.add(domain);
+		if (domains.size < 2) continue;
+		const names = [...domains].sort(compareText);
+		findings.push({
+			check: "concept-cross-domain",
+			page: page.path,
+			message: `This ${page.type} page cites sources from ${names.length} domains: ${names.join(", ")}. Split the page by domain, or move the shared structure to a mechanism page.`,
+			domains: names
+		});
+	}
+	return findings;
+}
+/** The raw file name of a source reference: no `raw/sources/` prefix, forward slashes, lower case. */
+function sourceKey(reference) {
+	const key = reference.trim().replace(/\\/g, "/").replace(/^\.\//, "").toLowerCase();
+	if (key.startsWith(RAW_SOURCES_DIR)) return key.slice(12);
+	const at = key.indexOf(`/${RAW_SOURCES_DIR}`);
+	return at === -1 ? key : key.slice(at + 1 + 12);
+}
+/** A mechanism page without an instance. Only a reading wiki holds mechanism pages. */
+function checkMechanismInstances(pages, identity) {
+	if (identity.role !== "reading") return [];
+	return pages.filter((page) => page.type === "mechanism" && (page.instances ?? []).length === 0).map((page) => ({
+		check: "mechanism-no-instance",
+		page: page.path,
+		message: "This mechanism has no instance. Add an instance page under Known instances, or remove the mechanism."
+	}));
+}
+/** A retired card is left in Heptabase for the user to delete. An active entry needs its page. */
+function checkCardMap(input) {
+	if (input.cardMap === null) return [];
+	const titles = new Map(input.pages.map((page) => [normalizePath(page.path), page.title]));
+	const findings = [];
+	for (const [rawPath, entry] of Object.entries(input.cardMap.pages)) {
+		const path = normalizePath(rawPath);
+		if (entry.status === "retired") {
+			const title = titles.get(path);
+			findings.push({
+				check: "mirror-retired",
+				page: path,
+				message: `The card of ${path}${title === void 0 ? "" : ` ("${title}")`} is retired. Card id: ${entry.card_id}. Find the card in the mirror tag by this id or by the "${RETIRED_TITLE_PREFIX}" title prefix. Delete it by hand.`
+			});
+		} else if (entry.status === "active" && !titles.has(path)) findings.push({
+			check: "map-missing-page",
+			page: path,
+			message: `The card map lists ${path} (card id: ${entry.card_id}) as active, but the page is not in the wiki. Restore the page, or let the next mirror sync retire the card.`
+		});
+	}
+	return findings;
+}
+/**
+* A hypothesis that has been a draft for more days than `draft_days`. Ruling R18: a draft
+* changes to `testing` when a row under "What to verify" links a page in `wiki/queries/`.
+* The age counts from `updated`. When `updated` is missing or not a date, it counts from `created`.
+* A draft with neither date is reported, because its age is unknown.
+*/
+function checkStaleDrafts(pages, input) {
+	const limit = input.identity.lint.draft_days;
+	const findings = [];
+	for (const page of pages) {
+		if (page.type !== HYPOTHESIS_TYPE || page.status !== "draft") continue;
+		const dated = [{
+			label: "updated",
+			text: page.updated
+		}, {
+			label: "created",
+			text: page.created
+		}].find((candidate) => candidate.text !== void 0 && utcDay(candidate.text) !== null);
+		if (!dated || dated.text === void 0) {
+			findings.push({
+				check: "hypothesis-stale-draft",
+				page: page.path,
+				message: "The date of this draft hypothesis is not readable. Set updated to a date in YYYY-MM-DD form."
+			});
+			continue;
+		}
+		const age = daysBetween(dated.text, input.today);
+		if (age === null || age <= limit) continue;
+		findings.push({
+			check: "hypothesis-stale-draft",
+			page: page.path,
+			message: `This hypothesis has been a draft for ${age} days (${dated.label} ${dated.text.trim().slice(0, 10)}). To move it to testing, add a row under "What to verify" that links a page in wiki/queries/. If you cannot, update or remove the hypothesis.`
+		});
+	}
+	return findings;
+}
+/** Whole days from `from` to `to`, both as `YYYY-MM-DD`. Null when either is not a real date. */
+function daysBetween(from, to) {
+	const start = utcDay(from);
+	const end = utcDay(to);
+	return start === null || end === null ? null : Math.round((end - start) / MS_PER_DAY);
+}
+/** The UTC time of a `YYYY-MM-DD` date (a time after it is allowed). Null when the text is not a real date. */
+function utcDay(text) {
+	const match = /^(\d{4})-(\d{2})-(\d{2})(?:$|[T\s])/.exec(text.trim());
+	if (!match) return null;
+	const [year, month, day] = [
+		Number(match[1]),
+		Number(match[2]),
+		Number(match[3])
+	];
+	const time = Date.UTC(year, month - 1, day);
+	const date = new Date(time);
+	return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day ? time : null;
+}
+/**
+* The page count of each domain of `domains.yaml`, with zero for a domain that has no page.
+* A page counts once, under its `domain` (a hypothesis: its `to_domain`), never under `also`.
+*/
+function checkDomainSizes(pages, input) {
+	const { max_domain_pages: max, min_domain_pages: min } = input.identity.lint;
+	const counts = new Map(Object.keys(input.domains.domains).map((domain) => [domain, 0]));
+	for (const page of pages) if (page.domain !== null && counts.has(page.domain)) counts.set(page.domain, (counts.get(page.domain) ?? 0) + 1);
+	const findings = [];
+	for (const [domain, count] of counts) if (count > max) findings.push({
+		check: "domain-too-large",
+		page: null,
+		message: `Domain "${domain}" has ${plural(count)}. The limit is ${max}. Split it into sub-domains.`,
+		domains: [domain]
+	});
+	else if (count < min) findings.push({
+		check: "domain-too-small",
+		page: null,
+		message: `Domain "${domain}" has ${plural(count)}. The minimum is ${min}. Add pages, or merge it into a parent domain.`,
+		domains: [domain]
+	});
+	return findings;
+}
+function hasDomain(page) {
+	return !isBlank(page.domain);
+}
+/** True for null, undefined, and text of white space only. */
+function isBlank(value) {
+	return value === null || value === void 0 || value.trim() === "";
+}
+function plural(count) {
+	return `${count} ${count === 1 ? "page" : "pages"}`;
+}
+function normalizePath(path) {
+	return path.replace(/\\/g, "/");
+}
+/** By check id, then page path (a finding without a page first), then the domains, then the message. */
+function compareFindings(a, b) {
+	return compareText(a.check, b.check) || compareText(a.page ?? "", b.page ?? "") || compareText((a.domains ?? []).join("\n"), (b.domains ?? []).join("\n")) || compareText(a.message, b.message);
+}
+
+//#endregion
+//#region tools/wiki-tool/src/lint/project.ts
+/**
+* What the `lint` commands read from a mechanism wiki project, and the option handling they share.
+*
+* `loadLintProject` reads `wiki.yaml`, `domains.yaml`, and, in a work wiki, the `domains.yaml` of the reading wiki
+* (`mechanism_library`). It fills the same config problems as the app (`runMechanismStructuralLint` in
+* `src/lib/mechanism-wiki/lint-run.ts`, ruling U14): each problem is text that names its file, and
+* `configProblemText` builds it. A problem never throws. The reading of pages is in `readWikiPages`.
+*/
+const DOMAINS_FILE = "domains.yaml";
+const WIKI_FILE = "wiki.yaml";
+const UNREADABLE_MESSAGE = "could not read the file";
+const MISSING_WIKI_MESSAGE = "the file is missing; treating this wiki as a reading wiki with id \"reading\"";
+/** The pages that the app keeps in `wiki/`. They are no pages of the wiki. */
+const NON_PAGE_PATHS = new Set([
+	"wiki/index.md",
+	"wiki/log.md",
+	"wiki/overview.md"
+]);
+/**
+* The project at `project`, or null when it has no `domains.yaml`: it is not a mechanism wiki. A file that is
+* missing, cannot be read, or is not valid is a config problem, not an error.
+*/
+function loadLintProject(project) {
+	const root = resolve(project);
+	if (!existsSync(join(root, DOMAINS_FILE))) return null;
+	const configProblems = [];
+	const blockingProblems = [];
+	const report = (issues, source, blocking = true) => {
+		for (const issue of issues) {
+			const text = configProblemText(issue, source);
+			configProblems.push(text);
+			if (blocking) blockingProblems.push(text);
+		}
+	};
+	const wiki = readIdentity(root);
+	report(wiki.issues, "this", wiki.status === "invalid");
+	const own = readDomains(root);
+	report(own.issues, "this");
+	let libraryDomains = null;
+	if (wiki.identity.role === "work" && wiki.identity.mechanism_library !== null) {
+		const library = resolve(root, wiki.identity.mechanism_library.replace(/\\/g, "/"));
+		const found = readDomains(library);
+		if (found.exists) {
+			libraryDomains = found.domains;
+			report(found.issues, "library");
+		} else report([{
+			path: DOMAINS_FILE,
+			message: `the file is missing at ${library.replace(/\\/g, "/")}`
+		}], "library");
+	}
+	return {
+		identity: wiki.identity,
+		domains: own.domains ?? {
+			version: 1,
+			domains: {}
+		},
+		libraryDomains,
+		configProblems,
+		blockingProblems
+	};
+}
+/** The lint thresholds and the role of a wiki without `wiki.yaml`. */
+function defaultIdentity() {
+	return {
+		version: 1,
+		id: "reading",
+		role: "reading",
+		mechanism_library: null,
+		lint: { ...DEFAULT_LINT_THRESHOLDS }
+	};
+}
+/** The text of a file without a byte order mark. Null when the file is missing; undefined when it cannot be read. */
+function readText(path) {
+	if (!existsSync(path)) return null;
+	try {
+		return readFileSync(path, "utf8").replace(/^﻿/, "");
+	} catch {
+		return;
+	}
+}
+/** An issue of `file`, with the file name at the start of its path (as the app does). */
+function fileIssue(file, issue) {
+	return {
+		path: issue.path === "" ? file : `${file}:${issue.path}`,
+		message: issue.message
+	};
+}
+function readIdentity(root) {
+	const text = readText(join(root, WIKI_FILE));
+	if (text === null) return {
+		identity: defaultIdentity(),
+		status: "missing",
+		issues: [{
+			path: WIKI_FILE,
+			message: MISSING_WIKI_MESSAGE
+		}]
+	};
+	if (text === void 0) return {
+		identity: defaultIdentity(),
+		status: "invalid",
+		issues: [{
+			path: WIKI_FILE,
+			message: UNREADABLE_MESSAGE
+		}]
+	};
+	const parsed = parseWikiYaml(text);
+	if (parsed.ok) return {
+		identity: parsed.value,
+		status: "ok",
+		issues: []
+	};
+	return {
+		identity: defaultIdentity(),
+		status: "invalid",
+		issues: parsed.issues.map((issue) => fileIssue(WIKI_FILE, issue))
+	};
+}
+/** `domains.yaml` in the wiki folder `root`. `domains` is null when the file is missing or not valid. */
+function readDomains(root) {
+	const text = readText(join(root, DOMAINS_FILE));
+	if (text === null) return {
+		exists: false,
+		domains: null,
+		issues: []
+	};
+	if (text === void 0) return {
+		exists: true,
+		domains: null,
+		issues: [{
+			path: DOMAINS_FILE,
+			message: UNREADABLE_MESSAGE
+		}]
+	};
+	const parsed = parseDomainsYaml(text, knownLenses(root));
+	if (parsed.ok) return {
+		exists: true,
+		domains: parsed.value,
+		issues: []
+	};
+	return {
+		exists: true,
+		domains: null,
+		issues: parsed.issues.map((issue) => fileIssue(DOMAINS_FILE, issue))
+	};
+}
+/** The domains of this wiki, in the order of `domains.yaml`. */
+function ownDomains(project) {
+	return Object.keys(project.domains.domains);
+}
+/** The domains of the reading wiki that this wiki does not list, in its order. Empty in a reading wiki. */
+function libraryOnlyDomains(project) {
+	if (project.identity.role !== "work" || project.libraryDomains === null) return [];
+	const own = new Set(ownDomains(project));
+	return Object.keys(project.libraryDomains.domains).filter((domain) => !own.has(domain));
+}
+/** True for the path of a page of the wiki: a file under `wiki/` that is not one of the pages of the app. */
+function isPagePath(path) {
+	const key = path.replace(/\\/g, "/").toLowerCase();
+	return key.startsWith("wiki/") && key.endsWith(".md") && !isDomainIndexPath(key) && !NON_PAGE_PATHS.has(key);
+}
+/**
+* Parse the options of a lint command. `--project` is required and must be a folder. A problem comes back as the
+* result that the command returns.
+*/
+function parseLintArgs(args, extraValues = [], required = []) {
+	const { parsed, problems } = parseArgs(args, { values: ["project", ...extraValues] });
+	for (const name of ["project", ...required]) if (parsed.values[name] === void 0) problems.push(`missing option: --${name}`);
+	const project = parsed.values.project;
+	if (problems.length > 0 || project === void 0) return {
+		ok: false,
+		result: {
+			ok: false,
+			problems
+		}
+	};
+	if (!isDirectory(project)) return {
+		ok: false,
+		result: {
+			ok: false,
+			problems: [`project folder not found: ${project}`]
+		}
+	};
+	return {
+		ok: true,
+		project,
+		values: parsed.values
+	};
+}
+/** The result of a project that has no `domains.yaml`. */
+function notMechanismWiki(project) {
+	return {
+		ok: false,
+		problems: [`not a mechanism wiki: ${DOMAINS_FILE} is missing in ${project}`]
+	};
+}
+
+//#endregion
+//#region tools/wiki-tool/src/lint/batch.ts
+/**
+* `wiki-tool lint batch` - group the pages of one domain into batches for a semantic review.
+*
+* `--project P --domain D [--max-chars N]` gives `{ ok: true, batches, notes? }`; `batches` is a list of lists of
+* page paths. The pages of D are the pages whose `domain` is D, and the hypothesis pages whose `to_domain` is D
+* (ruling R19). A page that only lists D in `also` is not one, and a mechanism page is not one: the skill reads
+* the mechanism pages on their own. The pages are sorted by type, then by path, and filled into batches in that
+* order. A batch is closed when the next file would bring its total over `--max-chars` (default 60000), or when the
+* type changes. The size of a file is the number of characters in its text. A file larger than the limit is a batch
+* of its own, and `notes` names it. A domain that no domain list holds, in this wiki or (in a work wiki) in the
+* reading wiki, is a handled problem.
+*/
+const DEFAULT_MAX_CHARS = 6e4;
+function lintBatch(args) {
+	const parsed = parseLintArgs(args, ["domain", "max-chars"], ["domain"]);
+	if (!parsed.ok) return parsed.result;
+	const { project, values } = parsed;
+	const domain = values.domain;
+	let maxChars = DEFAULT_MAX_CHARS;
+	if (values["max-chars"] !== void 0) {
+		const text = values["max-chars"];
+		maxChars = /^\d+$/.test(text) ? Number(text) : NaN;
+		if (!Number.isSafeInteger(maxChars) || maxChars < 1) return {
+			ok: false,
+			problems: [`--max-chars must be a positive integer: ${JSON.stringify(text)}`]
+		};
+	}
+	const config = loadLintProject(project);
+	if (config === null) return notMechanismWiki(project);
+	if (config.blockingProblems.length > 0) return {
+		ok: false,
+		problems: config.blockingProblems.map((problem) => `${problem}. Run "lint structure" for the details`)
+	};
+	if (![...ownDomains(config), ...libraryOnlyDomains(config)].includes(domain)) return {
+		ok: false,
+		problems: [`unknown domain: ${domain}`]
+	};
+	const pages = readWikiPages(project, { allowMissingWiki: true }).map((page) => ({
+		page: structurePageFromMarkdown(page.path, page.markdown),
+		size: page.markdown.length
+	})).filter(({ page }) => page.domain === domain && page.type !== "mechanism").sort((a, b) => compareText$1(a.page.type, b.page.type) || compareText$1(a.page.path, b.page.path));
+	const batches = [];
+	const notes = [];
+	let current = [];
+	let currentType = "";
+	let total = 0;
+	for (const { page, size } of pages) {
+		if (current.length > 0 && (page.type !== currentType || total + size > maxChars)) {
+			batches.push(current);
+			current = [];
+			total = 0;
+		}
+		if (size > maxChars) notes.push(`${page.path} has ${size} characters, more than the limit of ${maxChars}. It is a batch of its own.`);
+		current.push(page.path);
+		currentType = page.type;
+		total += size;
+	}
+	if (current.length > 0) batches.push(current);
+	return {
+		ok: true,
+		batches,
+		...notes.length > 0 ? { notes } : {}
+	};
+}
+
+//#endregion
+//#region tools/wiki-tool/src/lint/mark.ts
+/**
+* `wiki-tool lint mark` - record that the semantic lint has seen the wiki as it is at `HEAD`.
+*
+* `--project P` writes `.llm-wiki/semantic-lint.json` as `{ "commit": "<sha of HEAD>", "at": "<ISO time>" }` and gives
+* `{ ok: true, commit, at }`. `lint changed-domains` reads the marker. The write is atomic, and the folder
+* `.llm-wiki/` is created when it is missing. The marker is never committed. A project that is not a git
+* repository, and a repository with no commit, give exit 2 and no marker.
+*/
+/** The marker file, relative to the project folder. */
+const MARKER_FILE = ".llm-wiki/semantic-lint.json";
+/** A sha as the marker keeps it: 7 to 64 hex digits. Anything else could be read by git as an option or a name. */
+const SHA_PATTERN = /^[0-9a-f]{7,64}$/i;
+/** The commit of the marker of a project. A missing file is "none". A file that cannot be used is "bad". */
+function readMarker(project) {
+	let path;
+	try {
+		path = resolveInProject(project, MARKER_FILE);
+	} catch (error) {
+		return {
+			kind: "bad",
+			reason: error instanceof Error ? error.message : String(error)
+		};
+	}
+	let marker;
+	try {
+		marker = readJsonFile(path);
+	} catch (error) {
+		if (error.code === "ENOENT") return { kind: "none" };
+		return {
+			kind: "bad",
+			reason: error instanceof Error && error.message.startsWith("cannot parse JSON file") ? "it is not valid JSON" : "it cannot be read"
+		};
+	}
+	const commit = typeof marker === "object" && marker !== null ? marker.commit : void 0;
+	if (typeof commit !== "string" || !SHA_PATTERN.test(commit)) return {
+		kind: "bad",
+		reason: "it has no commit sha"
+	};
+	return {
+		kind: "commit",
+		commit: commit.toLowerCase()
+	};
+}
+/** True when the folder is inside a git work tree. */
+function isGitWorkTree(project) {
+	const result = readGit(project, ["rev-parse", "--is-inside-work-tree"]);
+	return result.status === 0 && result.stdout.trim() === "true";
+}
+/** The sha of `HEAD`, or null when the repository has no commit. */
+function headCommit(project) {
+	const result = readGit(project, [
+		"rev-parse",
+		"--verify",
+		"--quiet",
+		"HEAD^{commit}"
+	]);
+	return result.status === 0 ? result.stdout.trim() : null;
+}
+function lintMark(args) {
+	const parsed = parseLintArgs(args);
+	if (!parsed.ok) return parsed.result;
+	const { project } = parsed;
+	if (!isGitWorkTree(project)) return {
+		ok: false,
+		problems: [`not inside a git work tree: ${project}`]
+	};
+	const commit = headCommit(project);
+	if (commit === null) return {
+		ok: false,
+		problems: ["the repository has no commit yet; commit the wiki first"]
+	};
+	const at = (/* @__PURE__ */ new Date()).toISOString();
+	writeFileAtomic(resolveInProject(project, MARKER_FILE), `${JSON.stringify({
+		commit,
+		at
+	}, null, 2)}\n`);
+	return {
+		ok: true,
+		commit,
+		at
+	};
+}
+
+//#endregion
+//#region tools/wiki-tool/src/lint/changed-domains.ts
+/**
+* `wiki-tool lint changed-domains` - the domains whose pages changed since the last semantic lint.
+*
+* `--project P` gives `{ ok, since, domains, mechanismsChanged, ingestsSince }`, and `note` when the marker could
+* not be used. The marker `.llm-wiki/semantic-lint.json` (written by `lint mark`) names a commit. The changed
+* pages are the files under `wiki/` that differ between that commit and `HEAD`; uncommitted changes do not count.
+* A page counts under its `domain` (a hypothesis: its `to_domain`, ruling R19) and its `also` domains. A page that
+* was deleted, or that moved to another domain, counts under its old domains too: the command reads the page at
+* the marker commit as well as at `HEAD`. A renamed page is a deleted page and a new one.
+*
+* - `since` is the marker commit, or null when there is no usable marker. Then `domains` holds every domain of
+*   `domains.yaml` in file order (Review Focus 4), and `note` says why when a marker was there. A marker is not
+*   usable when it is not valid JSON, has no sha, or names a commit that is not an ancestor of `HEAD` (the
+*   history was rewritten).
+* - `domains` holds each changed domain once, in the order of `domains.yaml`. A name that no domain list holds is
+*   dropped. In a work wiki, the domains of the reading wiki follow those of this wiki.
+* - `mechanismsChanged` is true when a path under `wiki/mechanisms/` changed. Without a marker it is true when the
+*   wiki has a mechanism page.
+* - `ingestsSince` is the number of commits after the marker (all commits without a marker) whose subject starts
+*   with `ingest:`.
+*
+* It only reads: git calls take no lock.
+*/
+const MECHANISMS_FOLDER = "wiki/mechanisms/";
+const INGEST_PREFIX = "ingest:";
+function lintChangedDomains(args) {
+	const parsed = parseLintArgs(args);
+	if (!parsed.ok) return parsed.result;
+	const { project } = parsed;
+	const config = loadLintProject(project);
+	if (config === null) return notMechanismWiki(project);
+	if (config.blockingProblems.length > 0) return {
+		ok: false,
+		problems: config.blockingProblems.map((problem) => `${problem}. Run "lint structure" for the details`)
+	};
+	if (!isGitWorkTree(project)) return {
+		ok: false,
+		problems: [`not inside a git work tree: ${project}`]
+	};
+	const head = headCommit(project);
+	const marker = readMarker(project);
+	let note;
+	let since = null;
+	if (head !== null && marker.kind === "commit") {
+		since = usableMarkerCommit(project, marker.commit);
+		if (since === null) note = `The marker commit ${marker.commit} is not in the history of HEAD (the history was rewritten). Every domain is listed.`;
+	} else if (marker.kind === "bad") note = `The marker file .llm-wiki/semantic-lint.json cannot be used: ${marker.reason}. Every domain is listed.`;
+	const touched = /* @__PURE__ */ new Set();
+	let mechanismsChanged;
+	if (since === null) {
+		const pages = readWikiPages(project, { allowMissingWiki: true });
+		for (const page of pages) for (const domain of domainsOfPage(page.path, page.markdown)) touched.add(domain);
+		mechanismsChanged = pages.some((page) => page.path.toLowerCase().startsWith(MECHANISMS_FOLDER));
+	} else {
+		const changed = changedPaths(project, since);
+		for (const { path, status } of changed) {
+			if (!isPagePath(path)) continue;
+			if (status !== "A") for (const domain of domainsOfPage(path, showFile(project, since, path))) touched.add(domain);
+			if (status !== "D") for (const domain of domainsOfPage(path, showFile(project, "HEAD", path))) touched.add(domain);
+		}
+		mechanismsChanged = changed.some(({ path }) => path.toLowerCase().startsWith(MECHANISMS_FOLDER));
+	}
+	return {
+		ok: true,
+		since,
+		domains: orderedDomains(config, touched, since === null),
+		mechanismsChanged,
+		ingestsSince: head === null ? 0 : countIngests(project, since),
+		...note === void 0 ? {} : { note }
+	};
+}
+/**
+* The domains to report, in the order of the domain lists. Without a baseline every domain of this wiki is
+* listed; the domains of the reading wiki are listed only when a page names them.
+*/
+function orderedDomains(config, touched, everyOwnDomain) {
+	const own = ownDomains(config);
+	return [...everyOwnDomain ? own : own.filter((domain) => touched.has(domain)), ...libraryOnlyDomains(config).filter((domain) => touched.has(domain))];
+}
+/** The `domain` (a hypothesis: `to_domain`) and the `also` domains of a page. */
+function domainsOfPage(path, markdown) {
+	const page = structurePageFromMarkdown(path, markdown);
+	return [...page.domain === null ? [] : [page.domain], ...page.also];
+}
+/**
+* The full sha of the marker commit when it is an ancestor of `HEAD`, else null. The commit may be unknown
+* (the history was rewritten and the object is gone), or known and on another line of history.
+*/
+function usableMarkerCommit(project, commit) {
+	const found = readGit(project, [
+		"rev-parse",
+		"--verify",
+		"--quiet",
+		`${commit}^{commit}`
+	]);
+	if (found.status !== 0) return null;
+	const sha = found.stdout.trim();
+	return readGit(project, [
+		"merge-base",
+		"--is-ancestor",
+		sha,
+		"HEAD"
+	]).status === 0 ? sha : null;
+}
+/**
+* The files under `wiki/` that differ between `since` and `HEAD`, with the paths relative to the project folder.
+* Renames are off, so a renamed page is a deleted page and an added one.
+*/
+function changedPaths(project, since) {
+	const result = readGit(project, [
+		"diff",
+		"--name-status",
+		"--no-renames",
+		"--relative",
+		"-z",
+		since,
+		"HEAD",
+		"--",
+		"wiki/"
+	]);
+	if (result.status !== 0) throw new Error(result.stderr.trim() || "git diff failed");
+	const fields = result.stdout.split("\0").filter((field) => field !== "");
+	const changed = [];
+	for (let index = 0; index + 1 < fields.length; index += 2) {
+		const letter = fields[index][0];
+		changed.push({
+			path: fields[index + 1],
+			status: letter === "A" || letter === "D" ? letter : "M"
+		});
+	}
+	return changed;
+}
+/** The text of a file at a commit. `./` makes the path relative to the project folder, not to the repository. */
+function showFile(project, revision, path) {
+	const result = readGit(project, ["show", `${revision}:./${path}`]);
+	if (result.status !== 0) throw new Error(result.stderr.trim() || `git show ${revision}:${path} failed`);
+	return result.stdout.replace(/^﻿/, "");
+}
+/** The commits after `since` (all commits without it) whose subject starts with `ingest:`. */
+function countIngests(project, since) {
+	const result = readGit(project, [
+		"log",
+		"--format=%s",
+		since === null ? "HEAD" : `${since}..HEAD`
+	]);
+	if (result.status !== 0) throw new Error(result.stderr.trim() || "git log failed");
+	return result.stdout.split("\n").filter((subject) => subject.startsWith(INGEST_PREFIX)).length;
+}
+
+//#endregion
+//#region tools/wiki-tool/src/lint/structure.ts
+/**
+* `wiki-tool lint structure` - the structural lint (layer 1) of a mechanism wiki, without a model.
+*
+* `--project P` gives `{ ok: true, findings }`. The command reads the pages under `wiki/`, `wiki.yaml`,
+* `domains.yaml`, the `domains.yaml` of the reading wiki (in a work wiki), and the card map
+* `heptabase-map.json`, and passes them to `checkStructure`, the same pure function that the lint view of the app
+* uses (`runMechanismStructuralLint` in `src/lib/mechanism-wiki/lint-run.ts`). It changes nothing. A config file
+* that is missing or not valid gives `config-invalid` findings, not an error (ruling U14). A project without
+* `domains.yaml` is not a mechanism wiki: exit 2.
+*/
+function lintStructure(args) {
+	const parsed = parseLintArgs(args);
+	if (!parsed.ok) return parsed.result;
+	const { project } = parsed;
+	const config = loadLintProject(project);
+	if (config === null) return notMechanismWiki(project);
+	return {
+		ok: true,
+		findings: checkStructure({
+			pages: readWikiPages(project, { allowMissingWiki: true }).map((page) => structurePageFromMarkdown(page.path, page.markdown)),
+			domains: config.domains,
+			identity: config.identity,
+			cardMap: loadCardMap(project),
+			today: localDate(/* @__PURE__ */ new Date()),
+			libraryDomains: config.libraryDomains,
+			configProblems: config.configProblems
+		})
+	};
+}
+/**
+* The pages of `heptabase-map.json` with the two fields the checks read. Null when the file is missing, is not
+* JSON, or is not a card map of version 1: it is left out of the checks, as in the app. An entry without a text
+* `status` and `card_id` is left out.
+*/
+function loadCardMap(project) {
+	try {
+		const raw = JSON.parse(readFileSync(resolveInProject(project, CARD_MAP_FILE), "utf8").replace(/^﻿/, ""));
+		if (!isRecord(raw) || raw.version !== 1 || !isRecord(raw.pages)) return null;
+		const entries = [];
+		for (const [path, entry] of Object.entries(raw.pages)) if (isRecord(entry) && typeof entry.status === "string" && typeof entry.card_id === "string") entries.push([path, {
+			status: entry.status,
+			card_id: entry.card_id
+		}]);
+		return { pages: Object.fromEntries(entries) };
+	} catch {
+		return null;
+	}
+}
+/** The local date as `YYYY-MM-DD`. */
+function localDate(now) {
+	const two = (value) => String(value).padStart(2, "0");
+	return `${String(now.getFullYear()).padStart(4, "0")}-${two(now.getMonth() + 1)}-${two(now.getDate())}`;
+}
+
+//#endregion
+//#region tools/wiki-tool/src/lint/index.ts
+const LINT_GROUP = {
+	name: "lint",
+	commands: {
+		structure: lintStructure,
+		"changed-domains": lintChangedDomains,
+		mark: lintMark,
+		batch: lintBatch
+	}
+};
+
+//#endregion
 //#region tools/wiki-tool/src/cli.ts
 /**
 * wiki-tool dispatcher.
@@ -6935,8 +8004,12 @@ const FUSE_GROUP = {
 * and sets the exit code: 0 for ok, 2 for a handled problem, 1 for an unexpected
 * error. Each command group lives in its own file; add its CommandGroup to GROUPS.
 */
-/** Command groups. The recut and lint groups register here. */
-const GROUPS = [HEPTA_GROUP, FUSE_GROUP];
+/** Command groups. The recut group registers here. */
+const GROUPS = [
+	HEPTA_GROUP,
+	FUSE_GROUP,
+	LINT_GROUP
+];
 /** Commands that take no group. */
 const TOP_LEVEL_COMMANDS = { version: () => ({
 	ok: true,

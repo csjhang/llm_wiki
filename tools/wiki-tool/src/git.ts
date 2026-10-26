@@ -34,7 +34,7 @@ const OPERATION_MARKERS: [marker: string, operation: string][] = [
   ["rebase-apply", "rebase"],
 ]
 
-interface GitRun {
+export interface GitRun {
   status: number
   stdout: string
   stderr: string
@@ -56,6 +56,15 @@ function runGit(project: string, args: string[]): GitRun {
     if (typeof failure.status !== "number") throw error
     return { status: failure.status, stdout: failure.stdout ?? "", stderr: failure.stderr ?? "" }
   }
+}
+
+/**
+ * Run a read-only git command in the project: `git -C <project> --literal-pathspecs <args>`. For `git log`,
+ * `git diff`, `git show`, `git rev-parse` and the like. A non-zero exit is a result, not an error. It takes
+ * no lock, so it must not write: use commitPathsLocked for a change.
+ */
+export function readGit(projectPath: string, args: string[]): GitRun {
+  return runGit(resolve(projectPath), ["--literal-pathspecs", ...args])
 }
 
 /** Run git and return stdout. A non-zero exit throws git's own message. */

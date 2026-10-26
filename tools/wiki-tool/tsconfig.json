@@ -3,5 +3,13 @@
   "compilerOptions": {
     "types": ["node"]
   },
-  "include": ["src", "../../src/lib/wiki-config", "../../src/lib/commit-message.ts"]
+  "include": [
+    "src",
+    "../../src/lib/wiki-config",
+    "../../src/lib/commit-message.ts",
+    "../../src/lib/frontmatter.ts",
+    "../../src/lib/wiki-page-types.ts",
+    "../../src/lib/mechanism-wiki/domain-index-render.ts",
+    "../../src/lib/mechanism-wiki/lint-structure.ts"
+  ]
 }
