@@ -77,11 +77,21 @@ function isHeadingOf(line: string, section: SectionHeading): boolean {
  */
 export function findSection(markdown: string, section: SectionHeading): string | null {
   const lines = markdown.split(/\r?\n/)
-  const start = lines.findIndex((line) => isHeadingOf(line, section))
-  if (start === -1) return null
-  const rest = lines.slice(start + 1)
-  const end = rest.findIndex(isLevelTwo)
-  return (end === -1 ? rest : rest.slice(0, end)).join("\n").trim()
+  const range = sectionLineRange(lines, section)
+  return range === null ? null : lines.slice(range.start, range.end).join("\n").trim()
+}
+
+/**
+ * Where the body of the first level-2 section of `section` is in `lines` (the lines of a page, without line
+ * breaks): `start` is the first line after the heading, and `end` is the line of the next level-2 heading, or
+ * `lines.length`. Null when the section is absent. The heading matches as `isHeadingOf` says, so a caller that
+ * edits the body in place reads the section exactly as `findSection` does.
+ */
+export function sectionLineRange(lines: readonly string[], section: SectionHeading): { start: number; end: number } | null {
+  const heading = lines.findIndex((line) => isHeadingOf(line, section))
+  if (heading === -1) return null
+  const next = lines.findIndex((line, index) => index > heading && isLevelTwo(line))
+  return { start: heading + 1, end: next === -1 ? lines.length : next }
 }
 
 /**

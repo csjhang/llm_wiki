@@ -50,13 +50,13 @@ export function readJsonFile<T>(path: string): T {
  * the target. A failed write removes the temporary file. Missing parent folders
  * are created.
  */
-export function writeFileAtomic(path: string, content: string): void {
+export function writeFileAtomic(path: string, content: string | Uint8Array): void {
   mkdirSync(dirname(path), { recursive: true })
   const tempPath = `${path}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`
   try {
     const fd = openSync(tempPath, "wx")
     try {
-      writeSync(fd, content)
+      writeSync(fd, typeof content === "string" ? Buffer.from(content, "utf8") : content)
       fsyncSync(fd)
     } finally {
       closeSync(fd)

@@ -13,9 +13,10 @@ import { HEPTA_GROUP } from "./cmd-hepta"
 import { FUSE_GROUP } from "./fuse"
 import type { CommandGroup, CommandHandler, CommandResult } from "./io"
 import { LINT_GROUP } from "./lint"
+import { RECUT_GROUP } from "./recut"
 
-/** Command groups. The recut group registers here. */
-const GROUPS: readonly CommandGroup[] = [HEPTA_GROUP, FUSE_GROUP, LINT_GROUP]
+/** Command groups. */
+const GROUPS: readonly CommandGroup[] = [HEPTA_GROUP, FUSE_GROUP, LINT_GROUP, RECUT_GROUP]
 
 /** Commands that take no group. */
 const TOP_LEVEL_COMMANDS: Record<string, CommandHandler> = {

@@ -220,6 +220,6 @@ export function knownLenses(project: string): string[] {
 }
 
 /** A double-quoted YAML string. JSON text is one, except that YAML also breaks a line at these characters. */
-function yamlString(value: string): string {
+export function yamlString(value: string): string {
   return JSON.stringify(value).replace(/[\u0085\u2028\u2029]/g, (char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)
 }

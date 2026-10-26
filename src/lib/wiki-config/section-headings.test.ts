@@ -5,6 +5,7 @@ import {
   findSection,
   headingFor,
   removeSection,
+  sectionLineRange,
 } from "./section-headings"
 
 const PARTS = MECHANISM_SECTIONS[0]
@@ -139,6 +140,32 @@ describe("section headings", () => {
     it("returns the text as it is when the section is missing", () => {
       const page = "# T\r\n\r\n## Parts\r\nP.\r\n"
       expect(removeSection(page, INSTANCES)).toBe(page)
+    })
+  })
+
+  describe("sectionLineRange", () => {
+    const INSTANCES = MECHANISM_SECTIONS[5]
+    const lines = (text: string): string[] => text.split(/\r?\n/)
+
+    it("gives the lines of the body, after the heading and before the next level-2 heading", () => {
+      const page = lines("# T\n\n## Known instances\n- [[a]] (x): a\n- [[b]] (y): b\n\n## Parts\nP.\n")
+      expect(sectionLineRange(page, INSTANCES)).toEqual({ start: 3, end: 6 })
+    })
+
+    it("runs to the end of the text for the last section", () => {
+      const page = lines("## 已知實例\n- [[a]] (x): a")
+      expect(sectionLineRange(page, INSTANCES)).toEqual({ start: 1, end: 2 })
+    })
+
+    it("is null when the section is absent", () => {
+      expect(sectionLineRange(lines("# T\n\n## Parts\nP.\n"), INSTANCES)).toBeNull()
+    })
+
+    it("uses the first matching heading, as findSection does", () => {
+      const page = "A.\n## Known instances\n- first\n## 已知實例\n- second\n"
+      const range = sectionLineRange(lines(page), INSTANCES)
+      expect(range).toEqual({ start: 2, end: 3 })
+      expect(findSection(page, INSTANCES)).toBe("- first")
     })
   })
 })
