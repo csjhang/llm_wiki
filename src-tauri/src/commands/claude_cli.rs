@@ -24,7 +24,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, State};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStderr, ChildStdout, Command};
 use tokio::sync::Mutex;
 
 use super::cli_resolver::{
@@ -355,10 +355,34 @@ pub async fn claude_cli_spawn(
         .map_err(|e| format!("Failed to flush claude stdin: {e}"))?;
     drop(stdin);
 
-    // Register the child so `claude_cli_kill` can reach it.
-    state.children.lock().await.insert(stream_id.clone(), child);
+    register_and_drain(
+        app,
+        Arc::clone(&state.children),
+        stream_id,
+        child,
+        stdout,
+        stderr,
+    )
+    .await;
 
-    let children = Arc::clone(&state.children);
+    Ok(())
+}
+
+/// Register the child so `claude_cli_kill` can reach it, then drain its output in a
+/// background task. Both spawn commands end here, so the two share one event protocol:
+/// `claude-cli:{stream_id}` carries one stdout line per event, and
+/// `claude-cli:{stream_id}:done` carries `{ code, stderr }` when the child exits.
+async fn register_and_drain(
+    app: AppHandle,
+    children: Arc<Mutex<HashMap<String, Child>>>,
+    stream_id: String,
+    child: Child,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+) {
+    // Register the child so `claude_cli_kill` can reach it.
+    children.lock().await.insert(stream_id.clone(), child);
+
     let app_for_task = app.clone();
     let stream_id_task = stream_id.clone();
     let topic = format!("claude-cli:{stream_id}");
@@ -424,6 +448,98 @@ pub async fn claude_cli_spawn(
             }),
         );
     });
+}
+
+/// Plain characters only: a skill command is a slash command and its words. This is the
+/// same list as the skill panel uses for its words (letters, digits, `.`, `_`, `/`, `-`),
+/// plus the single space between words. `claude` gets the command as one argument and no
+/// shell reads it, and this list keeps it safe for the `.cmd` shim on Windows too.
+fn is_plain_skill_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-' | ' ')
+}
+
+/// A skill command starts with `/`, so `claude` cannot read it as an option, and has only plain characters.
+fn validate_skill_command(command: &str) -> Result<(), String> {
+    if !command.starts_with('/') {
+        return Err("A skill command must start with \"/\"".to_string());
+    }
+    if let Some(bad) = command.chars().find(|c| !is_plain_skill_char(*c)) {
+        return Err(format!(
+            "A skill command may have letters, digits, \".\", \"_\", \"/\", \"-\", and spaces only; found {bad:?}"
+        ));
+    }
+    Ok(())
+}
+
+/// `claude -p --output-format stream-json --verbose <command>`.
+///
+/// A skill run keeps the user's own Claude Code setup: no `--setting-sources`, no
+/// `--disable-slash-commands`, no `--tools`, and no `--mcp-config` flag. So the plugins,
+/// the MCP servers, and the settings of the project apply, and the skill can run as a
+/// slash command. It has no `--model` flag, so Claude Code uses its own default model.
+/// It has no permission flag either: a tool that the settings do not allow is denied,
+/// because nobody can answer a prompt. The command is the last argument.
+fn build_claude_skill_args(command: &str) -> Result<Vec<String>, String> {
+    validate_skill_command(command)?;
+    Ok(vec![
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--verbose".to_string(),
+        command.to_string(),
+    ])
+}
+
+/// Run one skill in the background: `claude -p "<command>"` in the project folder, with the
+/// user's Claude Code setup (see `build_claude_skill_args`). Output goes to the frontend as
+/// `claude_cli_spawn` sends it: `claude-cli:{stream_id}` events, then `claude-cli:{stream_id}:done`.
+/// `claude_cli_kill` stops the run.
+#[tauri::command]
+pub async fn claude_cli_run_skill(
+    app: AppHandle,
+    state: State<'_, ClaudeCliState>,
+    stream_id: String,
+    command: String,
+    working_directory: Option<String>,
+) -> Result<(), String> {
+    let args = build_claude_skill_args(&command)?;
+    let working_directory = resolve_claude_working_directory(working_directory).await?;
+    let claude = find_claude_command().await?;
+    let mut cmd = Command::new(&claude);
+    suppress_windows_console(&mut cmd);
+    if let Some(path_env) = child_path_env().await {
+        cmd.env("PATH", path_env);
+    }
+    cmd.args(args);
+    cmd.current_dir(&working_directory);
+
+    // No input: a skill run asks nobody. Piped stdin would also make claude wait a few seconds for data.
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn claude: {e}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Missing stdout handle".to_string())?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Missing stderr handle".to_string())?;
+
+    register_and_drain(
+        app,
+        Arc::clone(&state.children),
+        stream_id,
+        child,
+        stdout,
+        stderr,
+    )
+    .await;
 
     Ok(())
 }
@@ -655,6 +771,88 @@ mod tests {
             &args[args.len() - 3..],
             ["--strict-mcp-config", "--mcp-config", ISOLATED_MCP_CONFIG]
         );
+    }
+
+    #[test]
+    fn claude_skill_args_run_the_command_as_the_prompt() {
+        let args = build_claude_skill_args("/wiki-sync --yes").expect("a plain slash command");
+
+        assert_eq!(
+            args,
+            [
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "/wiki-sync --yes"
+            ]
+        );
+    }
+
+    #[test]
+    fn claude_skill_args_keep_user_config_and_never_skip_permissions() {
+        let args = build_claude_skill_args("/wiki-lint").expect("a plain slash command");
+
+        // The skill needs the slash command, the tools, and the MCP servers of the user.
+        for flag in [
+            "--setting-sources",
+            "--disable-slash-commands",
+            "--tools",
+            "--strict-mcp-config",
+            "--mcp-config",
+            "--input-format",
+            "--model",
+        ] {
+            assert!(!args.contains(&flag.to_string()), "unexpected flag {flag}");
+        }
+        // A tool that the settings do not allow stays denied.
+        assert!(!args
+            .iter()
+            .any(|arg| arg.contains("permission") || arg.contains("dangerously")));
+        // The command is the last item, so no flag after it can be read as part of it.
+        assert_eq!(args.last().map(String::as_str), Some("/wiki-lint"));
+    }
+
+    #[test]
+    fn claude_skill_command_must_be_a_plain_slash_command() {
+        for ok in [
+            "/wiki-lint",
+            "/wiki-sync --yes",
+            "/wiki-fuse 00000000-0000-4000-8000-000000000001",
+            "/wiki-recut some/relative_path.md",
+        ] {
+            assert!(validate_skill_command(ok).is_ok(), "should accept {ok}");
+        }
+        for bad in [
+            "",
+            "   ",
+            "wiki-sync",
+            "--help",
+            "-p",
+            " /wiki-sync",
+            "/wiki-sync; rm -rf x",
+            "/wiki-sync\n--yes",
+            "/wiki-sync\r",
+            "/wiki-sync $(id)",
+            "/wiki-sync `id`",
+            "/wiki-sync \"x\"",
+            "/wiki-sync 'x'",
+            "/wiki-sync a|b",
+            "/wiki-sync a&b",
+            "/wiki-sync a>b",
+            "/wiki-sync %PATH%",
+            "/wiki-sync C:\\x",
+            "/wiki-sync \u{e9}",
+        ] {
+            assert!(
+                validate_skill_command(bad).is_err(),
+                "should refuse {bad:?}"
+            );
+            assert!(
+                build_claude_skill_args(bad).is_err(),
+                "args should refuse {bad:?}"
+            );
+        }
     }
 
     #[tokio::test]

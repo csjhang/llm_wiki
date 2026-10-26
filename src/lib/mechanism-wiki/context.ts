@@ -63,6 +63,19 @@ const LENSES_DIR = "lenses"
 const PAGE_TYPES_DIR = "schema/page-types"
 const UNREADABLE_MESSAGE = "could not read the file"
 
+function projectBase(projectPath: string): string {
+  return normalizePath(projectPath).replace(/\/+$/, "")
+}
+
+/**
+ * True when the project is a mechanism wiki: `<project>/domains.yaml` exists. This is the
+ * check that `loadMechanismContext` makes first, without the reads of the other files.
+ * The sidebar uses it to show the skill panel only in a mechanism wiki. A failed check counts as no.
+ */
+export async function isMechanismWiki(projectPath: string): Promise<boolean> {
+  return pathExists(`${projectBase(projectPath)}/${DOMAINS_FILE}`)
+}
+
 /**
  * Load the mechanism context of a project. Returns null when `domains.yaml`
  * does not exist, which means the project is not a mechanism wiki. A file that
@@ -71,10 +84,10 @@ const UNREADABLE_MESSAGE = "could not read the file"
  * back to an empty or default one.
  */
 export async function loadMechanismContext(projectPath: string): Promise<MechanismContext | null> {
-  const base = normalizePath(projectPath).replace(/\/+$/, "")
+  const base = projectBase(projectPath)
   const at = (relative: string): string => `${base}/${relative}`
 
-  if (!(await pathExists(at(DOMAINS_FILE)))) return null
+  if (!(await isMechanismWiki(projectPath))) return null
 
   const configIssues: ConfigIssue[] = []
   const [domainsText, wiki, lensFiles, pageTypeFiles] = await Promise.all([

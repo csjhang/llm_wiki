@@ -1,12 +1,13 @@
 import { useState, useEffect } from "react"
 import {
-  FileText, FolderOpen, Search, Network, ClipboardCheck, Settings, ArrowLeftRight, ClipboardList, Globe, MessageSquare, Sparkles,
+  FileText, FolderOpen, Search, Network, ClipboardCheck, Settings, ArrowLeftRight, ClipboardList, Globe, MessageSquare, Sparkles, Workflow,
 } from "lucide-react"
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useReviewStore } from "@/stores/review-store"
 import { useResearchStore } from "@/stores/research-store"
 import { useUpdateStore, hasAvailableUpdate } from "@/stores/update-store"
+import { useMechanismWiki } from "@/hooks/use-mechanism-wiki"
 import { useTranslation } from "react-i18next"
 import logoImg from "@/assets/logo.jpg"
 import type { WikiState } from "@/stores/wiki-store"
@@ -39,6 +40,9 @@ export function IconSidebar({ onSwitchProject }: IconSidebarProps) {
   const researchPanelOpen = useResearchStore((s) => s.panelOpen)
   const researchActiveCount = useResearchStore((s) => s.tasks.filter((t) => t.status !== "done" && t.status !== "error").length)
   const toggleResearchPanel = useResearchStore((s) => s.setPanelOpen)
+  // The skill panel runs the skills of the mechanism wiki plugin, so only a mechanism wiki has it.
+  const projectPath = useWikiStore((s) => s.project?.path ?? null)
+  const isMechanismWiki = useMechanismWiki(projectPath) === true
   // Use `hasAvailableUpdate` (ignores dismiss state) rather than
   // `shouldShowUpdateBanner`. The dot is a passive signpost — it
   // should keep marking the gear as long as the update exists, even
@@ -139,6 +143,21 @@ export function IconSidebar({ onSwitchProject }: IconSidebarProps) {
             </TooltipTrigger>
             <TooltipContent side="right">{t("nav.skills")}</TooltipContent>
           </Tooltip>
+          {isMechanismWiki && (
+            <Tooltip>
+              <TooltipTrigger
+                onClick={() => setActiveView("skill-panel")}
+                className={`relative flex h-10 w-10 items-center justify-center rounded-md transition-colors ${
+                  activeView === "skill-panel"
+                    ? "bg-accent text-accent-foreground"
+                    : "text-muted-foreground hover:bg-accent/50 hover:text-accent-foreground"
+                }`}
+              >
+                <Workflow className="h-5 w-5" />
+              </TooltipTrigger>
+              <TooltipContent side="right">{t("nav.skillPanel")}</TooltipContent>
+            </Tooltip>
+          )}
         </div>
         {/* Bottom: daemon status + settings + switch project */}
         <div className="flex flex-col items-center gap-1 pb-1">

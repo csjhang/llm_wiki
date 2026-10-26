@@ -78,6 +78,8 @@ This section is the one rule for a failed call. Other sections point to it.
 
 ## Before you start
 
+If the command has the argument `--yes`, read the section "Run without questions" before step 1. It changes steps 1, 3, 7, 8, and 9.
+
 1. Find the project folder. Use the current folder if it contains `wiki/` and `raw/`. Otherwise ask the user for the path.
 2. Create the folder `<project>/.llm-wiki/hepta/` with `mkdir -p`.
 3. Check that `<project>/heptabase.yaml` exists. If it does not, do the section "Set up Heptabase" first.
@@ -87,6 +89,31 @@ This section is the one rule for a failed call. Other sections point to it.
 7. Ask the user which direction to run. If the user wants both, run Up first, then Down.
 8. Each direction starts with a plan. Show the plan to the user as counts per action. Wait for a yes before the first write.
 9. Live Heptabase calls are real writes. A `create`, a `setup`, an `update`, a `relink`, a `retire`, and a `place` change the space of the user. Do not run them without the yes.
+
+## Run without questions
+
+Use this section when the command has the argument `--yes`. The panel of the app runs `/wiki-sync --yes` in the background.
+Nobody is there to answer. A question would stop the run for good.
+A command with no `--yes` ignores this section.
+The steps below replace steps 1, 3, 7, 8, and 9 of "Before you start". Do the other steps of that section.
+
+1. The press of the button is the yes for the plans. Do not wait for another yes.
+2. Run Up, then Down. Do not ask which direction.
+3. Never ask the user a question. Do not wait for an answer.
+4. Use the current folder as the project folder. If it has no `wiki/` and no `raw/`, stop and say so.
+5. If `heptabase.yaml` does not exist, stop. Do not do the section "Set up Heptabase". Tell the user to run `/wiki-sync` once in a conversation.
+6. Follow "Up (Heptabase to wiki)" and "Down (wiki to Heptabase)" for the rest. Skip each step that asks the user.
+7. Leave out each step that needs a choice. Go on with the other steps.
+8. Put each left-out step, and each message for the user, in the report at the end.
+
+These steps need a choice:
+
+- An `ask` action of the Up plan (`two-wikis` or `no-root`). Leave the card out. Do not run `record` for it. The next plan gives the action again.
+- A select option that is missing in the mirror tag. Leave out the card, as step 7 of Down says. Name the property and the option in the report.
+- A problem that says `refusing to retire`. Retire no card. Never pass `--allow-mass-retire` in this mode. Put the count and the reason in the report.
+- A failed `create_object` call, for example with the status `clientTaskFailed`. Follow "When a call fails", but do not ask the user. Never call `create_object` again. If the new card is found, go on from `record created`. If it is not found, leave out the card. Put the card, the page, and the message in the report.
+- A failed `place_whiteboard_objects` call. Follow "When a call fails", but do not ask the user. Never call `place_whiteboard_objects` again. If the card is not on the whiteboard, leave out the place action. Put the card and the whiteboard in the report.
+- Any other step where "When a call fails" says to ask the user. Do not ask the user before a new try. Leave out the card and put it in the report.
 
 ## Set up Heptabase
 
@@ -344,4 +371,5 @@ At the end, give the user a short report.
 - The retired cards: the title and the card id of each. Tell the user to delete these cards by hand. The next plan then gives a `forget` action for each card that is gone.
 - The new snapshot files. Say that ingest waits until the app runs, and that the source watch of the app must be on.
 - The PDF cards that the user must save by hand.
+- In a run without questions: each step that the run left out, and why. See the section "Run without questions".
 - Say that `heptabase-map.json` maps wiki pages to Heptabase cards. The user must never discard or revert it.

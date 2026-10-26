@@ -46,6 +46,7 @@ import {
   canWriteMechanismPages,
   extractLensFieldsText,
   extractLensPromptText,
+  isMechanismWiki,
   lensForDomain,
   loadMechanismContext,
 } from "./context"
@@ -96,6 +97,29 @@ afterAll(async () => {
 beforeEach(() => {
   tree.unreadable.clear()
   mountSample()
+})
+
+describe("isMechanismWiki", () => {
+  it("is true when domains.yaml exists, and loadMechanismContext agrees", async () => {
+    expect(await isMechanismWiki(PROJECT)).toBe(true)
+    expect(await loadMechanismContext(PROJECT)).not.toBeNull()
+  })
+
+  it("is false without domains.yaml, and loadMechanismContext agrees", async () => {
+    removeFile("domains.yaml")
+    expect(await isMechanismWiki(PROJECT)).toBe(false)
+    expect(await loadMechanismContext(PROJECT)).toBeNull()
+  })
+
+  it("is true when domains.yaml is unreadable: a broken file does not make a plain wiki", async () => {
+    makeUnreadable("domains.yaml")
+    expect(await isMechanismWiki(PROJECT)).toBe(true)
+  })
+
+  it("accepts a path with a trailing slash and a backslash path", async () => {
+    expect(await isMechanismWiki(`${PROJECT}/`)).toBe(true)
+    expect(await isMechanismWiki(PROJECT.replace(/\//g, "\\"))).toBe(true)
+  })
 })
 
 describe("loadMechanismContext", () => {

@@ -10,6 +10,7 @@ import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { afterAll, describe, expect, it } from "vitest"
 import { runCli } from "../../../tools/wiki-tool/src/cli"
+import { PANEL_ENTRIES } from "@/lib/skill-panel/panel-config"
 import { findLongSentences } from "@/test-helpers/ste-check"
 
 const SKILL_DIR = fileURLToPath(new URL("../../../plugins/llm-wiki/skills/wiki-sync/", import.meta.url))
@@ -161,6 +162,86 @@ describe("wiki-sync skill", () => {
     // The first plan never carries the flag.
     expect(down.slice(down.indexOf("4. Run the plan:"), down.indexOf("\n5. "))).not.toContain("--allow-mass-retire")
     expect(down).toMatch(/`notes`/)
+  })
+
+  // Ruling W1: the panel runs `/wiki-sync --yes` in the background. Nobody can answer a question there.
+  describe("run without questions", () => {
+    const start = skill.indexOf("## Run without questions")
+    const section = start === -1 ? "" : skill.slice(start).split(/\n## /)[0]
+
+    it("is a section, and the panel runs the skill with the argument that the section names", () => {
+      expect(skill).toMatch(/^## Run without questions$/m)
+      const entry = PANEL_ENTRIES.find((candidate) => candidate.skill === "wiki-sync")
+      expect(entry?.mode).toBe("background")
+      expect(entry?.args).toBe("--yes")
+      expect(section).toContain("`/wiki-sync --yes`")
+    })
+
+    it("is found from Before you start, which asks questions", () => {
+      const before = skill.slice(skill.indexOf("## Before you start"), skill.indexOf("## Set up Heptabase"))
+      expect(before).toContain("Run without questions")
+      // The pointer comes first, so the agent reads it before step 1.
+      expect(before.indexOf("Run without questions")).toBeLessThan(before.indexOf("\n1. "))
+    })
+
+    it("takes the press of the button as the yes for the plan, and runs Up, then Down", () => {
+      expect(section).toMatch(/press of the button is the yes/)
+      expect(section).toMatch(/Run Up, then Down\./)
+      expect(section).toMatch(/Do not ask which direction/)
+    })
+
+    it("never asks the user a question", () => {
+      expect(section).toMatch(/Never ask the user a question\./)
+      expect(section).toMatch(/Do not wait for an answer\./)
+    })
+
+    it("never passes --allow-mass-retire, and retires no card when the plan refuses", () => {
+      expect(section).toContain("`refusing to retire`")
+      expect(section).toMatch(/Never pass `--allow-mass-retire`/)
+      expect(section).toMatch(/Retire no card\./)
+      // The flag is named to forbid it, and for no other reason.
+      for (const sentence of section.split(/(?<=\.)\s/).filter((part) => part.includes("--allow-mass-retire"))) {
+        expect(sentence).toMatch(/Never pass/)
+      }
+    })
+
+    it("leaves out each step that needs a choice, and lists it in the report", () => {
+      for (const word of ["`ask`", "`two-wikis`", "`no-root`", "select option", "`refusing to retire`", "`create_object`", "`clientTaskFailed`", "`place_whiteboard_objects`"]) {
+        expect(section, word).toContain(word)
+      }
+      expect(section).toMatch(/Do not run `record` for it\./)
+      expect(section).toMatch(/Leave out/)
+      expect(section).toMatch(/Put .* in the report\./)
+      // The report names the left-out steps.
+      const report = skill.slice(skill.indexOf("## Report"))
+      expect(report).toContain("Run without questions")
+    })
+
+    it("does not call a failed create or place again, and does not ask about it", () => {
+      expect(section).toMatch(/Never call `create_object` again/)
+      expect(section).toMatch(/Do not ask the user before a new try/)
+      expect(section).toContain("When a call fails")
+    })
+
+    it("stops when heptabase.yaml is missing and says to run /wiki-sync once in a conversation", () => {
+      expect(section).toContain("`heptabase.yaml`")
+      expect(section).toMatch(/Do not do the section "Set up Heptabase"/)
+      expect(section).toMatch(/run `\/wiki-sync` once in a conversation/)
+    })
+
+    it("points to the sections of the skill and does not copy their commands", () => {
+      for (const name of ["Before you start", "Up (Heptabase to wiki)", "Down (wiki to Heptabase)", "When a call fails", "ask"]) {
+        expect(section, name).toContain(name)
+      }
+      expect(section).not.toContain("wiki-tool.mjs")
+      expect(section).not.toContain("--project")
+      expect(section).not.toContain('"runOn"')
+    })
+
+    it("keeps its sentences short", () => {
+      expect(section).not.toBe("")
+      expect(findLongSentences("SKILL.md", section)).toEqual([])
+    })
   })
 
   it("keeps sentences short", () => {
