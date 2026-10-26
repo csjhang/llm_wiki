@@ -11,7 +11,7 @@ The skill panel of the LLM Wiki app runs Claude Code skills in this folder. Do t
 1. Install the `llm-wiki` plugin and the Heptabase plugin in Claude Code. The README of the `llm-wiki` plugin has the commands.
 2. Add the LLM Wiki MCP server to Claude Code. Name the server `llm-wiki`. The file `mcp-server/README.md` in the LLM Wiki repository shows how.
 3. Check the names of the Heptabase tools. Run `/mcp` in Claude Code and open the Heptabase server. A plugin tool has the name `mcp__plugin_<plugin>_<server>__<tool>`.
-4. Compare that prefix with the first rule in `.claude/settings.json`. The rule is `mcp__plugin_heptabase_heptabase__*`. If the prefix is not the same, change the rule.
+4. Compare that prefix with the Heptabase rules in `.claude/settings.json`. The file has one rule for each tool, with two prefixes. A Heptabase plugin gives `mcp__plugin_heptabase_heptabase__`. The Heptabase connector of claude.ai gives `mcp__Heptabase__`. If your tools have another prefix, change the prefix in each rule.
 5. Run `claude` in this folder. Accept the trust prompt. Do this before the first background run.
 
 ## Why step 5 matters
@@ -22,10 +22,16 @@ Without the trust, a background run of `wiki-sync` or `wiki-lint` cannot use the
 
 ## What `.claude/settings.json` allows
 
-- The Heptabase tools and the `llm-wiki` tools.
+- The Heptabase tools that the skills call. The file names each tool one by one, so a new Heptabase tool needs a new rule.
+- All tools of the `llm-wiki` server.
 - The `wiki-tool` script of the plugin and the `undo.mjs` script of `wiki-undo`.
-- The `git` command.
+- The `git` command, but see the deny list below.
 - The `mkdir` and `cp` commands, only for the `.llm-wiki/hepta` folder.
 - Edits in the `.llm-wiki` folder.
 
-The list allows nothing else. Add a rule only when a skill needs it.
+## What `.claude/settings.json` denies
+
+A deny rule wins over an allow rule. The file denies `git push`, `git reset`, `git clean`, `git checkout`, `git restore`, `git rebase`, `git stash`, `git branch -D`, and `rm`.
+No skill needs these commands. The undo script runs its own git commands.
+A deny rule stops the usual form of a command only. For example, it does not stop `git -C . push`.
+Add a rule only when a skill needs it.

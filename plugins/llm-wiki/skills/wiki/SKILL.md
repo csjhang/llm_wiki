@@ -22,8 +22,8 @@ The table has one row for each skill. The row of `wiki` is last, because `wiki` 
 
 ## Steps
 
-1. Show the table of the menu to the user.
-2. Find the `skills` folder that contains this skill. If it has a folder that the table does not list, read the `description` in the `SKILL.md` of that folder. Add one row for it before the row of `wiki`.
+1. Find the `skills` folder that contains this skill. If it has a folder that the table does not list, read the `description` in the `SKILL.md` of that folder. Add one row for it before the row of `wiki`.
+2. Show the table of the menu to the user.
 3. Ask the user which skill to run.
 4. Run the skill that the user selects. Use the Skill tool with the name of the skill. Do not read the `SKILL.md` of the skill and follow it by hand.
 5. If the user selects `wiki`, show the table again and ask again.

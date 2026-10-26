@@ -414,7 +414,7 @@ export function WikiEditor({ content, onSave, filePath }: WikiEditorProps) {
           />
         </div>
       )}
-      {showPageLinks && filePath && <PageLinksPanel filePath={filePath} onClose={() => setShowPageLinks(false)} />}
+      {showPageLinks && filePath && <PageLinksPanel filePath={filePath} readOnly={readOnly} onClose={() => setShowPageLinks(false)} />}
       </div>
       {selectionRequest && (
         <aside className="flex h-full w-[360px] max-w-[45%] shrink-0 flex-col border-l border-border bg-background" aria-label={t("editor.selection.askAgent")}>

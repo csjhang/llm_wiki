@@ -10,7 +10,34 @@ import { normalizeSelectionReplacement } from "@/lib/selection-edit"
 
 const EMPTY_LINKS: PageLinksResponse = { outgoing: [], backlinks: [], missing: [] }
 
-export function PageLinksPanel({ filePath, onClose }: { filePath: string; onClose: () => void }) {
+/**
+ * The link lists of a page. On a read-only page (a page under `wiki/` of a mechanism wiki) the missing
+ * links have no Create and no Draft: both write a new page. Opening a page stays possible.
+ */
+export function PageLinksSections({
+  links,
+  readOnly,
+  onOpen,
+  onCreate,
+  creatingTitle,
+}: {
+  links: PageLinksResponse
+  readOnly: boolean
+  onOpen: (entry: PageLinkEntry) => void
+  onCreate: (entry: PageLinkEntry, withDraft: boolean) => Promise<void>
+  creatingTitle: string
+}) {
+  const { t } = useTranslation()
+  return (
+    <>
+      <LinkSection name="outgoing" icon={Link2} title={t("editor.pageLinks.outgoing")} entries={links.outgoing} empty={t("editor.pageLinks.noOutgoing")} onOpen={onOpen} />
+      <LinkSection name="backlinks" icon={CornerUpLeft} title={t("editor.pageLinks.backlinks")} entries={links.backlinks} empty={t("editor.pageLinks.noBacklinks")} onOpen={onOpen} />
+      <LinkSection name="missing" icon={FileQuestion} title={t("editor.pageLinks.missing")} entries={links.missing} empty={t("editor.pageLinks.noMissing")} onOpen={onOpen} onCreate={readOnly ? undefined : onCreate} creatingTitle={creatingTitle} missing />
+    </>
+  )
+}
+
+export function PageLinksPanel({ filePath, onClose, readOnly = false }: { filePath: string; onClose: () => void; readOnly?: boolean }) {
   const { t } = useTranslation()
   const project = useWikiStore((state) => state.project)
   const dataVersion = useWikiStore((state) => state.dataVersion)
@@ -65,7 +92,7 @@ export function PageLinksPanel({ filePath, onClose }: { filePath: string; onClos
   }
 
   const createMissing = async (entry: PageLinkEntry, withDraft: boolean) => {
-    if (!project || creatingTitle) return
+    if (readOnly || !project || creatingTitle) return
     setCreatingTitle(entry.title)
     setError("")
     const controller = new AbortController()
@@ -120,11 +147,7 @@ export function PageLinksPanel({ filePath, onClose }: { filePath: string; onClos
         {loading ? (
           <div className="flex h-24 items-center justify-center text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" /></div>
         ) : (
-          <>
-            <LinkSection icon={Link2} title={t("editor.pageLinks.outgoing")} entries={links.outgoing} empty={t("editor.pageLinks.noOutgoing")} onOpen={openEntry} />
-            <LinkSection icon={CornerUpLeft} title={t("editor.pageLinks.backlinks")} entries={links.backlinks} empty={t("editor.pageLinks.noBacklinks")} onOpen={openEntry} />
-            <LinkSection icon={FileQuestion} title={t("editor.pageLinks.missing")} entries={links.missing} empty={t("editor.pageLinks.noMissing")} onOpen={openEntry} onCreate={createMissing} creatingTitle={creatingTitle} missing />
-          </>
+          <PageLinksSections links={links} readOnly={readOnly} onOpen={openEntry} onCreate={createMissing} creatingTitle={creatingTitle} />
         )}
       </div>
     </aside>
@@ -132,6 +155,7 @@ export function PageLinksPanel({ filePath, onClose }: { filePath: string; onClos
 }
 
 function LinkSection({
+  name,
   icon: Icon,
   title,
   entries,
@@ -141,6 +165,7 @@ function LinkSection({
   onCreate,
   creatingTitle = "",
 }: {
+  name: "outgoing" | "backlinks" | "missing"
   icon: typeof Link2
   title: string
   entries: PageLinkEntry[]
@@ -152,7 +177,7 @@ function LinkSection({
 }) {
   const { t } = useTranslation()
   return (
-    <section className="border-b border-border">
+    <section data-section={name} className="border-b border-border">
       <div className="flex items-center gap-2 bg-muted/30 px-3 py-2">
         <Icon className="h-3.5 w-3.5 text-muted-foreground" />
         <h3 className="flex-1 text-xs font-medium">{title}</h3>
@@ -164,12 +189,14 @@ function LinkSection({
         entries.map((entry, index) => missing ? (
           <div key={`${entry.title}:${index}`} className="border-t border-border/50 px-3 py-2 first:border-t-0">
             <span className="block truncate text-xs font-medium text-amber-700 dark:text-amber-300">{entry.title}</span>
-            <div className="mt-1.5 flex gap-1">
-              <button type="button" disabled={Boolean(creatingTitle)} onClick={() => void onCreate?.(entry, false)} className="inline-flex items-center gap-1 border border-border px-1.5 py-1 text-[10px] text-foreground hover:bg-accent disabled:opacity-50"><Plus className="h-3 w-3" />{t("editor.pageLinks.create")}</button>
-              <button type="button" disabled={Boolean(creatingTitle)} onClick={() => void onCreate?.(entry, true)} className="inline-flex items-center gap-1 bg-primary px-1.5 py-1 text-[10px] text-primary-foreground disabled:opacity-50">
-                {creatingTitle === entry.title ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />} {t("editor.pageLinks.draft")}
-              </button>
-            </div>
+            {onCreate && (
+              <div className="mt-1.5 flex gap-1">
+                <button type="button" disabled={Boolean(creatingTitle)} onClick={() => void onCreate(entry, false)} className="inline-flex items-center gap-1 border border-border px-1.5 py-1 text-[10px] text-foreground hover:bg-accent disabled:opacity-50"><Plus className="h-3 w-3" />{t("editor.pageLinks.create")}</button>
+                <button type="button" disabled={Boolean(creatingTitle)} onClick={() => void onCreate(entry, true)} className="inline-flex items-center gap-1 bg-primary px-1.5 py-1 text-[10px] text-primary-foreground disabled:opacity-50">
+                  {creatingTitle === entry.title ? <Loader2 className="h-3 w-3 animate-spin" /> : <Sparkles className="h-3 w-3" />} {t("editor.pageLinks.draft")}
+                </button>
+              </div>
+            )}
           </div>
         ) : (
           <button

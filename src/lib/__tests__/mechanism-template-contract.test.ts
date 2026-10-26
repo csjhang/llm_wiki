@@ -1243,17 +1243,46 @@ describe("mechanism template: sentence length", () => {
 })
 
 /**
- * The permission allowlist of the template (`.claude/settings.json`). A background run of a skill
- * (`claude -p`) cannot ask, so a tool that is not on this list is denied. The list names only what
- * the skills need. Every rule was checked against the Claude Code docs (permissions and MCP):
- * - `mcp__<server>` allows every tool of that server, and `mcp__<server>__*` does the same for one server.
+ * The permissions of the template (`.claude/settings.json`). A background run of a skill
+ * (`claude -p`) cannot ask, so a tool that is not on the allow list is denied. The list names only
+ * what the skills need. Every rule was checked against the Claude Code docs (permissions and MCP):
+ * - `mcp__<server>` allows every tool of that server. The Heptabase tools are named one by one instead.
  * - The tools of a plugin server are named `mcp__plugin_<plugin>_<server>__<tool>`.
- * - A `*` can be anywhere in a Bash rule and matches spaces.
+ *   The claude.ai connector names its tools `mcp__Heptabase__<tool>`. The list has both prefixes.
+ * - A `*` can be anywhere in a Bash rule and matches spaces. A trailing ` *` also matches the bare command.
  * - `Edit(/x/**)` is anchored at the project folder in a project settings file, and an Edit rule covers Write.
+ * - A deny rule wins over an allow rule, so `Bash(git *)` stays allowed while `git push` is denied.
+ *   A deny rule stops the usual form of a command only: `git -C . push` is not matched.
  */
+const PLUGIN_PREFIX = "mcp__plugin_heptabase_heptabase__"
+const CONNECTOR_PREFIX = "mcp__Heptabase__"
+
+/**
+ * The Heptabase tools that the skills call. The test below reads the skill files and checks that this
+ * list is the list of names in them. `read_system_manual_page` is the exception: no skill names it, but the
+ * Heptabase server tells a client to read its manual first, and a denied call would turn a run into a
+ * "denied tools" warning. It only reads.
+ */
+const SKILL_HEPTABASE_TOOLS = [
+  "create_object",
+  "edit_card_properties",
+  "edit_object_content",
+  "get_file_download_url",
+  "list_cards",
+  "list_tags",
+  "list_whiteboards",
+  "place_whiteboard_objects",
+  "read_database",
+  "read_object",
+  "read_whiteboard",
+  "update_database_card_membership",
+]
+const MANUAL_TOOL = "read_system_manual_page"
+const HEPTABASE_TOOLS = [...SKILL_HEPTABASE_TOOLS, MANUAL_TOOL].sort()
+
 const ALLOWED_PERMISSIONS = [
-  "mcp__plugin_heptabase_heptabase__*",
-  "mcp__Heptabase",
+  ...HEPTABASE_TOOLS.map((tool) => `${PLUGIN_PREFIX}${tool}`),
+  ...HEPTABASE_TOOLS.map((tool) => `${CONNECTOR_PREFIX}${tool}`),
   "mcp__llm-wiki",
   "Bash(node */scripts/wiki-tool.mjs *)",
   "Bash(node */skills/wiki-undo/scripts/undo.mjs *)",
@@ -1263,21 +1292,63 @@ const ALLOWED_PERMISSIONS = [
   "Edit(/.llm-wiki/**)",
 ]
 
-describe("mechanism template: permission allowlist", () => {
-  const settings = (): unknown => JSON.parse(readTemplate(".claude/settings.json"))
+/** Git commands that lose work or change history, and `rm`. No skill step runs one of them: the undo script runs its own git. */
+const DENIED_PERMISSIONS = [
+  "Bash(git push *)",
+  "Bash(git reset *)",
+  "Bash(git clean *)",
+  "Bash(git checkout *)",
+  "Bash(git restore *)",
+  "Bash(git rebase *)",
+  "Bash(git branch -D *)",
+  "Bash(git stash *)",
+  "Bash(rm *)",
+]
 
-  it("settings.json allows exactly the tools that the skills need, and sets nothing else", () => {
-    expect(settings()).toEqual({ permissions: { allow: ALLOWED_PERMISSIONS } })
+/** Every Markdown file of the skills of the plugin: each `SKILL.md` and each `reference/*.md`. */
+function skillMarkdownFiles(): string[] {
+  const skills = join(REPO_ROOT, "plugins", "llm-wiki", "skills")
+  return readdirSync(skills, { withFileTypes: true }).flatMap((entry) => {
+    if (!entry.isDirectory()) return []
+    const dir = join(skills, entry.name)
+    const reference = join(dir, "reference")
+    const referenceFiles = existsSync(reference)
+      ? readdirSync(reference).filter((name) => name.endsWith(".md")).map((name) => join(reference, name))
+      : []
+    return [join(dir, "SKILL.md"), ...referenceFiles]
+  })
+}
+
+/** The words of a skill file that look like a Heptabase tool name: a verb, then snake_case. */
+function heptabaseToolsNamedBySkills(): string[] {
+  const names = new Set<string>()
+  const toolName = /\b(?:list|read|create|edit|update|place|get|search|append|move|remove|rename|resize|arrange|align|render|lint|screenshot)_[a-z_]+\b/g
+  for (const file of skillMarkdownFiles()) {
+    for (const match of readFileSync(file, "utf8").matchAll(toolName)) names.add(match[0])
+  }
+  return [...names].sort()
+}
+
+describe("mechanism template: permission allowlist", () => {
+  type Permissions = { allow: string[]; deny: string[] }
+  const permissions = (): Permissions => (JSON.parse(readTemplate(".claude/settings.json")) as { permissions: Permissions }).permissions
+
+  it("settings.json allows and denies exactly these rules, and sets nothing else", () => {
+    expect(JSON.parse(readTemplate(".claude/settings.json"))).toEqual({
+      permissions: { allow: ALLOWED_PERMISSIONS, deny: DENIED_PERMISSIONS },
+    })
   })
 
-  it("settings.json keeps the order of the allow list, so a diff shows what changed", () => {
-    const allow = (settings() as { permissions: { allow: string[] } }).permissions.allow
+  it("settings.json keeps the order of both lists, so a diff shows what changed", () => {
+    const { allow, deny } = permissions()
     expect(allow).toEqual(ALLOWED_PERMISSIONS)
+    expect(deny).toEqual(DENIED_PERMISSIONS)
     expect(new Set(allow).size).toBe(allow.length)
+    expect(new Set(deny).size).toBe(deny.length)
   })
 
   it("no rule opens a whole tool: every Bash rule names a program, and Edit is limited to .llm-wiki/", () => {
-    const allow = (settings() as { permissions: { allow: string[] } }).permissions.allow
+    const { allow } = permissions()
     for (const rule of allow) {
       expect(rule, rule).not.toMatch(/^(Bash|Edit|Write|Read|WebFetch|WebSearch)(\(\*\))?$/)
       if (rule.startsWith("Bash(")) {
@@ -1288,27 +1359,99 @@ describe("mechanism template: permission allowlist", () => {
     expect(allow.filter((rule) => rule.startsWith("Write("))).toEqual([])
   })
 
+  it("the Heptabase tools are allowed one by one: no server-wide rule and no wildcard", () => {
+    const { allow } = permissions()
+    const heptabase = allow.filter((rule) => /^mcp__(?:plugin_heptabase_heptabase|Heptabase)/i.test(rule))
+    expect(heptabase.length).toBe(HEPTABASE_TOOLS.length * 2)
+    for (const rule of heptabase) {
+      expect(rule, rule).toMatch(/^mcp__(?:plugin_heptabase_heptabase|Heptabase)__[a-z_]+$/)
+      expect(rule, rule).not.toContain("*")
+    }
+    expect(allow).not.toContain("mcp__Heptabase")
+    expect(allow).not.toContain("mcp__plugin_heptabase_heptabase")
+    // The llm_wiki server is allowed as a whole: all its tools belong to this wiki.
+    expect(allow.filter((rule) => rule.startsWith("mcp__llm-wiki"))).toEqual(["mcp__llm-wiki"])
+  })
+
+  it("every Heptabase tool that a skill file names is allowed with both prefixes", () => {
+    const named = heptabaseToolsNamedBySkills()
+    // The guard fails when the scan stops finding the tools, so a rename cannot hide a missing rule.
+    expect(named).toEqual([...SKILL_HEPTABASE_TOOLS].sort())
+    const { allow } = permissions()
+    for (const tool of named) {
+      expect(allow, `${PLUGIN_PREFIX}${tool}`).toContain(`${PLUGIN_PREFIX}${tool}`)
+      expect(allow, `${CONNECTOR_PREFIX}${tool}`).toContain(`${CONNECTOR_PREFIX}${tool}`)
+    }
+  })
+
+  it("the allow list has no Heptabase tool that no skill needs, except the manual", () => {
+    const { allow } = permissions()
+    const allowedTools = allow
+      .filter((rule) => rule.startsWith(PLUGIN_PREFIX) || rule.startsWith(CONNECTOR_PREFIX))
+      .map((rule) => rule.slice(rule.lastIndexOf("__") + 2))
+    expect(new Set(allowedTools)).toEqual(new Set([...heptabaseToolsNamedBySkills(), MANUAL_TOOL]))
+  })
+
+  it("no rule is both allowed and denied", () => {
+    const { allow, deny } = permissions()
+    expect(allow.filter((rule) => deny.includes(rule))).toEqual([])
+  })
+
+  it("the deny list stops the git commands that lose work, and rm", () => {
+    const { deny } = permissions()
+    for (const command of ["push", "reset", "clean", "checkout", "restore", "rebase", "stash"]) {
+      expect(deny, `git ${command}`).toContain(`Bash(git ${command} *)`)
+    }
+    expect(deny).toContain("Bash(git branch -D *)")
+    expect(deny).toContain("Bash(rm *)")
+    for (const rule of deny) expect(rule, rule).toMatch(/^Bash\((?:git [a-z]+(?: -D)? |rm )\*\)$/)
+  })
+
+  it("no skill step runs a denied command: a skill file names one only to forbid it", () => {
+    const denied = /\bgit (?:push|reset|clean|checkout|restore|rebase|stash)\b|\bgit branch -D\b|(?:^|[\s`(])rm [^\s]/
+    const found: string[] = []
+    for (const file of skillMarkdownFiles()) {
+      for (const [index, line] of readFileSync(file, "utf8").split(/\r?\n/).entries()) {
+        if (denied.test(line) && !/\b(?:do not|never|don't)\b/i.test(line)) found.push(`${file}:${index + 1}: ${line.trim()}`)
+      }
+    }
+    expect(found).toEqual([])
+  })
+
   it("every script that a Bash rule names is a script of the plugin", () => {
     const plugin = join(REPO_ROOT, "plugins", "llm-wiki")
     expect(existsSync(join(plugin, "scripts", "wiki-tool.mjs"))).toBe(true)
     expect(existsSync(join(plugin, "skills", "wiki-undo", "scripts", "undo.mjs"))).toBe(true)
   })
 
-  it("the template README has a setup section: server name, Heptabase prefix, and the trust prompt", () => {
+  it("the template README has a setup section: server name, Heptabase prefixes, and the trust prompt", () => {
     const readme = readTemplate("README.md")
     const setup = sectionBody(readme, "Set up Claude Code")
     expect(setup).not.toBe("")
     // The allow list names the llm_wiki server `llm-wiki`.
     expect(setup).toContain("`llm-wiki`")
     expect(setup).toContain("mcp-server/README.md")
-    // The Heptabase rule uses a plugin prefix that depends on the install. The README says how to check it.
-    expect(setup).toContain("`mcp__plugin_heptabase_heptabase__*`")
+    // The Heptabase rules use a prefix that depends on the install. The README says how to check it.
+    expect(setup).toContain(`\`${PLUGIN_PREFIX}\``)
+    expect(setup).toContain(`\`${CONNECTOR_PREFIX}\``)
+    expect(setup).not.toContain("`mcp__plugin_heptabase_heptabase__*`")
     expect(setup).toContain("`/mcp`")
     expect(setup).toContain(".claude/settings.json")
     // A background run ignores the allow list until the folder is trusted (ruling W10).
     expect(setup).toMatch(/Run `claude` in this folder/)
     expect(setup).toMatch(/trust prompt/)
     expect(setup).toMatch(/before the first background run/)
+  })
+
+  it("the template README says what the lists allow and deny", () => {
+    const readme = readTemplate("README.md")
+    expect(sectionBody(readme, "What `.claude/settings.json` allows")).toMatch(/one by one/)
+    const denies = sectionBody(readme, "What `.claude/settings.json` denies")
+    for (const word of ["git push", "git reset", "git clean", "git checkout", "git restore", "git rebase", "git stash", "git branch -D", "rm"]) {
+      expect(denies, word).toContain(`\`${word}\``)
+    }
+    // A deny rule matches the usual form of a command only. The README says so.
+    expect(denies).toContain("git -C . push")
   })
 
   it("the template README keeps sentences short", () => {

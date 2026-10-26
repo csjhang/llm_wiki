@@ -1,8 +1,32 @@
 {
   "permissions": {
     "allow": [
-      "mcp__plugin_heptabase_heptabase__*",
-      "mcp__Heptabase",
+      "mcp__plugin_heptabase_heptabase__create_object",
+      "mcp__plugin_heptabase_heptabase__edit_card_properties",
+      "mcp__plugin_heptabase_heptabase__edit_object_content",
+      "mcp__plugin_heptabase_heptabase__get_file_download_url",
+      "mcp__plugin_heptabase_heptabase__list_cards",
+      "mcp__plugin_heptabase_heptabase__list_tags",
+      "mcp__plugin_heptabase_heptabase__list_whiteboards",
+      "mcp__plugin_heptabase_heptabase__place_whiteboard_objects",
+      "mcp__plugin_heptabase_heptabase__read_database",
+      "mcp__plugin_heptabase_heptabase__read_object",
+      "mcp__plugin_heptabase_heptabase__read_system_manual_page",
+      "mcp__plugin_heptabase_heptabase__read_whiteboard",
+      "mcp__plugin_heptabase_heptabase__update_database_card_membership",
+      "mcp__Heptabase__create_object",
+      "mcp__Heptabase__edit_card_properties",
+      "mcp__Heptabase__edit_object_content",
+      "mcp__Heptabase__get_file_download_url",
+      "mcp__Heptabase__list_cards",
+      "mcp__Heptabase__list_tags",
+      "mcp__Heptabase__list_whiteboards",
+      "mcp__Heptabase__place_whiteboard_objects",
+      "mcp__Heptabase__read_database",
+      "mcp__Heptabase__read_object",
+      "mcp__Heptabase__read_system_manual_page",
+      "mcp__Heptabase__read_whiteboard",
+      "mcp__Heptabase__update_database_card_membership",
       "mcp__llm-wiki",
       "Bash(node */scripts/wiki-tool.mjs *)",
       "Bash(node */skills/wiki-undo/scripts/undo.mjs *)",
@@ -10,6 +34,17 @@
       "Bash(mkdir -p */.llm-wiki/hepta*)",
       "Bash(cp * */.llm-wiki/hepta/*)",
       "Edit(/.llm-wiki/**)"
+    ],
+    "deny": [
+      "Bash(git push *)",
+      "Bash(git reset *)",
+      "Bash(git clean *)",
+      "Bash(git checkout *)",
+      "Bash(git restore *)",
+      "Bash(git rebase *)",
+      "Bash(git branch -D *)",
+      "Bash(git stash *)",
+      "Bash(rm *)"
     ]
   }
 }

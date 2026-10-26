@@ -32,12 +32,28 @@ function licenseSpdxId(): string {
   throw new Error("Unrecognized root LICENSE")
 }
 
-/** Paths, relative to the repo root with "/" separators, of every file under a folder of the repo, dot folders included. */
-function filesUnder(folder: string): string[] {
-  return readdirSync(join(REPO_ROOT, folder), { withFileTypes: true }).flatMap((entry) => {
-    const relative = `${folder}/${entry.name}`
-    return entry.isDirectory() ? filesUnder(relative) : [relative]
-  })
+/** The lines that a git command prints. Paths are relative to the repo root with "/" separators. */
+function gitLines(args: string[]): string[] {
+  return execFileSync("git", args, { cwd: REPO_ROOT, encoding: "utf8" })
+    .split("\n")
+    .filter((line) => line !== "")
+}
+
+/** The paths among `paths` that an ignore rule matches. `--no-index` checks a tracked path against the rules too. */
+function gitIgnored(paths: string[]): string[] {
+  try {
+    return execFileSync("git", ["check-ignore", "--no-index", "--stdin"], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      input: paths.join("\n"),
+    })
+      .split("\n")
+      .filter((line) => line !== "")
+  } catch (error) {
+    // Exit code 1 means no path is ignored. That is the passing case.
+    if ((error as { status?: number }).status === 1) return []
+    throw error
+  }
 }
 
 function skillFolders(): string[] {
@@ -130,6 +146,14 @@ describe("llm-wiki plugin contract", () => {
       expect(row.summary.split(/\s+/).length, `${row.name}: one short line`).toBeLessThanOrEqual(25)
       expect(row.summary.length, `${row.name}: summary`).toBeGreaterThan(0)
     }
+    // The menu scans the skills folder first, so a new skill is in the table when the table is shown.
+    const steps = text.slice(text.indexOf("## Steps"))
+    const scan = steps.indexOf("Find the `skills` folder")
+    const show = steps.indexOf("Show the table")
+    const ask = steps.indexOf("Ask the user which skill to run")
+    expect(scan, "scan step").toBeGreaterThan(-1)
+    expect(show, "show step").toBeGreaterThan(scan)
+    expect(ask, "ask step").toBeGreaterThan(show)
     // The menu runs the skill that the user selects with the Skill tool, and does not follow its file by hand.
     expect(text).toMatch(/Skill tool/)
     expect(text).toMatch(/Do not (?:read|follow)[^.]*SKILL\.md/)
@@ -201,26 +225,26 @@ describe("llm-wiki plugin contract", () => {
   })
 
   it("no template file is git-ignored", () => {
-    // Every file under templates/, examples/, and plugins/ ships with the repo. A dot folder such as
-    // `.claude/` is easy to lose to a broad ignore rule, so the check covers each file on disk.
-    const files = ["templates", "examples", "plugins"].flatMap((folder) => filesUnder(folder))
-    // The guard fails when the walk stops finding the files that most need the check.
-    expect(files).toContain("templates/mechanism-wiki/.claude/settings.json")
-    expect(files).toContain("templates/mechanism-wiki/docs/glossary.md")
-    expect(files).toContain("templates/mechanism-wiki/AGENTS.md")
-    expect(files).toContain("plugins/llm-wiki/skills/wiki/SKILL.md")
-    expect(files).toContain("examples/sample-wiki/domains.yaml")
-    let ignored = ""
-    try {
-      ignored = execFileSync("git", ["check-ignore", "--no-index", "--stdin"], {
-        cwd: REPO_ROOT,
-        encoding: "utf8",
-        input: files.join("\n"),
-      })
-    } catch (error) {
-      // Exit code 1 means no path is ignored. That is the passing case.
-      if ((error as { status?: number }).status !== 1) throw error
-    }
-    expect(ignored.trim()).toBe("")
+    // Every file of templates/, examples/, and plugins/ that git tracks or has staged ships with the repo.
+    // None may match an ignore rule: a dot folder such as `.claude/` is easy to lose to a broad rule.
+    const tracked = gitLines(["ls-files", "--cached", "--", "templates", "examples", "plugins"])
+    // The guard fails when the list stops finding the files that most need the check.
+    expect(tracked).toContain("templates/mechanism-wiki/.claude/settings.json")
+    expect(tracked).toContain("templates/mechanism-wiki/docs/glossary.md")
+    expect(tracked).toContain("templates/mechanism-wiki/AGENTS.md")
+    expect(tracked).toContain("plugins/llm-wiki/skills/wiki/SKILL.md")
+    expect(tracked).toContain("examples/sample-wiki/domains.yaml")
+    expect(gitIgnored(tracked)).toEqual([])
+  })
+
+  it("the files that most need the check are not ignored, even before they are staged", () => {
+    const critical = [
+      "templates/mechanism-wiki/.claude/settings.json",
+      "templates/mechanism-wiki/docs/glossary.md",
+      "templates/mechanism-wiki/AGENTS.md",
+      "templates/mechanism-wiki/README.md",
+    ]
+    for (const path of critical) expect(existsSync(join(REPO_ROOT, path)), path).toBe(true)
+    expect(gitIgnored(critical)).toEqual([])
   })
 })
