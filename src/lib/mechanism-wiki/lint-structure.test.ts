@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
 import { DEFAULT_LINT_THRESHOLDS } from "@/lib/wiki-config/wiki-identity"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
-import { checkStructure, structurePageFromMarkdown } from "./lint-structure"
+import { checkStructure, configProblemText, structurePageFromMarkdown } from "./lint-structure"
 import type { StructureFinding, StructureInput, StructurePage } from "./lint-structure"
 
 const ALPHA = "example/alpha"
@@ -760,6 +760,97 @@ describe("domain-too-large and domain-too-small", () => {
   })
 })
 
+describe("config-invalid (ruling U14)", () => {
+  const OWN_DOMAINS = "domains.yaml: could not read the file"
+  const LIBRARY_DOMAINS = "reading wiki domains.yaml: could not read the file"
+  const unknownPage = pageOf("wiki/concepts/a.md", { type: "concept", domain: "example/nowhere" })
+  const hypothesis = pageOf("wiki/hypotheses/h.md", { type: "hypothesis", from_domain: DELTA, to_domain: "example/elsewhere" })
+
+  it("gives one finding for each problem, about no page, and names the problem", () => {
+    const findings = only("config-invalid", checkStructure(input([], { configProblems: [OWN_DOMAINS, "wiki.yaml: the file is missing"] })))
+    expect(findings).toEqual([
+      {
+        check: "config-invalid",
+        page: null,
+        message: "A config file has a problem: domains.yaml: could not read the file. The domain checks are skipped until you fix the file.",
+      },
+      { check: "config-invalid", page: null, message: "A config file has a problem: wiki.yaml: the file is missing. Fix the file." },
+    ])
+  })
+
+  it("says nothing when there is no problem", () => {
+    expect(only("config-invalid", checkStructure(input([])))).toEqual([])
+    expect(only("config-invalid", checkStructure(input([], { configProblems: [] })))).toEqual([])
+    expect(only("config-invalid", checkStructure(input([], { configProblems: ["  "] })))).toEqual([])
+  })
+
+  describe("a problem in domains.yaml of this wiki", () => {
+    it("skips domain-unknown, so a broken file does not flag every page", () => {
+      const findings = checkStructure(input([unknownPage, hypothesis], { configProblems: [OWN_DOMAINS], domains: domainsOf() }))
+      expect(only("config-invalid", findings)).toHaveLength(1)
+      expect(only("domain-unknown", findings)).toEqual([])
+    })
+
+    it("skips the domain size checks", () => {
+      const findings = checkStructure(input([], { configProblems: [OWN_DOMAINS] }))
+      expect(only("domain-too-small", findings)).toEqual([])
+      expect(only("domain-too-large", findings)).toEqual([])
+    })
+
+    it("also holds for a problem in one key of the file", () => {
+      const findings = checkStructure(input([unknownPage], { configProblems: ["domains.yaml:domains.example/alpha.lens: lens must be a known lens"] }))
+      expect(only("domain-unknown", findings)).toEqual([])
+    })
+
+    it("keeps the checks that do not need the list of domains", () => {
+      const findings = checkStructure(input([pageOf("wiki/concepts/b.md", { type: "concept" })], { configProblems: [OWN_DOMAINS] }))
+      expect(only("domain-missing", findings)).toHaveLength(1)
+    })
+  })
+
+  describe("a problem in domains.yaml of the reading wiki", () => {
+    it("skips only the library part: a hypothesis domain that this wiki does not list is not reported", () => {
+      const findings = checkStructure(input([hypothesis], { identity: WORK, configProblems: [LIBRARY_DOMAINS] }))
+      expect(only("config-invalid", findings)).toEqual([
+        {
+          check: "config-invalid",
+          page: null,
+          message: "A config file has a problem: reading wiki domains.yaml: could not read the file. The domains of the reading wiki are not checked until you fix the file.",
+        },
+      ])
+      expect(only("domain-unknown", findings)).toEqual([])
+    })
+
+    it("still reports a domain or also entry that this wiki does not list", () => {
+      const pages = [unknownPage, pageOf("wiki/concepts/c.md", { type: "concept", domain: ALPHA, also: [DELTA] })]
+      const findings = checkStructure(input(pages, { identity: WORK, configProblems: [LIBRARY_DOMAINS] }))
+      expect(only("domain-unknown", findings).map((finding) => finding.page)).toEqual(["wiki/concepts/a.md", "wiki/concepts/c.md"])
+    })
+
+    it("still reports a hypothesis domain that is neither known nor skipped when the library is fine", () => {
+      const findings = checkStructure(input([hypothesis], { identity: WORK, libraryDomains: domainsOf(DELTA) }))
+      expect(only("domain-unknown", findings).map((finding) => finding.domains)).toEqual([["example/elsewhere"]])
+    })
+
+    it("keeps the domain size checks of this wiki", () => {
+      const findings = checkStructure(input([], { identity: WORK, configProblems: [LIBRARY_DOMAINS] }))
+      expect(only("domain-too-small", findings)).toHaveLength(2)
+    })
+  })
+
+  it("does not skip anything for a problem in another file", () => {
+    const findings = checkStructure(input([unknownPage], { configProblems: ["wiki.yaml: the file is missing", "lenses/x.md: has no Fields section"] }))
+    expect(only("config-invalid", findings)).toHaveLength(2)
+    expect(only("domain-unknown", findings)).toHaveLength(1)
+  })
+
+  it("builds the text of a problem from a config issue", () => {
+    expect(configProblemText({ path: "domains.yaml", message: "could not read the file" }, "this")).toBe(OWN_DOMAINS)
+    expect(configProblemText({ path: "domains.yaml", message: "could not read the file" }, "library")).toBe(LIBRARY_DOMAINS)
+    expect(configProblemText({ path: "", message: "bad" }, "this")).toBe("bad")
+  })
+})
+
 describe("order and shape", () => {
   it("orders findings by check id, then by page path", () => {
     const pages = [
@@ -827,7 +918,8 @@ describe("order and shape", () => {
         "wiki/concepts/gone.md": { status: "active", card_id: CARD_2 },
       },
     }
-    for (const finding of checkStructure(input(pages, { cardMap, identity: READING }))) {
+    const configProblems = ["domains.yaml: could not read the file", "wiki.yaml: the file is missing"]
+    for (const finding of checkStructure(input(pages, { cardMap, identity: READING, configProblems }))) {
       expect(finding.message, finding.check).not.toBe("")
       expect(finding.message.endsWith("."), finding.check).toBe(true)
       expect(finding.message.includes("\n"), finding.check).toBe(false)

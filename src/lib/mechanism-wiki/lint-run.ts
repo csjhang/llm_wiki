@@ -3,8 +3,9 @@
  *
  * `runMechanismStructuralLint` reads the files that `checkStructure` needs (the pages, `domains.yaml`,
  * `wiki.yaml`, the card map, and in a work wiki the `domains.yaml` of the reading wiki) and returns its
- * findings. It writes nothing. The lint view and the ingest queue call it. `checkStructure` itself is
- * pure and also runs in the `wiki-tool` CLI; this file reads files through the app, so the tool does
+ * findings. It writes nothing. A problem found while the config files were read goes to `checkStructure`
+ * as a config problem (ruling U14). The lint view and the ingest queue call it. `checkStructure` itself
+ * is pure and also runs in the `wiki-tool` CLI; this file reads files through the app, so the tool does
  * not import it.
  */
 import { readFile } from "@/commands/fs"
@@ -14,7 +15,7 @@ import { isRecord } from "@/lib/wiki-config/yaml-util"
 import { loadMechanismContext } from "./context"
 import type { MechanismContext } from "./context"
 import { scanWikiPagesWith } from "./domain-index"
-import { checkStructure, structurePageFromMarkdown } from "./lint-structure"
+import { checkStructure, configProblemText, structurePageFromMarkdown } from "./lint-structure"
 import type { StructureFinding, StructureInput } from "./lint-structure"
 
 /** The card map that `wiki-tool` writes, in the project folder. */
@@ -40,9 +41,9 @@ export async function runMechanismStructuralLint(
   if (ctx === null) return []
   throwIfAborted(signal)
 
-  const [pages, libraryDomains, cardMap] = await Promise.all([
+  const [pages, library, cardMap] = await Promise.all([
     scanWikiPagesWith(projectPath, structurePageFromMarkdown),
-    loadLibraryDomains(ctx),
+    loadLibrary(ctx),
     loadCardMap(projectPath),
   ])
   throwIfAborted(signal)
@@ -53,20 +54,35 @@ export async function runMechanismStructuralLint(
     identity: ctx.identity,
     cardMap,
     today: localDate(new Date()),
-    libraryDomains,
+    libraryDomains: library.domains,
+    configProblems: [...ctx.configIssues.map((issue) => configProblemText(issue, "this")), ...library.problems],
   })
 }
 
+/** What the lint needs from the reading wiki of a work wiki. */
+interface LibraryInfo {
+  /** `domains.yaml` of the reading wiki. Null for a reading wiki, and when the file is not there. */
+  domains: DomainsConfig | null
+  /** The config problems of the reading wiki, as text for `configProblems`. */
+  problems: string[]
+}
+
 /**
- * `domains.yaml` of the reading wiki, for a work wiki. Null for a reading wiki, and for a work wiki
- * whose library is not set or is not a mechanism wiki.
+ * The reading wiki of a work wiki: its domains and the problems found while its config files were read.
+ * A reading wiki has none. A work wiki whose library has no `domains.yaml` (the folder is missing or is
+ * not a mechanism wiki) gets one problem that says so.
  */
-async function loadLibraryDomains(ctx: MechanismContext): Promise<DomainsConfig | null> {
-  if (ctx.identity.role !== "work" || ctx.mechanismLibraryPath === null) return null
+async function loadLibrary(ctx: MechanismContext): Promise<LibraryInfo> {
+  if (ctx.identity.role !== "work" || ctx.mechanismLibraryPath === null) return { domains: null, problems: [] }
   try {
-    return (await loadMechanismContext(ctx.mechanismLibraryPath))?.domains ?? null
+    const library = await loadMechanismContext(ctx.mechanismLibraryPath)
+    if (library === null) {
+      const issue = { path: "domains.yaml", message: `the file is missing at ${normalizePath(ctx.mechanismLibraryPath)}` }
+      return { domains: null, problems: [configProblemText(issue, "library")] }
+    }
+    return { domains: library.domains, problems: library.configIssues.map((issue) => configProblemText(issue, "library")) }
   } catch {
-    return null
+    return { domains: null, problems: [] }
   }
 }
 

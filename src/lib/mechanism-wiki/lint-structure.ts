@@ -8,11 +8,13 @@
  *
  * Check ids: `domain-missing`, `domain-unknown`, `concept-cross-domain`, `mechanism-no-instance`,
  * `mirror-retired`, `map-missing-page`, `hypothesis-stale-draft`, `domain-too-large`,
- * `domain-too-small`. A hypothesis page counts under its `to_domain` for every check (ruling R19).
+ * `domain-too-small`, and `config-invalid` (ruling U14). A hypothesis page counts under its `to_domain`
+ * for every check (ruling R19).
  * A hypothesis page that lacks `from_domain` or `to_domain` gets `domain-missing` (ruling U10).
  */
 import { parseFrontmatter } from "@/lib/frontmatter"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
+import type { ConfigIssue } from "@/lib/wiki-config/types"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
 import { compareText, indexedPageFromMarkdown, isDomainIndexPath, MECHANISM_TYPE } from "./domain-index-render"
 import type { IndexedPage } from "./domain-index-render"
@@ -52,6 +54,13 @@ export interface StructureInput {
    * every page must be in `domains`. Null or absent when there is none. A reading wiki ignores it.
    */
   libraryDomains?: DomainsConfig | null
+  /**
+   * Problems found while the config files were read (ruling U14). Build each one with `configProblemText`.
+   * Each problem gives one `config-invalid` finding. A problem in `domains.yaml` of this wiki turns off
+   * `domain-unknown` and the domain size checks, because the list of domains is not known. A problem in
+   * `domains.yaml` of the reading wiki turns off only the library part of `domain-unknown`.
+   */
+  configProblems?: string[]
 }
 
 export interface StructureFinding {
@@ -61,6 +70,30 @@ export interface StructureFinding {
   message: string
   /** The domains that the finding names. */
   domains?: string[]
+}
+
+/** Where a config problem was found: in a file of this wiki, or in a file of the reading wiki. */
+export type ConfigProblemSource = "this" | "library"
+
+/** Starts the text of a problem in a file of the reading wiki. */
+const LIBRARY_PROBLEM_PREFIX = "reading wiki "
+
+/**
+ * The text of one config problem for `StructureInput.configProblems`. `issue.path` starts with the
+ * name of the file, as `ConfigIssue` paths do. A problem in a file of the reading wiki gets the
+ * prefix "reading wiki ".
+ */
+export function configProblemText(issue: ConfigIssue, source: ConfigProblemSource): string {
+  const text = issue.path === "" ? issue.message : `${issue.path}: ${issue.message}`
+  return source === "library" ? `${LIBRARY_PROBLEM_PREFIX}${text}` : text
+}
+
+type ConfigProblemKind = "domains" | "library-domains" | "other"
+
+function classifyProblem(problem: string): ConfigProblemKind {
+  const library = problem.startsWith(LIBRARY_PROBLEM_PREFIX)
+  const names = /^domains\.yaml(?:$|[:\s])/.test(library ? problem.slice(LIBRARY_PROBLEM_PREFIX.length) : problem)
+  return names ? (library ? "library-domains" : "domains") : "other"
 }
 
 /** Files of `wiki/` that are not pages. The app keeps them. */
@@ -117,14 +150,20 @@ export function checkStructure(input: StructureInput): StructureFinding[] {
   }
   // Pages the checks look at: real pages under `wiki/`. The index files are made by the app.
   const pages = input.pages.filter((page) => isWikiPage(page.path))
+  const problems = (input.configProblems ?? []).map((problem) => problem.trim()).filter((problem) => problem !== "")
+  const kinds = problems.map(classifyProblem)
+  // A broken list of domains tells nothing about a domain, so the checks that need it stay quiet (ruling U14).
+  const domainsBroken = kinds.includes("domains")
+  const libraryBroken = kinds.includes("library-domains")
   const findings: StructureFinding[] = [
+    ...checkConfigProblems(problems, kinds),
     ...checkDomainMissing(pages),
-    ...checkDomainUnknown(pages, input),
+    ...(domainsBroken ? [] : checkDomainUnknown(pages, input, libraryBroken)),
     ...checkCrossDomain(pages),
     ...checkMechanismInstances(pages, input.identity),
     ...checkCardMap(input),
     ...checkStaleDrafts(pages, input),
-    ...checkDomainSizes(pages, input),
+    ...(domainsBroken ? [] : checkDomainSizes(pages, input)),
   ]
   return findings.sort(compareFindings)
 }
@@ -132,6 +171,24 @@ export function checkStructure(input: StructureInput): StructureFinding[] {
 function isWikiPage(path: string): boolean {
   const key = path.replace(/\\/g, "/").toLowerCase()
   return key.startsWith("wiki/") && !isDomainIndexPath(key) && !NON_PAGE_PATHS.has(key)
+}
+
+/** One finding for each config problem. The text of the problem is in the message. */
+function checkConfigProblems(problems: string[], kinds: ConfigProblemKind[]): StructureFinding[] {
+  return problems.map((problem, index) => {
+    const kind = kinds[index]
+    const consequence =
+      kind === "domains"
+        ? "The domain checks are skipped until you fix the file."
+        : kind === "library-domains"
+          ? "The domains of the reading wiki are not checked until you fix the file."
+          : "Fix the file."
+    return {
+      check: "config-invalid",
+      page: null,
+      message: `A config file has a problem: ${problem.replace(/[.\s]+$/, "")}. ${consequence}`,
+    }
+  })
 }
 
 /**
@@ -169,12 +226,15 @@ function missingHypothesisDomain(page: StructurePage, key: "from_domain" | "to_d
  * Ruling U9: in a work wiki, the domains of the reading wiki are known only as the `from_domain` and
  * `to_domain` of a hypothesis. Every other field must name a domain of this wiki.
  */
-function checkDomainUnknown(pages: StructurePage[], input: StructureInput): StructureFinding[] {
+function checkDomainUnknown(pages: StructurePage[], input: StructureInput, libraryBroken: boolean): StructureFinding[] {
   const own = new Set(Object.keys(input.domains.domains))
-  const library =
-    input.identity.role === "work" && input.libraryDomains ? new Set(Object.keys(input.libraryDomains.domains)) : null
+  const isWork = input.identity.role === "work"
+  const library = isWork && input.libraryDomains ? new Set(Object.keys(input.libraryDomains.domains)) : null
+  // The reading wiki's list cannot be read (ruling U14): a hypothesis domain that this wiki does not list is not judged.
+  const libraryUnreadable = isWork && libraryBroken
   const isKnown = (domain: string, field: string): boolean =>
-    own.has(domain) || (library !== null && HYPOTHESIS_DOMAIN_FIELDS.includes(field) && library.has(domain))
+    own.has(domain) ||
+    (HYPOTHESIS_DOMAIN_FIELDS.includes(field) && (libraryUnreadable || (library !== null && library.has(domain))))
 
   const findings: StructureFinding[] = []
   for (const page of pages) {

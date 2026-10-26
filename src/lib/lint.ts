@@ -30,7 +30,7 @@ export interface LintResult {
 }
 
 /** The structure checks whose finding is a warning. The others are information. */
-const STRUCTURE_WARNING_CHECKS: ReadonlySet<string> = new Set(["domain-unknown", "map-missing-page", "concept-cross-domain"])
+const STRUCTURE_WARNING_CHECKS: ReadonlySet<string> = new Set(["domain-unknown", "map-missing-page", "concept-cross-domain", "config-invalid"])
 
 /** A finding of the structural checks of a mechanism wiki, as an item of the lint view. */
 export function structureFindingToLintResult(finding: StructureFinding): LintResult {

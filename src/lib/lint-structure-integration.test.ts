@@ -6,6 +6,7 @@
  * when it drains. These tests use a real temporary folder for the project; the ingest itself is a fake.
  * The queue tests wait for the background step with `pendingStructuralLints()`.
  */
+import fs from "node:fs/promises"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createDeferred, flushIO, waitFor } from "@/test-helpers/deferred"
 import { createTempProject, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
@@ -169,6 +170,7 @@ describe("runMechanismStructuralLint", () => {
     expect(only("domain-unknown", findings)).toEqual([
       expect.objectContaining({ page: "wiki/concepts/wrong.md", domains: ["example/missing"] }),
     ])
+    expect(only("config-invalid", findings)).toEqual([])
     // The domain beta has no page, and alpha has one: both are below the default minimum of three.
     expect(only("domain-too-small", findings).map((finding) => finding.domains)).toEqual([[ALPHA], [BETA]])
   })
@@ -179,6 +181,47 @@ describe("runMechanismStructuralLint", () => {
     const findings = await runMechanismStructuralLint(project)
 
     expect(only("domain-too-small", findings).map((finding) => finding.domains)).toEqual([[BETA]])
+  })
+
+  describe("a config file with a problem (ruling U14)", () => {
+    it("gives one config-invalid finding for a broken domains.yaml, and no domain-unknown or size findings", async () => {
+      await makeReadingWiki(project)
+      await writeFileRaw(`${project}/domains.yaml`, "version: [1\n")
+
+      const findings = await runMechanismStructuralLint(project)
+
+      expect(only("config-invalid", findings)).toEqual([
+        expect.objectContaining({
+          page: null,
+          message: expect.stringContaining("domains.yaml"),
+        }),
+      ])
+      expect(only("domain-unknown", findings)).toEqual([])
+      expect(only("domain-too-small", findings)).toEqual([])
+      // A check that does not need the list of domains still runs.
+      expect(only("domain-missing", findings)).toHaveLength(1)
+    })
+
+    it("gives one finding for each problem of another file and skips nothing", async () => {
+      await makeReadingWiki(project)
+      await writeFileRaw(`${project}/wiki.yaml`, "version: 1\nid: Not Valid\nrole: boss\n")
+
+      const findings = await runMechanismStructuralLint(project)
+
+      expect(only("config-invalid", findings).length).toBeGreaterThanOrEqual(2)
+      for (const finding of only("config-invalid", findings)) expect(finding.message).toContain("wiki.yaml")
+      expect(only("domain-unknown", findings)).toHaveLength(1)
+    })
+
+    it("names a missing wiki.yaml", async () => {
+      await makeReadingWiki(project)
+      await fs.rm(`${project}/wiki.yaml`)
+
+      const findings = only("config-invalid", await runMechanismStructuralLint(project))
+
+      expect(findings).toHaveLength(1)
+      expect(findings[0].message).toContain("wiki.yaml: the file is missing")
+    })
   })
 
   it("leaves out the index files of the app", async () => {
@@ -299,17 +342,27 @@ describe("runMechanismStructuralLint", () => {
       ])
     })
 
-    it("still works when the library cannot be found", async () => {
+    it("gives one config-invalid finding and no flood when the library cannot be found (ruling U14)", async () => {
       const { work } = await makeWorkWiki()
       await writeFileRaw(`${work}/wiki.yaml`, wikiYaml({ role: "work", library: "../no-such-wiki" }))
 
-      const unknown = only("domain-unknown", await runMechanismStructuralLint(work))
+      const findings = await runMechanismStructuralLint(work)
 
-      expect(unknown.map((finding) => finding.page)).toEqual([
-        "wiki/concepts/plain.md",
-        "wiki/hypotheses/bad.md",
-        "wiki/hypotheses/from-library.md",
-      ])
+      expect(only("config-invalid", findings)).toHaveLength(1)
+      expect(only("config-invalid", findings)[0].message).toContain("reading wiki domains.yaml")
+      // The hypotheses are not judged against a list that is not there. The plain page is still checked.
+      expect(only("domain-unknown", findings).map((finding) => finding.page)).toEqual(["wiki/concepts/plain.md"])
+    })
+
+    it("gives one config-invalid finding and no flood when the library domains.yaml is broken (ruling U14)", async () => {
+      const { work } = await makeWorkWiki()
+      await writeFileRaw(`${tmp.path}/reading/domains.yaml`, "version: [1\n")
+
+      const findings = await runMechanismStructuralLint(work)
+
+      expect(only("config-invalid", findings)).toHaveLength(1)
+      expect(only("config-invalid", findings)[0].message).toContain("reading wiki domains.yaml")
+      expect(only("domain-unknown", findings).map((finding) => finding.page)).toEqual(["wiki/concepts/plain.md"])
     })
   })
 
@@ -327,6 +380,7 @@ describe("structureFindingToLintResult", () => {
 
   it.each([
     ["domain-unknown", "warning"],
+    ["config-invalid", "warning"],
     ["map-missing-page", "warning"],
     ["concept-cross-domain", "warning"],
     ["domain-missing", "info"],
@@ -461,6 +515,91 @@ describe("the lint store and lint.json", () => {
     useLintStore.getState().replaceItemsOfType("structure", [])
 
     expect(useLintStore.getState().items).toEqual([])
+  })
+
+  it("keeps the id of an item whose type, page, check, and detail match an old item", () => {
+    useLintStore.getState().addItems([
+      { ...result, page: "wiki/a.md" },
+      { ...result, page: "wiki/b.md" },
+    ])
+    const [oldA, oldB] = useLintStore.getState().items
+
+    useLintStore.getState().replaceItemsOfType("structure", [
+      { ...result, page: "wiki/b.md" },
+      { ...result, page: "wiki/a.md", detail: "A new detail." },
+      { ...result, page: "wiki/c.md" },
+    ])
+
+    const items = useLintStore.getState().items
+    expect(items.map((item) => item.page)).toEqual(["wiki/b.md", "wiki/a.md", "wiki/c.md"])
+    expect(items[0].id).toBe(oldB.id)
+    expect(items[1].id).not.toBe(oldA.id)
+    expect(items[2].id).not.toBe(oldA.id)
+    expect(new Set(items.map((item) => item.id)).size).toBe(3)
+  })
+
+  it("gives one old id to one new item, also when two findings are alike", () => {
+    useLintStore.getState().addItems([result])
+    const [old] = useLintStore.getState().items
+
+    useLintStore.getState().replaceItemsOfType("structure", [result, result])
+
+    const ids = useLintStore.getState().items.map((item) => item.id)
+    expect(ids[0]).toBe(old.id)
+    expect(ids[1]).not.toBe(old.id)
+  })
+
+  it("does not take the id of an item of another type", () => {
+    useLintStore.getState().addItems([{ type: "orphan", severity: "info", page: result.page, detail: result.detail, check: result.check }])
+    const [orphan] = useLintStore.getState().items
+
+    useLintStore.getState().replaceItemsOfType("structure", [result])
+
+    expect(useLintStore.getState().items.map((item) => item.id)).toContain(orphan.id)
+    expect(structureItems()[0].id).not.toBe(orphan.id)
+  })
+
+  it("keeps the same array when the new items are the old items", () => {
+    useLintStore.getState().addItems([{ ...result, page: "wiki/a.md" }, { ...result, page: "wiki/b.md" }])
+    const before = useLintStore.getState().items
+
+    useLintStore.getState().replaceItemsOfType("structure", [{ ...result, page: "wiki/a.md" }, { ...result, page: "wiki/b.md" }])
+
+    expect(useLintStore.getState().items).toBe(before)
+  })
+
+  describe("addRunResults: the result of a manual lint run", () => {
+    it("adds the results of a run", () => {
+      useLintStore.getState().addRunResults([result, { type: "orphan", severity: "info", page: "concepts/o.md", detail: "d" }])
+
+      expect(useLintStore.getState().items.map((item) => item.type).sort()).toEqual(["orphan", "structure"])
+    })
+
+    it("does not double the structure items that a drain stored after the run began", () => {
+      // The run began with a clear. A drain of the ingest queue stored its structure items. The run ends.
+      useLintStore.getState().addItems([result])
+      const [fromDrain] = useLintStore.getState().items
+
+      useLintStore.getState().addRunResults([
+        { type: "orphan", severity: "info", page: "concepts/o.md", detail: "d" },
+        result,
+        { ...result, page: "wiki/other.md" },
+      ])
+
+      const items = useLintStore.getState().items
+      expect(items.filter((item) => item.type === "structure").map((item) => item.page)).toEqual([result.page, "wiki/other.md"])
+      expect(items.filter((item) => item.type === "orphan")).toHaveLength(1)
+      // The finding that was there keeps its id.
+      expect(items.find((item) => item.page === result.page)?.id).toBe(fromDrain.id)
+    })
+
+    it("drops the structure items of the drain when the run found none", () => {
+      useLintStore.getState().addItems([result])
+
+      useLintStore.getState().addRunResults([{ type: "orphan", severity: "info", page: "concepts/o.md", detail: "d" }])
+
+      expect(structureItems()).toEqual([])
+    })
   })
 
   it("does not touch the store when there is nothing to remove or add", () => {

@@ -59,6 +59,54 @@ export function shouldShowLintResults(hasRun: boolean, itemCount: number): boole
   return hasRun || itemCount > 0
 }
 
+/**
+ * True when the item has a fix: a button on its card, and a place in the batch Fix and the batch send to
+ * Review. A structure item has none (ruling U13). It is fixed by editing the page, and the next drain
+ * of the ingest queue refreshes it.
+ */
+export function isFixableLintItem(item: LintItem): boolean {
+  return item.type !== "structure"
+}
+
+/** The items of a batch that a batch Fix or a batch send to Review works on. */
+export function fixableLintItems(items: readonly LintItem[]): LintItem[] {
+  return items.filter(isFixableLintItem)
+}
+
+/**
+ * Send the fixable items of a batch to Review and remove them from the lint list. A structure item stays.
+ * Returns the items that were sent.
+ */
+export function sendLintItemsToReview(
+  items: readonly LintItem[],
+  send: (item: LintItem) => void,
+  remove: (ids: string[]) => void,
+): LintItem[] {
+  const sent = fixableLintItems(items)
+  if (sent.length === 0) return []
+  for (const item of sent) send(item)
+  remove(sent.map((item) => item.id))
+  return sent
+}
+
+/** The page of an item, or the label of its type when it has no page (a finding about a domain). */
+export function lintItemTitle(item: LintItem, typeLabel: string): string {
+  return item.page || typeLabel
+}
+
+/**
+ * The files to try, in order, when the user opens the page of an item. A page of the other types is
+ * relative to `wiki/`. A structure item names its page from the project folder (`wiki/concepts/a.md`),
+ * so that path comes first.
+ */
+export function lintPageCandidates(projectPath: string, page: string): string[] {
+  return [
+    ...(page.startsWith("wiki/") ? [`${projectPath}/${page}`] : []),
+    `${projectPath}/wiki/${page}`,
+    `${projectPath}/wiki/${page}.md`,
+  ]
+}
+
 export function LintView() {
   const { t } = useTranslation()
   const appDialog = useAppDialog()
@@ -76,7 +124,7 @@ export function LintView() {
   }), [t])
 
   const items = useLintStore((s) => s.items)
-  const addLintItems = useLintStore((s) => s.addItems)
+  const addRunResults = useLintStore((s) => s.addRunResults)
   const removeLintItems = useLintStore((s) => s.removeItems)
   const clearLintItems = useLintStore((s) => s.clearItems)
 
@@ -168,7 +216,8 @@ export function LintView() {
         all = [...structural, ...semantic]
       }
 
-      addLintItems(all)
+      // A drain of the ingest queue may have stored structure items since the clear above. Do not double them.
+      addRunResults(all)
       setHasRun(true)
     } catch (err) {
       if (!(err instanceof DOMException && err.name === "AbortError")) {
@@ -186,19 +235,14 @@ export function LintView() {
     ignoredPagesDraft,
     running,
     runSemantic,
-    addLintItems,
+    addRunResults,
     clearLintItems,
   ])
 
   async function handleOpenPage(page: string) {
     if (!project) return
     const pp = normalizePath(project.path)
-    const candidates = [
-      `${pp}/wiki/${page}`,
-      `${pp}/wiki/${page}.md`,
-      // A structure item names its page from the project folder: `wiki/concepts/a.md`.
-      ...(page.startsWith("wiki/") ? [`${pp}/${page}`] : []),
-    ]
+    const candidates = lintPageCandidates(pp, page)
     for (const path of candidates) {
       try {
         const content = await readFile(path)
@@ -258,7 +302,7 @@ export function LintView() {
   }, [project, t])
 
   async function handleFix(item: LintItem, refreshTree = true) {
-    if (!project) return
+    if (!project || !isFixableLintItem(item)) return
     const pp = normalizePath(project.path)
     setFixingId(item.id)
     setFixError(null)
@@ -368,6 +412,7 @@ export function LintView() {
     [items, selectedLintIds],
   )
   const allLintSelected = items.length > 0 && selectedLintItems.length === items.length
+  const fixableSelectedCount = useMemo(() => fixableLintItems(selectedLintItems).length, [selectedLintItems])
   const isFixing = fixingId !== null || batchFixing
 
   const setLintSelected = useCallback((id: string, selected: boolean) => {
@@ -398,15 +443,13 @@ export function LintView() {
   }, [removeLintItems, selectedLintItems])
 
   const handleBatchSendToReview = useCallback(() => {
-    for (const item of selectedLintItems) {
-      addLintItemToReview(item)
-    }
-    removeLintItems(selectedLintItems.map((item) => item.id))
+    sendLintItemsToReview(selectedLintItems, addLintItemToReview, removeLintItems)
     setSelectedLintIds(new Set())
   }, [addLintItemToReview, removeLintItems, selectedLintItems])
 
   const handleBatchFix = useCallback(async () => {
-    if (!project || batchFixing || selectedLintItems.length === 0) return
+    const fixable = fixableLintItems(selectedLintItems)
+    if (!project || batchFixing || fixable.length === 0) return
     setBatchFixing(true)
     setFixError(null)
     const pp = normalizePath(project.path)
@@ -419,7 +462,7 @@ export function LintView() {
         edits.set(path, pending)
       }
 
-      for (const item of selectedLintItems) {
+      for (const item of fixable) {
         if (item.type === "orphan" && item.suggestedSource) {
           queueEdit(`${pp}/wiki/${item.suggestedSource}`, item.id, (content) => appendWikilink(content, item.page))
         } else if (item.type === "no-outlinks" && item.suggestedTarget) {
@@ -572,7 +615,7 @@ export function LintView() {
             variant="outline"
             size="sm"
             className="h-7 text-xs"
-            disabled={selectedLintItems.length === 0 || isFixing}
+            disabled={fixableSelectedCount === 0 || isFixing}
             onClick={handleBatchFix}
           >
             {batchFixing ? t("lint.fixing") : t("lint.fixSelected")}
@@ -581,7 +624,7 @@ export function LintView() {
             variant="outline"
             size="sm"
             className="h-7 text-xs"
-            disabled={selectedLintItems.length === 0 || isFixing}
+            disabled={fixableSelectedCount === 0 || isFixing}
             onClick={handleBatchSendToReview}
           >
             {t("lint.sendSelectedToReview")}
@@ -680,7 +723,7 @@ function SectionHeader({
   )
 }
 
-function LintCard({
+export function LintCard({
   item,
   fixing,
   selected,
@@ -712,7 +755,7 @@ function LintCard({
           className="mt-0.5 h-3.5 w-3.5"
           checked={selected}
           onChange={(event) => onSelectedChange(item.id, event.target.checked)}
-          aria-label={t("lint.selectItem", { page: item.page })}
+          aria-label={t("lint.selectItem", { page: lintItemTitle(item, config.label) })}
         />
         <Icon
           className={`mt-0.5 h-4 w-4 shrink-0 ${
@@ -720,7 +763,7 @@ function LintCard({
           }`}
         />
         <div className="flex-1 min-w-0">
-          <div className="font-medium truncate">{item.page || config.label}</div>
+          <div className="font-medium truncate">{lintItemTitle(item, config.label)}</div>
           <div className="text-[11px] text-muted-foreground">{config.label}</div>
         </div>
       </div>
@@ -770,16 +813,18 @@ function LintCard({
         >
           {t("lint.open")}
         </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          className="h-6 text-xs gap-1"
-          disabled={fixing}
-          onClick={() => onFix(item)}
-        >
-          <Wrench className="h-3 w-3" />
-          {fixing ? t("lint.fixing") : t("lint.fix")}
-        </Button>
+        {isFixableLintItem(item) && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-6 text-xs gap-1"
+            disabled={fixing}
+            onClick={() => onFix(item)}
+          >
+            <Wrench className="h-3 w-3" />
+            {fixing ? t("lint.fixing") : t("lint.fix")}
+          </Button>
+        )}
         {onDelete && (
           <Button
             variant="outline"
