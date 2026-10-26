@@ -4,10 +4,13 @@ export interface ActivityItem {
   id: string
   type: "ingest" | "lint" | "query" | "skill"
   title: string
-  status: "running" | "done" | "error"
+  /** "warning": finished, but not all of the work was done (a skill run that had tools denied). */
+  status: "running" | "done" | "warning" | "error"
   detail: string
   filesWritten: string[]
   createdAt: number
+  /** Project the item belongs to. Set by the skill panel, so each project shows its own runs. */
+  projectPath?: string
 }
 
 interface ActivityState {

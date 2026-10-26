@@ -141,6 +141,8 @@ function createRunMonitor(command: string): {
 } {
   const progress: string[] = []
   const denialTexts = new Set<string>()
+  /** Names of the tools that a `permission_denied` event named, in order. */
+  const deniedTools = new Set<string>()
   const diagnostics = createBoundedDiagnosticBuffer()
   let lastText = ""
   let structuredError = ""
@@ -186,6 +188,7 @@ function createRunMonitor(command: string): {
     const text = typeof event.message === "string" ? event.message.trim() : ""
     if (text !== "") denialTexts.add(text)
     const tool = typeof event.tool_name === "string" ? event.tool_name : "a tool"
+    if (typeof event.tool_name === "string" && event.tool_name !== "") deniedTools.add(event.tool_name)
     addProgress(`! Denied ${tool}${text ? `: ${firstLine(text)}` : ""}`)
   }
 
@@ -202,8 +205,13 @@ function createRunMonitor(command: string): {
     }
   }
 
-  const deniedNote = (): string =>
-    finalResult && finalResult.denied.length > 0 ? `\n\nDenied tools: ${finalResult.denied.join(", ")}` : ""
+  /** Every tool that was denied: the events first, then the ones that only the result lists. */
+  const allDenied = (): string[] => [...new Set([...deniedTools, ...((finalResult as FinalResult | null)?.denied ?? [])])]
+
+  const deniedNote = (): string => {
+    const denied = allDenied()
+    return denied.length > 0 ? `\n\nDenied tools: ${denied.join(", ")}` : ""
+  }
 
   return {
     feed(rawLine) {
@@ -250,19 +258,23 @@ function createRunMonitor(command: string): {
           const text = result.text || (failed ? buildExitError(code ?? 1, errorText, structuredError || diagnostics.value()) : errorText)
           outcome = { status: "error", detail: cutFinal(text || "Claude Code reported an error with no text.") + deniedNote() }
         } else {
-          outcome = { status: "done", detail: cutFinal(result.text || lastText || "Finished with no text.") + deniedNote() }
+          // A run that lost a tool left work undone, so it is not a plain "done".
+          outcome = {
+            status: allDenied().length > 0 ? "warning" : "done",
+            detail: cutFinal(result.text || lastText || "Finished with no text.") + deniedNote(),
+          }
         }
         return
       }
       const details = structuredError || diagnostics.value()
       if (failed) {
-        outcome = { status: "error", detail: cutFinal(buildExitError(code ?? 1, errorText, details)) }
+        outcome = { status: "error", detail: cutFinal(buildExitError(code ?? 1, errorText, details)) + deniedNote() }
       } else if (structuredError) {
-        outcome = { status: "error", detail: cutFinal(buildExitError(code ?? 1, errorText, structuredError)) }
+        outcome = { status: "error", detail: cutFinal(buildExitError(code ?? 1, errorText, structuredError)) + deniedNote() }
       } else {
         const why = code === null ? "Claude Code was stopped before it finished" : "Claude Code ended with no result"
         const more = [errorText, details].filter((part) => part !== "").join("\n")
-        outcome = { status: "error", detail: cutFinal(more ? `${why}:\n${more}` : `${why}.`) }
+        outcome = { status: "error", detail: cutFinal(more ? `${why}:\n${more}` : `${why}.`) + deniedNote() }
       }
     },
 
@@ -347,6 +359,7 @@ export async function runSkill(
     status: "running",
     detail: command,
     filesWritten: [],
+    projectPath: deps.projectPath,
   })
   show()
   return "started"

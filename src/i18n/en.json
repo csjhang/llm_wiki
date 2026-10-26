@@ -49,7 +49,7 @@
     "copiedHint": "Paste it in a terminal in the project folder.",
     "copyFailed": "The command could not be copied ({{reason}}). Copy it by hand.",
     "lastRun": "Last run",
-    "status": { "running": "Running", "done": "Done", "error": "Failed" }
+    "status": { "running": "Running", "done": "Done", "warning": "Done with denied tools", "error": "Failed" }
   },
   "updateBanner": {
     "message": "Version {{version}} is available",

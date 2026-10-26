@@ -49,7 +49,7 @@
     "copiedHint": "Incollalo in un terminale nella cartella del progetto.",
     "copyFailed": "Impossibile copiare il comando ({{reason}}). Copialo a mano.",
     "lastRun": "Ultima esecuzione",
-    "status": { "running": "In corso", "done": "Fatto", "error": "Non riuscito" }
+    "status": { "running": "In corso", "done": "Fatto", "warning": "Fatto, con strumenti negati", "error": "Non riuscito" }
   },
   "updateBanner": {
     "message": "La versione {{version}} è disponibile",

@@ -8,10 +8,10 @@
  *
  * The fixed labels follow the labels of `panel.yaml`: they are not translated. The other text is.
  */
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import type { TFunction } from "i18next"
-import { AlertCircle, CheckCircle2, Loader2 } from "lucide-react"
+import { AlertCircle, AlertTriangle, CheckCircle2, Loader2 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { openClaudeTerminal } from "@/commands/terminal"
 import { useMechanismWiki } from "@/hooks/use-mechanism-wiki"
@@ -35,6 +35,49 @@ export interface SkillNotice {
 export interface SkillRunView {
   status: ActivityItem["status"]
   detail: string
+}
+
+/** The skill whose run fills the whiteboard list (`heptabase-map.json`). When it ends, the list is read again. */
+export const WHITEBOARD_SOURCE_SKILL = "wiki-sync"
+
+// ---- runs ----
+
+/**
+ * The latest run of each button in this project. `items` come newest first. An item of another
+ * project, or an item with no project, does not count: each project has its own runs.
+ */
+export function latestRuns(
+  items: readonly ActivityItem[],
+  entries: readonly PanelEntry[],
+  projectPath: string | null,
+): Record<string, SkillRunView> {
+  const runs: Record<string, SkillRunView> = {}
+  if (projectPath === null) return runs
+  for (const entry of entries) {
+    const item = items.find(
+      (candidate) =>
+        candidate.type === "skill" && candidate.title === entry.label && candidate.projectPath === projectPath,
+    )
+    if (item) runs[entry.skill] = { status: item.status, detail: item.detail }
+  }
+  return runs
+}
+
+/** A button cannot start again while its start is pending or its run is running. */
+export function isRunBlocked(
+  skill: string,
+  starting: ReadonlySet<string>,
+  runs: Record<string, SkillRunView | undefined>,
+): boolean {
+  return starting.has(skill) || runs[skill]?.status === "running"
+}
+
+/** True when the sync run just left `running`: it may have stored a new whiteboard list. */
+export function shouldReloadWhiteboards(
+  previous: ActivityItem["status"] | undefined,
+  next: ActivityItem["status"] | undefined,
+): boolean {
+  return previous === "running" && next !== "running"
 }
 
 // ---- notices ----
@@ -72,6 +115,8 @@ export function noticeForError(error: unknown, t: TFunction): SkillNotice {
 export interface SkillPanelProps {
   entries: PanelEntry[]
   whiteboards: WhiteboardOption[]
+  /** False until the whiteboard list was read once, so an empty list that is still loading says nothing. */
+  whiteboardsLoaded: boolean
   /** Values of the inputs, by name. */
   values: Partial<Record<PanelInput, string>>
   onValueChange(name: PanelInput, value: string): void
@@ -104,6 +149,7 @@ export function SkillPanel(props: SkillPanelProps) {
 function SkillCard({
   entry,
   whiteboards,
+  whiteboardsLoaded,
   values,
   onValueChange,
   busy,
@@ -114,9 +160,12 @@ function SkillCard({
   const { t } = useTranslation()
   const needsWhiteboard = entry.inputs.includes("whiteboard")
   const hasHypothesisInput = entry.inputs.includes("hypothesis")
-  const noWhiteboardList = needsWhiteboard && whiteboards.length === 0
+  // While the list loads, the button keeps its label and stays off. It says "sync first" only for a list that is empty.
+  const noWhiteboardList = needsWhiteboard && whiteboardsLoaded && whiteboards.length === 0
+  const showPicker = needsWhiteboard && whiteboardsLoaded && whiteboards.length > 0
   const whiteboardChosen = whiteboards.some((board) => board.id === values.whiteboard)
-  const disabled = busy.has(entry.skill) || (needsWhiteboard && !whiteboardChosen)
+  const blocked = isRunBlocked(entry.skill, busy, runs)
+  const disabled = blocked || (needsWhiteboard && !whiteboardChosen)
   const notice = notices[entry.skill]
   const run = runs[entry.skill]
 
@@ -133,12 +182,12 @@ function SkillCard({
           <p className="whitespace-pre-line text-sm text-muted-foreground">{entry.description}</p>
         </div>
         <Button data-action="run" disabled={disabled} onClick={() => onRun(entry)} className="shrink-0">
-          {busy.has(entry.skill) && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+          {blocked && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
           {noWhiteboardList ? NEED_SYNC_LABEL : entry.label}
         </Button>
       </div>
 
-      {needsWhiteboard && !noWhiteboardList && (
+      {showPicker && (
         <label className="block space-y-1 text-xs">
           <span className="text-muted-foreground">{t("skillPanel.whiteboard")}</span>
           <select
@@ -187,6 +236,7 @@ function SkillCard({
           <div className="flex items-center gap-1.5 font-medium">
             {run.status === "running" && <Loader2 className="h-3 w-3 animate-spin text-primary" />}
             {run.status === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500" />}
+            {run.status === "warning" && <AlertTriangle className="h-3 w-3 text-amber-500" />}
             {run.status === "error" && <AlertCircle className="h-3 w-3 text-destructive" />}
             <span>
               {t("skillPanel.lastRun")}: {t(`skillPanel.status.${run.status}`)}
@@ -215,38 +265,45 @@ export function SkillPanelView() {
   const activityItems = useActivityStore((s) => s.items)
   const mechanism = useMechanismWiki(projectPath)
   const [whiteboards, setWhiteboards] = useState<WhiteboardOption[]>([])
+  const [whiteboardsLoaded, setWhiteboardsLoaded] = useState(false)
+  const [reloadTick, setReloadTick] = useState(0)
   const [values, setValues] = useState<Partial<Record<PanelInput, string>>>({})
   const [busy, setBusy] = useState<ReadonlySet<string>>(new Set())
   const [notices, setNotices] = useState<Record<string, SkillNotice>>({})
+  // Presses that are being handled. A second press in the same moment must not start a second run.
+  const starting = useRef<Set<string>>(new Set())
 
   // Another project has other whiteboards, other values, and other runs.
   useEffect(() => {
     setWhiteboards([])
+    setWhiteboardsLoaded(false)
     setValues({})
     setNotices({})
   }, [projectPath])
 
-  // The sync keeps the whiteboard list. Read it each time the panel opens.
+  // The sync keeps the whiteboard list. Read it each time the panel opens, and again when a sync run ends.
+  // The list stays on screen while it is read again.
   useEffect(() => {
     if (projectPath === null || mechanism !== true) return
     let cancelled = false
     void loadWhiteboardOptions(projectPath).then((options) => {
-      if (!cancelled) setWhiteboards(options)
+      if (cancelled) return
+      setWhiteboards(options)
+      setWhiteboardsLoaded(true)
     })
     return () => {
       cancelled = true
     }
-  }, [projectPath, mechanism])
+  }, [projectPath, mechanism, reloadTick])
 
-  const runs = useMemo(() => {
-    const byLabel: Record<string, SkillRunView> = {}
-    // The newest item comes first.
-    for (const entry of PANEL_ENTRIES) {
-      const item = activityItems.find((candidate) => candidate.type === "skill" && candidate.title === entry.label)
-      if (item) byLabel[entry.skill] = { status: item.status, detail: item.detail }
-    }
-    return byLabel
-  }, [activityItems])
+  const runs = useMemo(() => latestRuns(activityItems, PANEL_ENTRIES, projectPath), [activityItems, projectPath])
+
+  const syncStatus = runs[WHITEBOARD_SOURCE_SKILL]?.status
+  const previousSyncStatus = useRef(syncStatus)
+  useEffect(() => {
+    if (shouldReloadWhiteboards(previousSyncStatus.current, syncStatus)) setReloadTick((tick) => tick + 1)
+    previousSyncStatus.current = syncStatus
+  }, [syncStatus])
 
   const handleValueChange = useCallback((name: PanelInput, value: string) => {
     setValues((current) => ({ ...current, [name]: value }))
@@ -255,6 +312,11 @@ export function SkillPanelView() {
   const handleRun = useCallback(
     async (entry: PanelEntry) => {
       if (projectPath === null) return
+      // One run per button: ignore a press while its start is pending or its run is running.
+      // The store is read now, not from the last render.
+      const currentRuns = latestRuns(useActivityStore.getState().items, PANEL_ENTRIES, projectPath)
+      if (isRunBlocked(entry.skill, starting.current, currentRuns)) return
+      starting.current.add(entry.skill)
       setBusy((current) => new Set(current).add(entry.skill))
       setNotices((current) => withoutKey(current, entry.skill))
       const seen: { fallback: SkillFallback | null } = { fallback: null }
@@ -276,6 +338,7 @@ export function SkillPanelView() {
       } catch (error) {
         notice = noticeForError(error, t)
       }
+      starting.current.delete(entry.skill)
       setNotices((current) => ({ ...current, [entry.skill]: notice }))
       setBusy((current) => {
         const next = new Set(current)
@@ -298,6 +361,7 @@ export function SkillPanelView() {
     <SkillPanel
       entries={PANEL_ENTRIES}
       whiteboards={whiteboards}
+      whiteboardsLoaded={whiteboardsLoaded}
       values={values}
       onValueChange={handleValueChange}
       busy={busy}

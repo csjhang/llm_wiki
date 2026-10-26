@@ -10,7 +10,18 @@ import i18n from "@/i18n"
 import { PANEL_ENTRIES, type PanelEntry } from "@/lib/skill-panel/panel-config"
 import { SkillCopyError } from "@/lib/skill-panel/run-skill"
 import type { WhiteboardOption } from "@/lib/skill-panel/whiteboards"
-import { NEED_SYNC_LABEL, SkillPanel, noticeForFallback, noticeForStart, noticeForError, type SkillPanelProps } from "./skills-view"
+import type { ActivityItem } from "@/stores/activity-store"
+import {
+  NEED_SYNC_LABEL,
+  SkillPanel,
+  isRunBlocked,
+  latestRuns,
+  noticeForError,
+  noticeForFallback,
+  noticeForStart,
+  shouldReloadWhiteboards,
+  type SkillPanelProps,
+} from "./skills-view"
 
 const BOARD_1 = "00000000-0000-4000-8000-000000000001"
 const BOARD_2 = "00000000-0000-4000-8000-000000000002"
@@ -26,6 +37,7 @@ function render(props: Partial<SkillPanelProps> = {}): string {
     createElement(SkillPanel, {
       entries: PANEL_ENTRIES,
       whiteboards: [],
+      whiteboardsLoaded: true,
       values: {},
       onValueChange: () => {},
       busy: new Set<string>(),
@@ -123,6 +135,53 @@ describe("SkillPanel", () => {
 
     expect(isDisabled(runButton(card(html, "wiki-lint")))).toBe(true)
     expect(isDisabled(runButton(card(html, "wiki-sync")))).toBe(false)
+  })
+
+  it("disables a button while its run is running, for every button", () => {
+    const html = render({
+      runs: {
+        "wiki-sync": { status: "running", detail: "/wiki-sync --yes" },
+        "wiki-lint": { status: "running", detail: "/wiki-lint" },
+      },
+    })
+
+    expect(isDisabled(runButton(card(html, "wiki-sync")))).toBe(true)
+    expect(isDisabled(runButton(card(html, "wiki-lint")))).toBe(true)
+    expect(isDisabled(runButton(card(html, "wiki-recut")))).toBe(false)
+  })
+
+  it("enables a button again when its run is over, whatever the result", () => {
+    for (const status of ["done", "warning", "error"] as const) {
+      const html = render({ runs: { "wiki-sync": { status, detail: "x" } } })
+      expect(isDisabled(runButton(card(html, "wiki-sync"))), status).toBe(false)
+    }
+  })
+
+  it("does not flash the sync label while the whiteboard list loads", () => {
+    const html = card(render({ whiteboards: [], whiteboardsLoaded: false }), "wiki-fuse")
+
+    const button = runButton(html)
+    expect(isDisabled(button)).toBe(true)
+    expect(button).toContain("融合")
+    expect(button).not.toContain("先執行一次同步 Heptabase")
+    expect(html).not.toContain("<select")
+  })
+
+  it("shows the picker once the list is loaded, and the sync label only for an empty loaded list", () => {
+    expect(card(render({ whiteboards: WHITEBOARDS, whiteboardsLoaded: true }), "wiki-fuse")).toContain("<select")
+    expect(runButton(card(render({ whiteboards: [], whiteboardsLoaded: true }), "wiki-fuse"))).toContain(
+      "先執行一次同步 Heptabase",
+    )
+  })
+
+  it("shows a run with denied tools as a warning, not as done", () => {
+    const html = render({
+      runs: { "wiki-sync": { status: "warning", detail: "Left out two cards.\n\nDenied tools: Bash" } },
+    })
+
+    expect(card(html, "wiki-sync")).toContain("Done with denied tools")
+    expect(card(html, "wiki-sync")).toContain("Denied tools: Bash")
+    expect(card(html, "wiki-sync")).not.toContain("Last run: Done<")
   })
 
   it("says how each button runs", () => {
@@ -234,5 +293,101 @@ describe("notices", () => {
     expect(copy.command).toBe("/wiki-sync --yes")
     expect(copy.text).toContain("clipboard is blocked")
     expect(noticeForError("plain text", t)).toEqual({ tone: "error", text: "plain text" })
+  })
+})
+
+describe("isRunBlocked", () => {
+  it("blocks a skill whose start is pending, or whose run is running", () => {
+    expect(isRunBlocked("wiki-lint", new Set(["wiki-lint"]), {})).toBe(true)
+    expect(isRunBlocked("wiki-lint", new Set(), { "wiki-lint": { status: "running", detail: "" } })).toBe(true)
+  })
+
+  it("does not block another skill, or a skill with no run or a finished run", () => {
+    const runs = { "wiki-lint": { status: "running" as const, detail: "" } }
+    expect(isRunBlocked("wiki-sync", new Set(["wiki-lint"]), runs)).toBe(false)
+    expect(isRunBlocked("wiki-sync", new Set(), {})).toBe(false)
+    for (const status of ["done", "warning", "error"] as const) {
+      expect(isRunBlocked("wiki-sync", new Set(), { "wiki-sync": { status, detail: "" } }), status).toBe(false)
+    }
+  })
+})
+
+describe("shouldReloadWhiteboards", () => {
+  it("is true when the sync run leaves running, whatever the result", () => {
+    for (const next of ["done", "warning", "error"] as const) {
+      expect(shouldReloadWhiteboards("running", next), next).toBe(true)
+    }
+    // The run item was removed while it ran.
+    expect(shouldReloadWhiteboards("running", undefined)).toBe(true)
+  })
+
+  it("is false for every other change", () => {
+    expect(shouldReloadWhiteboards(undefined, "running")).toBe(false)
+    expect(shouldReloadWhiteboards("running", "running")).toBe(false)
+    expect(shouldReloadWhiteboards("done", "done")).toBe(false)
+    expect(shouldReloadWhiteboards("done", "running")).toBe(false)
+    expect(shouldReloadWhiteboards(undefined, undefined)).toBe(false)
+    expect(shouldReloadWhiteboards("error", "done")).toBe(false)
+  })
+})
+
+describe("latestRuns", () => {
+  const LINT = PANEL_ENTRIES.find((entry) => entry.skill === "wiki-lint") as PanelEntry
+  const SYNC = PANEL_ENTRIES.find((entry) => entry.skill === "wiki-sync") as PanelEntry
+
+  function item(overrides: Partial<ActivityItem>): ActivityItem {
+    return {
+      id: "activity-1",
+      type: "skill",
+      title: SYNC.label,
+      status: "done",
+      detail: "",
+      filesWritten: [],
+      createdAt: 1,
+      projectPath: "/home/user/example-a",
+      ...overrides,
+    }
+  }
+
+  it("takes the newest item of each button, items come newest first", () => {
+    const runs = latestRuns(
+      [
+        item({ id: "activity-3", status: "running", detail: "new" }),
+        item({ id: "activity-2", status: "error", detail: "old" }),
+        item({ id: "activity-1", title: LINT.label, status: "done", detail: "lint" }),
+      ],
+      PANEL_ENTRIES,
+      "/home/user/example-a",
+    )
+
+    expect(runs["wiki-sync"]).toEqual({ status: "running", detail: "new" })
+    expect(runs["wiki-lint"]).toEqual({ status: "done", detail: "lint" })
+    expect(runs["wiki-recut"]).toBeUndefined()
+  })
+
+  it("shows only the runs of the open project after a project switch", () => {
+    const items = [
+      item({ id: "activity-2", status: "running", detail: "in B", projectPath: "/home/user/example-b" }),
+      item({ id: "activity-1", status: "error", detail: "in A", projectPath: "/home/user/example-a" }),
+    ]
+
+    expect(latestRuns(items, PANEL_ENTRIES, "/home/user/example-a")["wiki-sync"]).toEqual({ status: "error", detail: "in A" })
+    expect(latestRuns(items, PANEL_ENTRIES, "/home/user/example-b")["wiki-sync"]).toEqual({ status: "running", detail: "in B" })
+    expect(latestRuns(items, PANEL_ENTRIES, "/home/user/example-c")).toEqual({})
+    expect(latestRuns(items, PANEL_ENTRIES, null)).toEqual({})
+  })
+
+  it("leaves out an item with no project, an item of another type, and an item of another title", () => {
+    const runs = latestRuns(
+      [
+        item({ projectPath: undefined }),
+        item({ type: "lint" }),
+        item({ title: "something else" }),
+      ],
+      PANEL_ENTRIES,
+      "/home/user/example-a",
+    )
+
+    expect(runs).toEqual({})
   })
 })

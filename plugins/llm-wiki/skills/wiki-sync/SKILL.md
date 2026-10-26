@@ -355,7 +355,7 @@ node "<plugin dir>/scripts/wiki-tool.mjs" hepta record --project "<project>" --e
 - Copy `contentHash` from the action into the `created`, `updated`, and `relinked` event.
 - For a `skip-edited` action, use the `cardUpdatedAt` of the action in the `feedback` event.
 - If a select option is missing, stop that card. Tell the user which option to add in which property. Go on with the other cards.
-- Ask the user about every `ask` action. Do not guess.
+- Ask the user about every `ask` action, except in a run without questions. Do not guess.
 - Follow "When a call fails" for every failed call.
 
 ## Report

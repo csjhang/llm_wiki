@@ -49,7 +49,7 @@
     "copiedHint": "请在项目文件夹的终端中粘贴运行。",
     "copyFailed": "无法复制命令（{{reason}}）。请手动复制。",
     "lastRun": "上次运行",
-    "status": { "running": "运行中", "done": "完成", "error": "失败" }
+    "status": { "running": "运行中", "done": "完成", "warning": "完成，但有工具被拒绝", "error": "失败" }
   },
   "updateBanner": {
     "message": "新版本 {{version}} 已发布",

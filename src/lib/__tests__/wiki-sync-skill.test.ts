@@ -238,6 +238,14 @@ describe("wiki-sync skill", () => {
       expect(section).not.toContain('"runOn"')
     })
 
+    it("does not clash with the Rules: the rule to ask about every ask action has the exception", () => {
+      const rules = skill.slice(skill.indexOf("## Rules"), skill.indexOf("## Report"))
+      expect(rules).toContain("Ask the user about every `ask` action, except in a run without questions.")
+      expect(rules).not.toMatch(/Ask the user about every `ask` action\. /)
+      // No other rule or step tells a run without questions to ask: each one is covered by this section.
+      expect(section).toContain("Never ask the user a question.")
+    })
+
     it("keeps its sentences short", () => {
       expect(section).not.toBe("")
       expect(findLongSentences("SKILL.md", section)).toEqual([])

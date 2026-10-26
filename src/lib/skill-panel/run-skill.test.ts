@@ -56,9 +56,10 @@ const result = (fields: Record<string, unknown>): string =>
 interface FakeItem {
   type: string
   title: string
-  status: "running" | "done" | "error"
+  status: "running" | "done" | "warning" | "error"
   detail: string
   filesWritten: string[]
+  projectPath?: string
 }
 
 function fakeActivity(): { api: ActivityApi; items: FakeItem[] } {
@@ -267,6 +268,14 @@ describe("runSkill, background button: the run", () => {
     expect(h.activity.items[0].detail).toContain("/wiki-sync --yes")
   })
 
+  it("ties the item to the project, so a panel in another project does not show it", async () => {
+    const h = harness()
+
+    await runSkill(SYNC, {}, h.deps)
+
+    expect(h.activity.items[0].projectPath).toBe(PROJECT)
+  })
+
   it("puts the progress into the item while it runs", async () => {
     const h = harness()
     await runSkill(SYNC, {}, h.deps)
@@ -345,9 +354,48 @@ describe("runSkill, background button: the run", () => {
     h.handlers().onExit({ code: 0, stderr: "" })
 
     const item = h.activity.items[0]
-    expect(item.status).toBe("done")
+    // A run that lost a tool did not finish its work: it is a warning, not a plain "done".
+    expect(item.status).toBe("warning")
     expect(item.detail).toContain("The Bash call needs approval.")
     expect(item.detail).toContain("Denied tools: Bash")
+  })
+
+  it("is a warning when a tool was denied, even if the result does not list the denial", async () => {
+    const h = harness()
+    await runSkill(SYNC, {}, h.deps)
+
+    h.handlers().onLine(denied("mcp__example__list_cards", "needs approval"))
+    h.handlers().onLine(denied("Bash", "needs approval"))
+    h.handlers().onLine(denied("Bash", "needs approval"))
+    h.handlers().onLine(result({ result: "Left out the cards that need a tool." }))
+    h.handlers().onExit({ code: 0, stderr: "" })
+
+    const item = h.activity.items[0]
+    expect(item.status).toBe("warning")
+    expect(item.detail).toContain("Denied tools: mcp__example__list_cards, Bash")
+  })
+
+  it("is plain done when no tool was denied", async () => {
+    const h = harness()
+    await runSkill(SYNC, {}, h.deps)
+
+    h.handlers().onLine(result({ result: "All good.", permission_denials: [] }))
+    h.handlers().onExit({ code: 0, stderr: "" })
+
+    expect(h.activity.items[0].status).toBe("done")
+    expect(h.activity.items[0].detail).not.toContain("Denied tools")
+  })
+
+  it("stays an error when the run failed, and still names the denied tools", async () => {
+    const h = harness()
+    await runSkill(SYNC, {}, h.deps)
+
+    h.handlers().onLine(denied("Bash", "needs approval"))
+    h.handlers().onLine(result({ is_error: true, result: "Stopped.", permission_denials: [{ tool_name: "Bash" }] }))
+    h.handlers().onExit({ code: 1, stderr: "" })
+
+    expect(h.activity.items[0].status).toBe("error")
+    expect(h.activity.items[0].detail).toContain("Denied tools: Bash")
   })
 
   it("shows an error from a tool call while the run goes on", async () => {
