@@ -570,14 +570,17 @@ fn parse_query(query: &str) -> BTreeMap<String, String> {
     out
 }
 
+/// Decode `%XY` and `+`. A `%` that is not followed by two ASCII hex digits stays as it is. The
+/// check is on bytes, because a slice of the `&str` at a byte that is inside a multi-byte
+/// character would panic. (`u8::from_str_radix` also takes a leading sign, so it is not used.)
 fn percent_decode(input: &str) -> String {
     let bytes = input.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let Ok(v) = u8::from_str_radix(&input[i + 1..i + 3], 16) {
-                out.push(v);
+            if let (Some(high), Some(low)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
+                out.push(high * 16 + low);
                 i += 3;
                 continue;
             }
@@ -586,6 +589,16 @@ fn percent_decode(input: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The value of one ASCII hex digit, or `None` for any other byte.
+fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn is_authorized(app: &AppHandle, query: &str, headers: &[(String, String)]) -> bool {
@@ -3641,6 +3654,31 @@ mod tests {
         let parsed = parse_query("path=wiki%2Fhello+world.md&token=a%2Bb");
         assert_eq!(parsed.get("path").unwrap(), "wiki/hello world.md");
         assert_eq!(parsed.get("token").unwrap(), "a+b");
+    }
+
+    #[test]
+    fn percent_decode_keeps_a_percent_before_a_multi_byte_character() {
+        // The two bytes after `%` are not both hex digits, and the second one starts a multi-byte
+        // character. A slice at that byte used to panic.
+        assert_eq!(percent_decode("%a\u{e9}"), "%a\u{e9}");
+        assert_eq!(percent_decode("100%\u{4e2d}\u{6587}"), "100%\u{4e2d}\u{6587}");
+        assert_eq!(percent_decode("%\u{e9}"), "%\u{e9}");
+        assert_eq!(percent_decode("%\u{1f600}x"), "%\u{1f600}x");
+        // A well-formed escape next to a multi-byte character still decodes.
+        assert_eq!(percent_decode("%41\u{e9}"), "A\u{e9}");
+    }
+
+    #[test]
+    fn percent_decode_keeps_a_percent_at_the_end_and_a_bad_escape() {
+        assert_eq!(percent_decode("a%"), "a%");
+        assert_eq!(percent_decode("a%4"), "a%4");
+        assert_eq!(percent_decode("%zz"), "%zz");
+        assert_eq!(percent_decode("%4g"), "%4g");
+        // A sign is not a hex digit, although `u8::from_str_radix` takes one.
+        assert_eq!(percent_decode("%+1"), "% 1");
+        // An escape at the very end decodes.
+        assert_eq!(percent_decode("a%2F"), "a/");
+        assert_eq!(percent_decode("%41"), "A");
     }
 
     #[test]
