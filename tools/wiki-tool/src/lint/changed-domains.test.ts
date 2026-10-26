@@ -3,6 +3,8 @@
  *
  * The tests run the command through runCli on temporary git repositories (see lint-fixture.ts).
  */
+import { existsSync, mkdirSync } from "node:fs"
+import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { runCli } from "../cli"
 import { makeProject, removeProjects, writeProjectFile } from "../test-project"
@@ -123,7 +125,79 @@ describe("lint changed-domains: without a usable marker", () => {
   })
 })
 
+describe("lint changed-domains: a marker that names no usable commit", () => {
+  it("a marker that is a directory cannot be read: every domain with a note", async () => {
+    const project = makeRepo()
+    commit(project, "ingest: first (1 pages)", { "wiki/concepts/a.md": conceptPage(HARDWARE) })
+    mkdirSync(join(project, ".llm-wiki/semantic-lint.json"), { recursive: true })
+    const { exitCode, output } = await run(project)
+    expect(exitCode).toBe(0)
+    expect(output.since).toBeNull()
+    expect(output.domains).toEqual([...DOMAINS])
+    expect(output.note).toMatch(/cannot be read/)
+  })
+
+  it("a marker that is not JSON says so", async () => {
+    const project = makeRepo()
+    commit(project, "ingest: first (1 pages)", { "wiki/concepts/a.md": conceptPage(HARDWARE) })
+    writeProjectFile(project, ".llm-wiki/semantic-lint.json", "{ not json")
+    const { output } = await run(project)
+    expect(output.note).toMatch(/not valid JSON/)
+  })
+
+  it("a marker that names an object that is not a commit is no marker", async () => {
+    const project = makeRepo()
+    commit(project, "ingest: first (1 pages)", { "wiki/concepts/a.md": conceptPage(HARDWARE) })
+    const tree = git(project, "rev-parse", "HEAD^{tree}").trim()
+    setMarker(project, tree)
+    const { exitCode, output } = await run(project)
+    expect(exitCode).toBe(0)
+    expect(output.since).toBeNull()
+    expect(output.domains).toEqual([...DOMAINS])
+    expect(output.note).toContain(tree)
+    expect(output.note).toMatch(/not in the history/)
+  })
+
+  it("a marker that looks like a git option is not given to git", async () => {
+    const project = makeRepo()
+    commit(project, "ingest: first (1 pages)", { "wiki/concepts/a.md": conceptPage(HARDWARE) })
+    const injected = join(project, "injected.txt")
+    setMarker(project, `--output=${injected}`)
+    const { exitCode, output } = await run(project)
+    expect(exitCode).toBe(0)
+    expect(output.since).toBeNull()
+    expect(output.note).toMatch(/marker/)
+    expect(existsSync(injected)).toBe(false)
+  })
+})
+
 describe("lint changed-domains: with a marker", () => {
+  it("accepts a short marker sha", async () => {
+    const { project, marker } = markedRepo()
+    setMarker(project, marker.slice(0, 7))
+    commit(project, "ingest: second (1 pages)", { "wiki/concepts/c.md": conceptPage(PHYSICS, { title: "Changed" }) })
+    const { output } = await run(project)
+    // `since` is the full sha.
+    expect(output).toEqual({ ok: true, since: marker, domains: [PHYSICS], mechanismsChanged: false, ingestsSince: 1 })
+  })
+
+  it("accepts an upper case marker sha", async () => {
+    const { project, marker } = markedRepo()
+    setMarker(project, marker.toUpperCase())
+    commit(project, "ingest: second (1 pages)", { "wiki/concepts/c.md": conceptPage(PHYSICS, { title: "Changed" }) })
+    const { output } = await run(project)
+    expect(output).toEqual({ ok: true, since: marker, domains: [PHYSICS], mechanismsChanged: false, ingestsSince: 1 })
+  })
+
+  it("a deleted page with a byte order mark counts under its old domain", async () => {
+    const project = makeRepo()
+    const marker = commit(project, "ingest: first (1 pages)", { "wiki/concepts/a.md": `\uFEFF${conceptPage(HARDWARE)}` })
+    setMarker(project, marker)
+    commit(project, "ingest: second (0 pages)", { "wiki/concepts/a.md": null })
+    const { output } = await run(project)
+    expect(output.domains).toEqual([HARDWARE])
+  })
+
   it("returns domains changed since the marker", async () => {
     const { project, marker } = markedRepo()
     commit(project, "ingest: second (2 pages)", {
@@ -265,6 +339,27 @@ describe("lint changed-domains: with a marker", () => {
     })
     const { output } = await run(project)
     expect(output.domains).toEqual([HARDWARE])
+  })
+
+  it("counts only the ingest commits that touch the project folder", async () => {
+    const outer = makeWiki()
+    initRepo(outer)
+    const project = join(outer, "wiki-project")
+    writeProjectFile(outer, "wiki-project/domains.yaml", DOMAINS_YAML)
+    writeProjectFile(outer, "wiki-project/wiki.yaml", "version: 1\nid: test\nrole: reading\n")
+    const marker = commit(outer, "ingest: first (1 pages)", { "wiki-project/wiki/concepts/a.md": conceptPage(HARDWARE) })
+    setMarker(project, marker)
+    commit(outer, "ingest: other project (1 pages)", { "other-project/wiki/concepts/z.md": conceptPage(PHYSICS) })
+    commit(outer, "ingest: other project again (1 pages)", { "other-project/wiki/concepts/y.md": conceptPage(PHYSICS) })
+    expect((await run(project)).output.ingestsSince).toBe(0)
+
+    commit(outer, "ingest: this project (1 pages)", { "wiki-project/wiki/concepts/a.md": conceptPage(HARDWARE, { title: "Changed" }) })
+    commit(outer, "docs: this project", { "wiki-project/notes.txt": "x" })
+    expect((await run(project)).output.ingestsSince).toBe(1)
+
+    // Without a marker, the commits of the project count: the first one and the one just made.
+    writeProjectFile(project, ".llm-wiki/semantic-lint.json", "{}")
+    expect((await run(project)).output.ingestsSince).toBe(2)
   })
 })
 

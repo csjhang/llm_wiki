@@ -6,6 +6,7 @@
 import { execFileSync } from "node:child_process"
 import { mkdirSync, rmSync, writeFileSync } from "node:fs"
 import { dirname, join } from "node:path"
+import { localDate } from "@/lib/mechanism-wiki/lint-structure"
 import { runCli } from "../cli"
 import { makeProject, pageText, writeProjectFile } from "../test-project"
 
@@ -25,28 +26,34 @@ export function makeWiki(files: Record<string, string> = {}): string {
   return makeProject({ "domains.yaml": DOMAINS_YAML, ...files }, { noHeptabaseYaml: true })
 }
 
+/** The identity of the test commits, and no git config of the machine (global or system). */
 const GIT_ENV = {
   GIT_AUTHOR_NAME: "T",
   GIT_AUTHOR_EMAIL: "t@example.com",
   GIT_COMMITTER_NAME: "T",
   GIT_COMMITTER_EMAIL: "t@example.com",
+  GIT_CONFIG_GLOBAL: "/dev/null",
+  GIT_CONFIG_NOSYSTEM: "1",
 }
 
 export function git(project: string, ...args: string[]): string {
   return execFileSync("git", ["-C", project, ...args], { encoding: "utf8", env: { ...process.env, ...GIT_ENV } })
 }
 
-/** Make the project a git repository. The folder `.llm-wiki/` is ignored, as in a real project. */
-export function initRepo(project: string): void {
+/**
+ * Make the project a git repository. The folder `.llm-wiki/` is ignored, as in a real project, unless
+ * `ignoreLlmWiki` is false: then a careless `git add -A` would take the marker, and a test can see it.
+ */
+export function initRepo(project: string, options: { ignoreLlmWiki?: boolean } = {}): void {
   git(project, "init", "--quiet")
   git(project, "config", "commit.gpgsign", "false")
-  writeFileSync(join(project, ".git", "info", "exclude"), ".llm-wiki/\n")
+  if (options.ignoreLlmWiki !== false) writeFileSync(join(project, ".git", "info", "exclude"), ".llm-wiki/\n")
 }
 
 /** A wiki that is a git repository with no commit. */
-export function makeRepo(files: Record<string, string> = {}): string {
+export function makeRepo(files: Record<string, string> = {}, options: { ignoreLlmWiki?: boolean } = {}): string {
   const project = makeWiki(files)
-  initRepo(project)
+  initRepo(project, options)
   return project
 }
 
@@ -98,12 +105,8 @@ export function hypothesisPage(from: string, to: string, extra: Record<string, s
   })
 }
 
-/** The local date of today, as `YYYY-MM-DD`. */
-export function localDate(): string {
-  const now = new Date()
-  const two = (value: number): string => String(value).padStart(2, "0")
-  return `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}`
-}
+/** The local date of today, as `YYYY-MM-DD`. The same function as the lint uses (tested in lint-structure.test.ts). */
+export { localDate }
 
 export function mechanismPage(extra: Record<string, string | string[]> = {}): string {
   return page({ type: "mechanism", title: "Placeholder mechanism", ...extra })

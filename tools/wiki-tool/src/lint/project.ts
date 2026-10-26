@@ -41,13 +41,18 @@ export interface LintProject {
   blockingProblems: string[]
 }
 
+/** True when the project has a `domains.yaml`: it is a mechanism wiki. */
+export function isMechanismWiki(project: string): boolean {
+  return existsSync(join(resolve(project), DOMAINS_FILE))
+}
+
 /**
  * The project at `project`, or null when it has no `domains.yaml`: it is not a mechanism wiki. A file that is
  * missing, cannot be read, or is not valid is a config problem, not an error.
  */
 export function loadLintProject(project: string): LintProject | null {
   const root = resolve(project)
-  if (!existsSync(join(root, DOMAINS_FILE))) return null
+  if (!isMechanismWiki(root)) return null
 
   const configProblems: string[] = []
   const blockingProblems: string[] = []
@@ -87,7 +92,7 @@ function defaultIdentity(): WikiIdentity {
 function readText(path: string): string | null | undefined {
   if (!existsSync(path)) return null
   try {
-    return readFileSync(path, "utf8").replace(/^﻿/, "")
+    return readFileSync(path, "utf8").replace(/^\uFEFF/, "")
   } catch {
     return undefined
   }

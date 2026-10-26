@@ -67,6 +67,18 @@ export function readGit(projectPath: string, args: string[]): GitRun {
   return runGit(resolve(projectPath), ["--literal-pathspecs", ...args])
 }
 
+/** True when the folder is inside a git work tree. */
+export function isGitWorkTree(projectPath: string): boolean {
+  const result = readGit(projectPath, ["rev-parse", "--is-inside-work-tree"])
+  return result.status === 0 && result.stdout.trim() === "true"
+}
+
+/** The sha of `HEAD`, or null when the repository has no commit. */
+export function headCommit(projectPath: string): string | null {
+  const result = readGit(projectPath, ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"])
+  return result.status === 0 ? result.stdout.trim() : null
+}
+
 /** Run git and return stdout. A non-zero exit throws git's own message. */
 function git(project: string, args: string[]): string {
   const result = runGit(project, args)

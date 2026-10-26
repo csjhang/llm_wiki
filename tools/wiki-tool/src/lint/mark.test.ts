@@ -5,8 +5,8 @@ import { existsSync, readdirSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
 import { runCli } from "../cli"
-import { removeProjects } from "../test-project"
-import { commit, conceptPage, git, HARDWARE, head, makeRepo, makeWiki, runLint } from "./lint-fixture"
+import { makeProject, removeProjects } from "../test-project"
+import { commit, conceptPage, git, HARDWARE, head, initRepo, makeRepo, makeWiki, runLint } from "./lint-fixture"
 
 vi.setConfig({ testTimeout: 30_000 })
 
@@ -66,11 +66,29 @@ describe("lint mark", () => {
   })
 
   it("never commits the marker", async () => {
-    const project = makeRepo()
+    // `.llm-wiki/` is not ignored here, so a `git add -A` after the write would take the marker.
+    const project = makeRepo({}, { ignoreLlmWiki: false })
     const sha = commit(project, "ingest: first (1 pages)")
+    const commitsBefore = git(project, "rev-list", "--all")
     await mark(project)
+    expect(existsSync(join(project, MARKER))).toBe(true)
+    expect(git(project, "rev-list", "--all")).toBe(commitsBefore)
     expect(head(project)).toBe(sha)
     expect(git(project, "ls-files")).not.toContain(".llm-wiki")
+    expect(git(project, "diff", "--cached", "--name-only")).toBe("")
+    // The marker is an untracked file, nothing more.
+    expect(git(project, "status", "--porcelain")).toBe("?? .llm-wiki/\n")
+  })
+
+  it("refuses a project that is not a mechanism wiki", async () => {
+    const project = makeProject({}, { noHeptabaseYaml: true })
+    initRepo(project)
+    commit(project, "ingest: first (0 pages)")
+    const { exitCode, output } = await mark(project)
+    expect(exitCode).toBe(2)
+    expect(output.ok).toBe(false)
+    expect(output.problems?.join("\n")).toMatch(/not a mechanism wiki.*domains\.yaml/)
+    expect(existsSync(join(project, MARKER))).toBe(false)
   })
 
   it("refuses a repository with no commit", async () => {

@@ -2496,7 +2496,7 @@ function emptyCardMap() {
 * cannot be read as a card map throws an error that names the file and says to
 * repair or remove it.
 */
-function loadCardMap$1(projectPath) {
+function loadCardMap(projectPath) {
 	const path = resolveInProject(projectPath, CARD_MAP_FILE);
 	if (!existsSync(path)) return emptyCardMap();
 	try {
@@ -3008,7 +3008,7 @@ function init(args) {
 	if (existsSync(configPath) && !parsed.flags.force) problems.push(`${HEPTABASE_YAML} already exists; pass --force to replace it`);
 	let map = null;
 	try {
-		map = loadCardMap$1(project);
+		map = loadCardMap(project);
 	} catch (error) {
 		problems.push(error instanceof Error ? error.message : String(error));
 	}
@@ -4108,7 +4108,7 @@ function planDown(args) {
 	const config = readProjectConfig(project, problems);
 	let map = null;
 	try {
-		map = loadCardMap$1(project);
+		map = loadCardMap(project);
 	} catch (error) {
 		problems.push(error instanceof Error ? error.message : String(error));
 	}
@@ -4511,7 +4511,7 @@ function planUp(args) {
 	const config = readHeptabaseConfig(project, problems);
 	let map = null;
 	try {
-		map = loadCardMap$1(project);
+		map = loadCardMap(project);
 	} catch (error) {
 		problems.push(error instanceof Error ? error.message : String(error));
 	}
@@ -4800,7 +4800,7 @@ function record(args) {
 	const event = parseEvent(eventText, problems);
 	let map = null;
 	try {
-		map = loadCardMap$1(project);
+		map = loadCardMap(project);
 	} catch (error) {
 		problems.push(error instanceof Error ? error.message : String(error));
 	}
@@ -5391,7 +5391,7 @@ function snapshot(args) {
 	const config = readHeptabaseConfig(project, problems);
 	let map = null;
 	try {
-		map = loadCardMap$1(project);
+		map = loadCardMap(project);
 	} catch (error) {
 		problems.push(error instanceof Error ? error.message : String(error));
 	}
@@ -6348,6 +6348,21 @@ function runGit(project, args) {
 function readGit(projectPath, args) {
 	return runGit(resolve(projectPath), ["--literal-pathspecs", ...args]);
 }
+/** True when the folder is inside a git work tree. */
+function isGitWorkTree(projectPath) {
+	const result = readGit(projectPath, ["rev-parse", "--is-inside-work-tree"]);
+	return result.status === 0 && result.stdout.trim() === "true";
+}
+/** The sha of `HEAD`, or null when the repository has no commit. */
+function headCommit(projectPath) {
+	const result = readGit(projectPath, [
+		"rev-parse",
+		"--verify",
+		"--quiet",
+		"HEAD^{commit}"
+	]);
+	return result.status === 0 ? result.stdout.trim() : null;
+}
 /** Run git and return stdout. A non-zero exit throws git's own message. */
 function git(project, args) {
 	const result = runGit(project, args);
@@ -6770,7 +6785,7 @@ function readWiki(path, problems) {
 		return {
 			id: identity.id,
 			path,
-			map: loadCardMap$1(path)
+			map: loadCardMap(path)
 		};
 	} catch (error) {
 		problems.push(`wiki ${path}: ${error instanceof Error ? error.message : String(error)}`);
@@ -7143,6 +7158,32 @@ function structurePageFromMarkdown(path, markdown) {
 	page.fromDomain = base.type === HYPOTHESIS_TYPE ? text("from_domain") ?? null : null;
 	return page;
 }
+/**
+* The pages of `heptabase-map.json` with the two fields the checks read, from the text of the file. Null when
+* the text is not JSON or not a card map of version 1 with a `pages` mapping: the lint then leaves the card map
+* out of its checks. An entry without a text `status` and a text `card_id` is left out. A byte order mark
+* before the JSON is ignored. The app and the `wiki-tool` CLI both read the card map with this function.
+*/
+function cardMapFromJson(text) {
+	let raw;
+	try {
+		raw = JSON.parse(text.replace(/^\uFEFF/, ""));
+	} catch {
+		return null;
+	}
+	if (!isRecord(raw) || raw.version !== 1 || !isRecord(raw.pages)) return null;
+	const entries = [];
+	for (const [path, entry] of Object.entries(raw.pages)) if (isRecord(entry) && typeof entry.status === "string" && typeof entry.card_id === "string") entries.push([path, {
+		status: entry.status,
+		card_id: entry.card_id
+	}]);
+	return { pages: Object.fromEntries(entries) };
+}
+/** The local date of `now` (today by default) as `YYYY-MM-DD`. This is the `today` of `checkStructure`. */
+function localDate(now = /* @__PURE__ */ new Date()) {
+	const two = (value) => String(value).padStart(2, "0");
+	return `${String(now.getFullYear()).padStart(4, "0")}-${two(now.getMonth() + 1)}-${two(now.getDate())}`;
+}
 /** Run every check. The findings are sorted by check id, then by page path, so the output is stable. */
 function checkStructure(input) {
 	if (utcDay(input.today) === null) throw new Error(`today must be a date in YYYY-MM-DD form, got "${input.today}"`);
@@ -7443,13 +7484,17 @@ const NON_PAGE_PATHS = new Set([
 	"wiki/log.md",
 	"wiki/overview.md"
 ]);
+/** True when the project has a `domains.yaml`: it is a mechanism wiki. */
+function isMechanismWiki(project) {
+	return existsSync(join(resolve(project), DOMAINS_FILE));
+}
 /**
 * The project at `project`, or null when it has no `domains.yaml`: it is not a mechanism wiki. A file that is
 * missing, cannot be read, or is not valid is a config problem, not an error.
 */
 function loadLintProject(project) {
 	const root = resolve(project);
-	if (!existsSync(join(root, DOMAINS_FILE))) return null;
+	if (!isMechanismWiki(root)) return null;
 	const configProblems = [];
 	const blockingProblems = [];
 	const report = (issues, source, blocking = true) => {
@@ -7500,7 +7545,7 @@ function defaultIdentity() {
 function readText(path) {
 	if (!existsSync(path)) return null;
 	try {
-		return readFileSync(path, "utf8").replace(/^﻿/, "");
+		return readFileSync(path, "utf8").replace(/^\uFEFF/, "");
 	} catch {
 		return;
 	}
@@ -7689,38 +7734,38 @@ function lintBatch(args) {
 }
 
 //#endregion
-//#region tools/wiki-tool/src/lint/mark.ts
+//#region tools/wiki-tool/src/lint/marker.ts
 /**
-* `wiki-tool lint mark` - record that the semantic lint has seen the wiki as it is at `HEAD`.
+* The marker file of the semantic lint: `.llm-wiki/semantic-lint.json`, `{ "commit": "<sha>", "at": "<ISO time>" }`.
 *
-* `--project P` writes `.llm-wiki/semantic-lint.json` as `{ "commit": "<sha of HEAD>", "at": "<ISO time>" }` and gives
-* `{ ok: true, commit, at }`. `lint changed-domains` reads the marker. The write is atomic, and the folder
-* `.llm-wiki/` is created when it is missing. The marker is never committed. A project that is not a git
-* repository, and a repository with no commit, give exit 2 and no marker.
+* `lint mark` writes it with the sha of `HEAD`. `lint changed-domains` reads it. The folder `.llm-wiki/` is never
+* committed.
 */
 /** The marker file, relative to the project folder. */
 const MARKER_FILE = ".llm-wiki/semantic-lint.json";
 /** A sha as the marker keeps it: 7 to 64 hex digits. Anything else could be read by git as an option or a name. */
 const SHA_PATTERN = /^[0-9a-f]{7,64}$/i;
-/** The commit of the marker of a project. A missing file is "none". A file that cannot be used is "bad". */
+/**
+* The commit of the marker of a project. A missing file is "none". A file that cannot be read, is not JSON, or
+* has no usable `commit` is "bad", with the reason. The sha is not checked against the repository.
+*/
 function readMarker(project) {
-	let path;
+	let text;
 	try {
-		path = resolveInProject(project, MARKER_FILE);
+		text = readFileSync(resolveInProject(project, MARKER_FILE), "utf8");
 	} catch (error) {
-		return {
+		return error.code === "ENOENT" ? { kind: "none" } : {
 			kind: "bad",
-			reason: error instanceof Error ? error.message : String(error)
+			reason: "it cannot be read"
 		};
 	}
 	let marker;
 	try {
-		marker = readJsonFile(path);
-	} catch (error) {
-		if (error.code === "ENOENT") return { kind: "none" };
+		marker = JSON.parse(text.replace(/^\uFEFF/, ""));
+	} catch {
 		return {
 			kind: "bad",
-			reason: error instanceof Error && error.message.startsWith("cannot parse JSON file") ? "it is not valid JSON" : "it cannot be read"
+			reason: "it is not valid JSON"
 		};
 	}
 	const commit = typeof marker === "object" && marker !== null ? marker.commit : void 0;
@@ -7733,44 +7778,12 @@ function readMarker(project) {
 		commit: commit.toLowerCase()
 	};
 }
-/** True when the folder is inside a git work tree. */
-function isGitWorkTree(project) {
-	const result = readGit(project, ["rev-parse", "--is-inside-work-tree"]);
-	return result.status === 0 && result.stdout.trim() === "true";
-}
-/** The sha of `HEAD`, or null when the repository has no commit. */
-function headCommit(project) {
-	const result = readGit(project, [
-		"rev-parse",
-		"--verify",
-		"--quiet",
-		"HEAD^{commit}"
-	]);
-	return result.status === 0 ? result.stdout.trim() : null;
-}
-function lintMark(args) {
-	const parsed = parseLintArgs(args);
-	if (!parsed.ok) return parsed.result;
-	const { project } = parsed;
-	if (!isGitWorkTree(project)) return {
-		ok: false,
-		problems: [`not inside a git work tree: ${project}`]
-	};
-	const commit = headCommit(project);
-	if (commit === null) return {
-		ok: false,
-		problems: ["the repository has no commit yet; commit the wiki first"]
-	};
-	const at = (/* @__PURE__ */ new Date()).toISOString();
+/** Write the marker, atomically. The folder `.llm-wiki/` is created when it is missing. */
+function writeMarker(project, commit, at) {
 	writeFileAtomic(resolveInProject(project, MARKER_FILE), `${JSON.stringify({
 		commit,
 		at
 	}, null, 2)}\n`);
-	return {
-		ok: true,
-		commit,
-		at
-	};
 }
 
 //#endregion
@@ -7793,8 +7806,8 @@ function lintMark(args) {
 *   dropped. In a work wiki, the domains of the reading wiki follow those of this wiki.
 * - `mechanismsChanged` is true when a path under `wiki/mechanisms/` changed. Without a marker it is true when the
 *   wiki has a mechanism page.
-* - `ingestsSince` is the number of commits after the marker (all commits without a marker) whose subject starts
-*   with `ingest:`.
+* - `ingestsSince` is the number of commits after the marker (all commits without a marker) that touch the project
+*   folder and whose subject starts with `ingest:`.
 *
 * It only reads: git calls take no lock.
 */
@@ -7820,7 +7833,7 @@ function lintChangedDomains(args) {
 	let since = null;
 	if (head !== null && marker.kind === "commit") {
 		since = usableMarkerCommit(project, marker.commit);
-		if (since === null) note = `The marker commit ${marker.commit} is not in the history of HEAD (the history was rewritten). Every domain is listed.`;
+		if (since === null) note = `The marker commit ${marker.commit} is not in the history of HEAD (the history was rewritten, or the marker is not a commit). Every domain is listed.`;
 	} else if (marker.kind === "bad") note = `The marker file .llm-wiki/semantic-lint.json cannot be used: ${marker.reason}. Every domain is listed.`;
 	const touched = /* @__PURE__ */ new Set();
 	let mechanismsChanged;
@@ -7911,17 +7924,55 @@ function changedPaths(project, since) {
 function showFile(project, revision, path) {
 	const result = readGit(project, ["show", `${revision}:./${path}`]);
 	if (result.status !== 0) throw new Error(result.stderr.trim() || `git show ${revision}:${path} failed`);
-	return result.stdout.replace(/^﻿/, "");
+	return result.stdout.replace(/^\uFEFF/, "");
 }
-/** The commits after `since` (all commits without it) whose subject starts with `ingest:`. */
+/**
+* The commits after `since` (all commits without it) that touch the project folder and whose subject starts with
+* `ingest:`. The pathspec `.` is the project folder, so another folder of a larger repository does not count.
+*/
 function countIngests(project, since) {
 	const result = readGit(project, [
 		"log",
 		"--format=%s",
-		since === null ? "HEAD" : `${since}..HEAD`
+		since === null ? "HEAD" : `${since}..HEAD`,
+		"--",
+		"."
 	]);
 	if (result.status !== 0) throw new Error(result.stderr.trim() || "git log failed");
 	return result.stdout.split("\n").filter((subject) => subject.startsWith(INGEST_PREFIX)).length;
+}
+
+//#endregion
+//#region tools/wiki-tool/src/lint/mark.ts
+/**
+* `wiki-tool lint mark` - record that the semantic lint has seen the wiki as it is at `HEAD`.
+*
+* `--project P` writes `.llm-wiki/semantic-lint.json` as `{ "commit": "<sha of HEAD>", "at": "<ISO time>" }` and gives
+* `{ ok: true, commit, at }`. `lint changed-domains` reads the marker (see marker.ts). The marker is never
+* committed. A project that is not a mechanism wiki (no `domains.yaml`), a project that is not a git repository, and
+* a repository with no commit give exit 2 and no marker.
+*/
+function lintMark(args) {
+	const parsed = parseLintArgs(args);
+	if (!parsed.ok) return parsed.result;
+	const { project } = parsed;
+	if (!isMechanismWiki(project)) return notMechanismWiki(project);
+	if (!isGitWorkTree(project)) return {
+		ok: false,
+		problems: [`not inside a git work tree: ${project}`]
+	};
+	const commit = headCommit(project);
+	if (commit === null) return {
+		ok: false,
+		problems: ["the repository has no commit yet; commit the wiki first"]
+	};
+	const at = (/* @__PURE__ */ new Date()).toISOString();
+	writeMarker(project, commit, at);
+	return {
+		ok: true,
+		commit,
+		at
+	};
 }
 
 //#endregion
@@ -7948,36 +7999,23 @@ function lintStructure(args) {
 			pages: readWikiPages(project, { allowMissingWiki: true }).map((page) => structurePageFromMarkdown(page.path, page.markdown)),
 			domains: config.domains,
 			identity: config.identity,
-			cardMap: loadCardMap(project),
-			today: localDate(/* @__PURE__ */ new Date()),
+			cardMap: readLintCardMap(project),
+			today: localDate(),
 			libraryDomains: config.libraryDomains,
 			configProblems: config.configProblems
 		})
 	};
 }
 /**
-* The pages of `heptabase-map.json` with the two fields the checks read. Null when the file is missing, is not
-* JSON, or is not a card map of version 1: it is left out of the checks, as in the app. An entry without a text
-* `status` and `card_id` is left out.
+* The card map of the project for the checks, read by `cardMapFromJson` (the function of the app). Null when the
+* file is missing, cannot be read, or is not a card map: it is left out of the checks.
 */
-function loadCardMap(project) {
+function readLintCardMap(project) {
 	try {
-		const raw = JSON.parse(readFileSync(resolveInProject(project, CARD_MAP_FILE), "utf8").replace(/^﻿/, ""));
-		if (!isRecord(raw) || raw.version !== 1 || !isRecord(raw.pages)) return null;
-		const entries = [];
-		for (const [path, entry] of Object.entries(raw.pages)) if (isRecord(entry) && typeof entry.status === "string" && typeof entry.card_id === "string") entries.push([path, {
-			status: entry.status,
-			card_id: entry.card_id
-		}]);
-		return { pages: Object.fromEntries(entries) };
+		return cardMapFromJson(readFileSync(resolveInProject(project, CARD_MAP_FILE), "utf8"));
 	} catch {
 		return null;
 	}
-}
-/** The local date as `YYYY-MM-DD`. */
-function localDate(now) {
-	const two = (value) => String(value).padStart(2, "0");
-	return `${String(now.getFullYear()).padStart(4, "0")}-${two(now.getMonth() + 1)}-${two(now.getDate())}`;
 }
 
 //#endregion

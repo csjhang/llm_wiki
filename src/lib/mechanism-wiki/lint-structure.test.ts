@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
 import { DEFAULT_LINT_THRESHOLDS } from "@/lib/wiki-config/wiki-identity"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
-import { checkStructure, configProblemText, structurePageFromMarkdown } from "./lint-structure"
+import { cardMapFromJson, checkStructure, configProblemText, localDate, structurePageFromMarkdown } from "./lint-structure"
 import type { StructureFinding, StructureInput, StructurePage } from "./lint-structure"
 
 const ALPHA = "example/alpha"
@@ -927,6 +927,93 @@ describe("order and shape", () => {
         expect(sentence.split(/\s+/).length, `${finding.check}: ${sentence}`).toBeLessThanOrEqual(30)
       }
     }
+  })
+})
+
+describe("cardMapFromJson", () => {
+  const entry = { status: "active", card_id: CARD_1 }
+  const mapText = (pages: unknown, version: unknown = 1): string => JSON.stringify({ version, pages, sources: {} })
+
+  it("reads the pages of a card map of version 1", () => {
+    const pages = { "wiki/a.md": entry, "wiki/b.md": { status: "retired", card_id: CARD_2, content_hash: "x" } }
+    expect(cardMapFromJson(mapText(pages))).toEqual({
+      pages: { "wiki/a.md": entry, "wiki/b.md": { status: "retired", card_id: CARD_2 } },
+    })
+  })
+
+  it("an empty card map has no pages", () => {
+    expect(cardMapFromJson(mapText({}))).toEqual({ pages: {} })
+  })
+
+  it.each([
+    ["empty", ""],
+    ["not JSON", "not json"],
+    ["null", "null"],
+    ["a list", "[]"],
+    ["version 2", mapText({}, 2)],
+    ["a version that is text", mapText({}, "1")],
+    ["without pages", JSON.stringify({ version: 1 })],
+    ["with pages that are a list", mapText([])],
+    ["with pages that are null", mapText(null)],
+  ])("is null for a card map that is %s", (_name, text) => {
+    expect(cardMapFromJson(text)).toBeNull()
+  })
+
+  it("leaves out an entry without a text status and a text card id", () => {
+    const pages = {
+      "wiki/ok.md": entry,
+      "wiki/no-status.md": { card_id: CARD_1 },
+      "wiki/no-card.md": { status: "active" },
+      "wiki/number.md": { status: 1, card_id: CARD_1 },
+      "wiki/null.md": null,
+      "wiki/text.md": "active",
+    }
+    expect(cardMapFromJson(mapText(pages))).toEqual({ pages: { "wiki/ok.md": entry } })
+  })
+
+  it("ignores a byte order mark before the JSON", () => {
+    expect(cardMapFromJson(`\uFEFF${mapText({ "wiki/a.md": entry })}`)).toEqual({ pages: { "wiki/a.md": entry } })
+  })
+
+  it("keeps a page path such as __proto__ as an own property", () => {
+    const map = cardMapFromJson(`{"version":1,"pages":{"__proto__":{"status":"active","card_id":"${CARD_1}"}}}`)
+    expect(map).not.toBeNull()
+    expect(Object.keys(map?.pages ?? {})).toEqual(["__proto__"])
+    expect(Object.getPrototypeOf(map?.pages)).toBe(Object.prototype)
+  })
+
+  it("gives a card map that checkStructure uses", () => {
+    const cardMap = cardMapFromJson(mapText({ "wiki/gone.md": entry }))
+    const findings = checkStructure({
+      pages: [],
+      domains: domainsOf(ALPHA),
+      identity: { ...READING, lint: { ...DEFAULT_LINT_THRESHOLDS, min_domain_pages: 1 } },
+      cardMap,
+      today: TODAY,
+    })
+    expect(findings.map((finding) => finding.check)).toContain("map-missing-page")
+  })
+})
+
+describe("localDate", () => {
+  it("is the date of the local time, as YYYY-MM-DD", () => {
+    expect(localDate(new Date(2026, 0, 5, 23, 59, 59, 999))).toBe("2026-01-05")
+    expect(localDate(new Date(2026, 11, 31, 0, 0, 0, 0))).toBe("2026-12-31")
+    expect(localDate(new Date(2024, 1, 29, 12))).toBe("2024-02-29")
+  })
+
+  it("pads a year of fewer than four digits", () => {
+    const early = new Date(2000, 0, 1)
+    early.setFullYear(5)
+    expect(localDate(early)).toBe("0005-01-01")
+  })
+
+  it("is today when no date is given", () => {
+    const before = localDate(new Date())
+    const given = localDate()
+    const after = localDate(new Date())
+    expect([before, after]).toContain(given)
+    expect(given).toMatch(/^\d{4}-\d{2}-\d{2}$/)
   })
 })
 

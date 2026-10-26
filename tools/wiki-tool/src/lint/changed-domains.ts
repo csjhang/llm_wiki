@@ -16,16 +16,16 @@
  *   dropped. In a work wiki, the domains of the reading wiki follow those of this wiki.
  * - `mechanismsChanged` is true when a path under `wiki/mechanisms/` changed. Without a marker it is true when the
  *   wiki has a mechanism page.
- * - `ingestsSince` is the number of commits after the marker (all commits without a marker) whose subject starts
- *   with `ingest:`.
+ * - `ingestsSince` is the number of commits after the marker (all commits without a marker) that touch the project
+ *   folder and whose subject starts with `ingest:`.
  *
  * It only reads: git calls take no lock.
  */
 import { structurePageFromMarkdown } from "@/lib/mechanism-wiki/lint-structure"
-import { readGit } from "../git"
+import { headCommit, isGitWorkTree, readGit } from "../git"
 import type { CommandResult } from "../io"
 import { readWikiPages } from "../mirror-pages"
-import { headCommit, isGitWorkTree, readMarker } from "./mark"
+import { readMarker } from "./marker"
 import {
   isPagePath,
   libraryOnlyDomains,
@@ -65,7 +65,7 @@ export function lintChangedDomains(args: string[]): CommandResult {
   if (head !== null && marker.kind === "commit") {
     since = usableMarkerCommit(project, marker.commit)
     if (since === null) {
-      note = `The marker commit ${marker.commit} is not in the history of HEAD (the history was rewritten). Every domain is listed.`
+      note = `The marker commit ${marker.commit} is not in the history of HEAD (the history was rewritten, or the marker is not a commit). Every domain is listed.`
     }
   } else if (marker.kind === "bad") {
     note = `The marker file .llm-wiki/semantic-lint.json cannot be used: ${marker.reason}. Every domain is listed.`
@@ -146,12 +146,15 @@ function changedPaths(project: string, since: string): ChangedPath[] {
 function showFile(project: string, revision: string, path: string): string {
   const result = readGit(project, ["show", `${revision}:./${path}`])
   if (result.status !== 0) throw new Error(result.stderr.trim() || `git show ${revision}:${path} failed`)
-  return result.stdout.replace(/^﻿/, "")
+  return result.stdout.replace(/^\uFEFF/, "")
 }
 
-/** The commits after `since` (all commits without it) whose subject starts with `ingest:`. */
+/**
+ * The commits after `since` (all commits without it) that touch the project folder and whose subject starts with
+ * `ingest:`. The pathspec `.` is the project folder, so another folder of a larger repository does not count.
+ */
 function countIngests(project: string, since: string | null): number {
-  const result = readGit(project, ["log", "--format=%s", since === null ? "HEAD" : `${since}..HEAD`])
+  const result = readGit(project, ["log", "--format=%s", since === null ? "HEAD" : `${since}..HEAD`, "--", "."])
   if (result.status !== 0) throw new Error(result.stderr.trim() || "git log failed")
   return result.stdout.split("\n").filter((subject) => subject.startsWith(INGEST_PREFIX)).length
 }

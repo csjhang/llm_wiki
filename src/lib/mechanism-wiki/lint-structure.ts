@@ -16,6 +16,7 @@ import { parseFrontmatter } from "@/lib/frontmatter"
 import type { DomainsConfig } from "@/lib/wiki-config/domains"
 import type { ConfigIssue } from "@/lib/wiki-config/types"
 import type { WikiIdentity } from "@/lib/wiki-config/wiki-identity"
+import { isRecord } from "@/lib/wiki-config/yaml-util"
 import { compareText, indexedPageFromMarkdown, isDomainIndexPath, MECHANISM_TYPE } from "./domain-index-render"
 import type { IndexedPage } from "./domain-index-render"
 
@@ -138,6 +139,38 @@ export function structurePageFromMarkdown(path: string, markdown: string): Struc
   if (frontmatter !== null && frontmatter !== undefined && "instances" in frontmatter) page.instances = list("instances")
   page.fromDomain = base.type === HYPOTHESIS_TYPE ? (text("from_domain") ?? null) : null
   return page
+}
+
+// --- the card map and the date -----------------------------------------
+
+/**
+ * The pages of `heptabase-map.json` with the two fields the checks read, from the text of the file. Null when
+ * the text is not JSON or not a card map of version 1 with a `pages` mapping: the lint then leaves the card map
+ * out of its checks. An entry without a text `status` and a text `card_id` is left out. A byte order mark
+ * before the JSON is ignored. The app and the `wiki-tool` CLI both read the card map with this function.
+ */
+export function cardMapFromJson(text: string): StructureInput["cardMap"] {
+  let raw: unknown
+  try {
+    raw = JSON.parse(text.replace(/^\uFEFF/, ""))
+  } catch {
+    return null
+  }
+  if (!isRecord(raw) || raw.version !== 1 || !isRecord(raw.pages)) return null
+  const entries: Array<[string, { status: string; card_id: string }]> = []
+  for (const [path, entry] of Object.entries(raw.pages)) {
+    if (isRecord(entry) && typeof entry.status === "string" && typeof entry.card_id === "string") {
+      entries.push([path, { status: entry.status, card_id: entry.card_id }])
+    }
+  }
+  // `fromEntries` makes plain own properties, also for a page path such as `__proto__`.
+  return { pages: Object.fromEntries(entries) }
+}
+
+/** The local date of `now` (today by default) as `YYYY-MM-DD`. This is the `today` of `checkStructure`. */
+export function localDate(now: Date = new Date()): string {
+  const two = (value: number): string => String(value).padStart(2, "0")
+  return `${String(now.getFullYear()).padStart(4, "0")}-${two(now.getMonth() + 1)}-${two(now.getDate())}`
 }
 
 // --- the checks --------------------------------------------------------

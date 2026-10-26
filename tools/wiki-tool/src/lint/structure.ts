@@ -9,8 +9,13 @@
  * `domains.yaml` is not a mechanism wiki: exit 2.
  */
 import { readFileSync } from "node:fs"
-import { checkStructure, type StructureInput, structurePageFromMarkdown } from "@/lib/mechanism-wiki/lint-structure"
-import { isRecord } from "@/lib/wiki-config/yaml-util"
+import {
+  cardMapFromJson,
+  checkStructure,
+  localDate,
+  type StructureInput,
+  structurePageFromMarkdown,
+} from "@/lib/mechanism-wiki/lint-structure"
 import { CARD_MAP_FILE } from "../card-map"
 import { type CommandResult, resolveInProject } from "../io"
 import { readWikiPages } from "../mirror-pages"
@@ -29,8 +34,8 @@ export function lintStructure(args: string[]): CommandResult {
     pages,
     domains: config.domains,
     identity: config.identity,
-    cardMap: loadCardMap(project),
-    today: localDate(new Date()),
+    cardMap: readLintCardMap(project),
+    today: localDate(),
     libraryDomains: config.libraryDomains,
     configProblems: config.configProblems,
   })
@@ -38,29 +43,13 @@ export function lintStructure(args: string[]): CommandResult {
 }
 
 /**
- * The pages of `heptabase-map.json` with the two fields the checks read. Null when the file is missing, is not
- * JSON, or is not a card map of version 1: it is left out of the checks, as in the app. An entry without a text
- * `status` and `card_id` is left out.
+ * The card map of the project for the checks, read by `cardMapFromJson` (the function of the app). Null when the
+ * file is missing, cannot be read, or is not a card map: it is left out of the checks.
  */
-function loadCardMap(project: string): StructureInput["cardMap"] {
+function readLintCardMap(project: string): StructureInput["cardMap"] {
   try {
-    const raw: unknown = JSON.parse(readFileSync(resolveInProject(project, CARD_MAP_FILE), "utf8").replace(/^﻿/, ""))
-    if (!isRecord(raw) || raw.version !== 1 || !isRecord(raw.pages)) return null
-    const entries: Array<[string, { status: string; card_id: string }]> = []
-    for (const [path, entry] of Object.entries(raw.pages)) {
-      if (isRecord(entry) && typeof entry.status === "string" && typeof entry.card_id === "string") {
-        entries.push([path, { status: entry.status, card_id: entry.card_id }])
-      }
-    }
-    // `fromEntries` makes plain own properties, also for a page path such as `__proto__`.
-    return { pages: Object.fromEntries(entries) }
+    return cardMapFromJson(readFileSync(resolveInProject(project, CARD_MAP_FILE), "utf8"))
   } catch {
     return null
   }
-}
-
-/** The local date as `YYYY-MM-DD`. */
-function localDate(now: Date): string {
-  const two = (value: number): string => String(value).padStart(2, "0")
-  return `${String(now.getFullYear()).padStart(4, "0")}-${two(now.getMonth() + 1)}-${two(now.getDate())}`
 }
