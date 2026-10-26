@@ -89,3 +89,18 @@
 - Test: editor read-only test; template contract test for `settings.json` contents; `no template file is git-ignored` extended to `.claude/settings.json`
 - Plugin MCP tools in Claude Code are named `mcp__plugin_<plugin>_<server>__<tool>` (observed in this environment for other plugins). So the Heptabase tools are `mcp__plugin_heptabase_heptabase__*`. The llm_wiki MCP server is configured by the user, so its prefix depends on the server name they choose; the template allows `mcp__llm-wiki__*` and the README tells the user to name the server `llm-wiki`. Still confirm the Heptabase prefix in a real install when one is available, and record the result in the commit message.
 - [ ] Steps: failing tests → FAIL → implement → verification → commit `feat(panel): read-only pages and permission allowlist`
+
+### Task 6: Review options of spec 6.6 and an API fix (added in the pre-flight, rulings W4 and W8)
+
+**Files:**
+- Modify: `src/lib/mechanism-wiki/review-actions.ts`, `src/lib/mechanism-wiki/enforce.ts` (new-domain options), `src/components/review/review-view.tsx` (a domain picker for one action)
+- Modify: `plugins/llm-wiki/skills/wiki-sync/SKILL.md` and `reference/mcp-steps.md` (mirror-edited options), `tools/wiki-tool/src/cmd-plan-down.ts`, `tools/wiki-tool/src/cmd-record.ts`
+- Modify: `src-tauri/src/api_server.rs` (`percent_decode`; the allowed option actions of ruling S17)
+- Test: the matching test files
+
+**Interfaces:**
+- `new-domain` gains the option `Use an existing domain` (action `mech:use-existing-domain`): the app shows a picker of the domains of `domains.yaml`; on a choice it rewrites `domain` (and `also`) of the pages of this ingest that carry the proposed domain to the chosen one, rebuilds the domain index, commits with `buildActionCommitMessage("recut", "use <chosen> for <proposed>", pages)`, and resolves the item.
+- `mirror-edited` options: `Keep as feedback` (a dismissal word action; the feedback note is already a source) and `Discard the edit` (action `mech:discard-mirror-edit`): the app adds the page to `.llm-wiki/hepta/discard-edits.json`; the next `hepta plan-down` plans the normal `update` for that page instead of `skip-edited`, and `record updated` removes the page from the file.
+- `percent_decode` never panics: it checks that both bytes after `%` are ASCII hex digits before it slices.
+
+- [ ] Steps: failing tests (`use-existing-domain rewrites the ingest pages and commits`, `discard-edit makes plan-down plan an update`, `record updated clears the discard`, `percent_decode keeps a % before a multi-byte character`) → FAIL → implement → verification (plus `cargo test --manifest-path src-tauri/Cargo.toml --lib api_server`) → commit `feat(review): spec 6.6 options for new-domain and mirror-edited`
