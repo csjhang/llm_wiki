@@ -27,12 +27,11 @@ use std::os::windows::process::CommandExt;
 /// before the user can read why.
 const LINUX_SCRIPT: &str = r#"cd "$1" && command -v claude >/dev/null 2>&1 && exec claude "$2"; echo "Could not start Claude Code in $1. Press Enter to close."; read -r _"#;
 
-/// `wt` splits its command line at `;`, and `"` ends a quoted argument early.
-const WT_REFUSED: [char; 2] = ['"', ';'];
-
 /// Characters `cmd` reads as syntax (or as an argument separator) even when the
-/// text came from a plain argument list. Windows has no safe way to quote them
-/// for `cmd /c`, so the `cmd` launcher is left out when the text has one.
+/// text came from a plain argument list. Both Windows launchers end in
+/// `cmd /k claude <command>`, and Windows has no safe way to quote these for
+/// `cmd`, so the text must not have one. `"` ends a quoted argument early, and
+/// `;` splits a `wt` command line.
 const CMD_REFUSED: [char; 11] = ['&', '|', '<', '>', '^', '%', '"', '!', ';', ',', '='];
 
 /// One way to start a terminal: a program, its argument list, and how to run it.
@@ -152,30 +151,37 @@ fn windows_path(path: &str) -> String {
     }
 }
 
-/// `wt -d <path> claude <command>`, then `cmd /c start "" /D <path> cmd /k
-/// claude <command>`. Both take an argument list. `cmd` re-reads its command
-/// line, so the `cmd` launcher is left out when the text has a character `cmd`
-/// treats as syntax. `wt` does not use `cmd`, so it can still carry that text.
+/// `wt -d <path> cmd /k claude <command>`, then `cmd /c start "" /D <path> cmd
+/// /k claude <command>`. Both take an argument list. `claude` runs through
+/// `cmd` so that `claude.cmd` (the npm install) is found. `cmd` re-reads its
+/// command line, so text with a character `cmd` treats as syntax is refused.
+/// A UNC path is refused too: `cmd` cannot make it the working folder.
 pub fn build_windows_args(project_path: &str, command: &str) -> Result<Vec<Launch>, String> {
     validate(project_path, command)?;
     let path = windows_path(project_path);
-    let has = |refused: &[char]| path.contains(refused) || command.contains(refused);
-
-    let mut launches = Vec::new();
-    if !has(&WT_REFUSED) {
-        launches.push(Launch {
-            program: "wt",
-            args: vec![
-                "-d".to_string(),
-                path.clone(),
-                "claude".to_string(),
-                command.to_string(),
-            ],
-            wait: false,
-        });
+    if path.starts_with("\\\\") {
+        return Err(
+            "project path must not be a UNC path (\\\\server\\share); use a path that starts with a drive letter"
+                .to_string(),
+        );
     }
-    if !has(&CMD_REFUSED) {
-        launches.push(Launch {
+    if path.contains(CMD_REFUSED) || command.contains(CMD_REFUSED) {
+        return Err(format!(
+            "project path and command must not have any of these characters on Windows: {}",
+            CMD_REFUSED.iter().collect::<String>()
+        ));
+    }
+
+    Ok(vec![
+        Launch {
+            program: "wt",
+            args: ["-d", &path, "cmd", "/k", "claude", command]
+                .iter()
+                .map(|arg| arg.to_string())
+                .collect(),
+            wait: false,
+        },
+        Launch {
             program: "cmd",
             args: [
                 "/c", "start", "", "/D", &path, "cmd", "/k", "claude", command,
@@ -184,14 +190,8 @@ pub fn build_windows_args(project_path: &str, command: &str) -> Result<Vec<Launc
             .map(|arg| arg.to_string())
             .collect(),
             wait: false,
-        });
-    }
-    if launches.is_empty() {
-        return Err(
-            "project path and command must not have a double quote or a semicolon".to_string(),
-        );
-    }
-    Ok(launches)
+        },
+    ])
 }
 
 // ---- Linux ----
@@ -358,6 +358,9 @@ mod tests {
             "/Users/me\r/x",
             "/Users/\u{0}me",
             "/Users/me\t/x",
+            "/Users/me\u{7f}/x",
+            "/Users/me\u{2028}/x",
+            "/Users/me\u{2029}/x",
         ] {
             assert!(build_macos_script(bad, COMMAND).is_err(), "macos: {bad:?}");
             assert!(
@@ -572,7 +575,14 @@ mod tests {
         assert_eq!(programs(&list), vec!["wt", "cmd"]);
         assert_eq!(
             list[0].args,
-            vec!["-d", "C:\\Users\\me\\My Project", "claude", COMMAND]
+            vec![
+                "-d",
+                "C:\\Users\\me\\My Project",
+                "cmd",
+                "/k",
+                "claude",
+                COMMAND
+            ]
         );
         assert_eq!(
             list[1].args,
@@ -610,39 +620,45 @@ mod tests {
     }
 
     #[test]
-    fn windows_cmd_is_left_out_when_the_path_has_a_cmd_special_character() {
-        for special in ['&', '|', '<', '>', '^', '%', '!', ',', '='] {
+    fn windows_refuses_a_cmd_special_character_in_the_path() {
+        // Both launchers end in `cmd /k claude`, so both need text `cmd` reads as plain.
+        for special in ['&', '|', '<', '>', '^', '%', '"', '!', ';', ',', '='] {
             let path = format!("C:\\Users\\me\\R{special}D wiki");
-            let list = build_windows_args(&path, COMMAND).unwrap();
-            assert_eq!(programs(&list), vec!["wt"], "path with {special:?}");
-            assert_eq!(list[0].args[1], path);
+            let message = build_windows_args(&path, COMMAND).unwrap_err();
+            assert!(
+                message.contains("must not have"),
+                "path with {special:?}: {message}"
+            );
         }
     }
 
     #[test]
-    fn windows_cmd_is_left_out_when_the_command_has_a_cmd_special_character() {
-        for special in ['&', '|', '<', '>', '^', '%', '!', ',', '='] {
+    fn windows_refuses_a_cmd_special_character_in_the_command() {
+        for special in ['&', '|', '<', '>', '^', '%', '"', '!', ';', ',', '='] {
             let command = format!("/wiki-fuse a{special}b");
-            let list = build_windows_args("C:\\wiki", &command).unwrap();
-            assert_eq!(programs(&list), vec!["wt"], "command with {special:?}");
+            let message = build_windows_args("C:\\wiki", &command).unwrap_err();
+            assert!(
+                message.contains("must not have"),
+                "command with {special:?}: {message}"
+            );
         }
     }
 
     #[test]
-    fn windows_refuses_a_double_quote_or_semicolon() {
-        // `"` ends a quoted argument early. `;` splits a `wt` command line.
-        for bad in ['"', ';'] {
-            let path = format!("C:\\wiki{bad}x");
-            assert!(
-                build_windows_args(&path, COMMAND).is_err(),
-                "path with {bad:?}"
-            );
-            let command = format!("/wiki-fuse a{bad}b");
-            assert!(
-                build_windows_args("C:\\wiki", &command).is_err(),
-                "command with {bad:?}"
-            );
+    fn windows_refuses_a_unc_path_for_both_launchers() {
+        for unc in [
+            "\\\\server\\share\\wiki",
+            "//server/share/wiki",
+            "\\/server/share/wiki",
+            "/\\server\\share\\wiki",
+            "\\\\?\\C:\\wiki",
+        ] {
+            let message = build_windows_args(unc, COMMAND).unwrap_err();
+            assert!(message.contains("UNC"), "{unc}: {message}");
         }
+        // A drive path and a root-relative path are not UNC paths.
+        assert!(build_windows_args("C:\\wiki", COMMAND).is_ok());
+        assert!(build_windows_args("\\wiki", COMMAND).is_ok());
     }
 
     #[test]
@@ -683,6 +699,31 @@ mod tests {
                 "-e".to_string(),
                 "claude".to_string(),
                 COMMAND.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn linux_gnome_terminal_and_konsole_keep_a_hostile_command_as_one_item() {
+        let hostile = "/wiki-fuse it's \"x\" $HOME `id` $(id)";
+        let list = linux_candidates(HOSTILE_PATH, hostile).unwrap();
+        assert_eq!(
+            list[1].args,
+            vec![
+                format!("--working-directory={HOSTILE_PATH}"),
+                "--".to_string(),
+                "claude".to_string(),
+                hostile.to_string(),
+            ]
+        );
+        assert_eq!(
+            list[2].args,
+            vec![
+                "--workdir".to_string(),
+                HOSTILE_PATH.to_string(),
+                "-e".to_string(),
+                "claude".to_string(),
+                hostile.to_string(),
             ]
         );
     }
