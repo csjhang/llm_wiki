@@ -146,6 +146,10 @@ describe("wiki-sync skill", () => {
     expect(step).toMatch(/Ask the user/)
     expect(step).toMatch(/Only after a yes/)
     expect(step).toContain("Do not retire a card by hand.")
+    // The flag is for the plan that the user approved. A later plan that refuses again asks again.
+    expect(step).toMatch(/this plan only/)
+    expect(step).toMatch(/refuses again, ask the user again/)
+    expect(step).not.toMatch(/every later plan/)
     // The first plan never carries the flag.
     expect(down.slice(down.indexOf("4. Run the plan:"), down.indexOf("\n5. "))).not.toContain("--allow-mass-retire")
     expect(down).toMatch(/`notes`/)

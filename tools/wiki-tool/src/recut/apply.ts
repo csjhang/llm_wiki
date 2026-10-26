@@ -7,7 +7,9 @@
  * brings into one domain (the skill files them as `duplicate` reviews). `notes` are things to tell the user.
  *
  * The command checks everything before it writes anything: the plan against `domains.yaml` and the pages, the work
- * tree (ruling U2, `work-tree.ts`), and the text of every file that changes. Then it:
+ * tree (ruling U2, `work-tree.ts`), the text of every file that changes, that no file it writes is outside the project
+ * (a link can lead out), that no reference to a removed domain is left in any page (a page whose frontmatter the edit
+ * cannot reach stops the recut, it is never skipped), and that no page changed since it was read. Then it:
  * 1. rewrites `domains.yaml` as text (`domains-file.ts`), so comments stay;
  * 2. rewrites the domain keys of the pages and the Known instances lines (`page-edits.ts`), touching no other byte;
  * 3. rebuilds the domain index with the pure renderers of the app, writes the files that changed, and removes the index
@@ -16,7 +18,8 @@
  *    pages only (ruling U7), through `commitPathsLocked`;
  * 5. after the commit, gives the dismissed fusion pairs the new names (ruling U5; not committed).
  *
- * When the commit fails, every file goes back to what it was and the command exits with the problem. Nothing is pushed.
+ * When the commit fails, the files are taken out of the index, every file goes back to what it was, and the command exits
+ * with the problem, so a failed recut leaves the work tree as it found it. Nothing is pushed.
  */
 import { existsSync, readFileSync, rmSync } from "node:fs"
 import { buildActionCommitMessage } from "@/lib/commit-message"
@@ -31,14 +34,15 @@ import {
 } from "@/lib/mechanism-wiki/domain-index-render"
 import { type DomainsConfig, parseDomainsYaml } from "@/lib/wiki-config/domains"
 import { knownLenses } from "../cmd-snapshot"
-import { type CommitResult, commitPathsLocked, isGitWorkTree } from "../git"
+import { type CommitResult, commitPathsLocked, isGitWorkTree, unstagePathsLocked } from "../git"
 import { GIT_LOCK_BUSY_MESSAGE } from "../git-lock"
 import { type CommandResult, resolveInProject, writeFileAtomic } from "../io"
 import { loadLintProject, notMechanismWiki, parseLintArgs } from "../lint/project"
 import { compareText } from "../mirror-pages"
 import { remapDismissedPairs } from "./dismissed"
 import { DomainsFileError, editDomainsYaml } from "./domains-file"
-import { computePageEdits } from "./page-edits"
+import { outsideProject } from "./inside"
+import { computePageEdits, findLeftoverRefs } from "./page-edits"
 import { createMapper, type DomainChanges, findMergeCandidates, parseRecutPlan, planDomains, planTitle, type RecutPlan, validateRecutPlan } from "./plan"
 import { readPageSources } from "./read-pages"
 import { uncommittedChanges } from "./work-tree"
@@ -85,6 +89,8 @@ export async function recutApply(args: string[]): Promise<CommandResult> {
     ...pageEdits.edits.filter((edit) => blocked.has(edit.path)).map((edit) => `${edit.path}: ${blocked.get(edit.path)}, so a recut cannot edit it safely`),
   ]
   if (editProblems.length > 0) return { ok: false, problems: editProblems }
+  const leftovers = findLeftoverRefs(sources, pageEdits, changes.removed)
+  if (leftovers.length > 0) return { ok: false, problems: leftovers }
 
   const afterPath = new Map(pageEdits.edits.map((edit) => [edit.path, edit.after]))
   const indexed = sources.map((source) => indexedPageFromMarkdown(source.page.path, (afterPath.get(source.page.path) ?? source.text).replace(/^\uFEFF/, "")))
@@ -96,25 +102,36 @@ export async function recutApply(args: string[]): Promise<CommandResult> {
       .map((domain): [string, string] => [domainIndexPath(domain), renderDomainIndex(domain, indexed)]),
   ]
 
+  const writes = indexFiles.filter(([path, text]) => currentText(project, path) !== text).map(([path]) => path)
+  const removals = changes.removed.map(domainIndexPath).filter((path) => existsSync(resolveInProject(project, path)))
+  const outside = [DOMAINS_FILE, ...writes, ...removals].flatMap((path) => {
+    const real = outsideProject(project, path)
+    return real === null ? [] : [`${path}: the file is outside the project (it is ${real}), so a recut does not write it`]
+  })
+  if (outside.length > 0) return { ok: false, problems: outside }
+
+  const expected = [...pageEdits.edits.map((edit): [string, string] => [edit.path, edit.before]), [DOMAINS_FILE, domains.before] as [string, string]]
+  const stale = expected.filter(([path, before]) => changedSince(project, path, before)).map(([path]) => path)
+  if (stale.length > 0) return { ok: false, problems: stale.map(staleProblem) }
+
   const mergeCandidates = plan.op === "merge" ? findMergeCandidates(plan, sources.map((source) => source.page)) : null
   const files = new FileChanges(project)
   let committed: CommitResult
   try {
-    for (const edit of pageEdits.edits) files.write(edit.path, edit.after)
-    files.write(DOMAINS_FILE, domains.text)
-    for (const [path, text] of indexFiles) if (currentText(project, path) !== text) files.write(path, text)
-    for (const domain of changes.removed) {
-      if (existsSync(resolveInProject(project, domainIndexPath(domain)))) files.remove(domainIndexPath(domain))
-    }
+    for (const edit of pageEdits.edits) files.write(edit.path, edit.after, edit.before)
+    files.write(DOMAINS_FILE, domains.text, domains.before)
+    for (const [path, text] of indexFiles) if (writes.includes(path)) files.write(path, text)
+    for (const path of removals) files.remove(path)
     const message = buildActionCommitMessage("recut", planTitle(plan), pageEdits.edits.map((edit) => edit.path))
     committed = await commitPathsLocked(project, files.paths(), message)
   } catch (error) {
-    // The lock stayed with another tool for the whole wait: a known state, not a bug.
-    if (error instanceof Error && error.message === GIT_LOCK_BUSY_MESSAGE) return failed(files, error.message)
-    files.restore()
+    if (error instanceof ChangedWhileRunning) return failed(project, files, staleProblem(error.path), false)
+    // The lock stayed with another tool for the whole wait: a known state, not a bug. The commit did not start.
+    if (error instanceof Error && error.message === GIT_LOCK_BUSY_MESSAGE) return failed(project, files, error.message, false)
+    await failed(project, files, "", true)
     throw error
   }
-  if (!committed.ok) return failed(files, committed.problem)
+  if (!committed.ok) return failed(project, files, committed.problem, true)
 
   // The commit is done. What follows must not undo it.
   const notes = [...changes.notes, ...pageEdits.notes]
@@ -135,11 +152,43 @@ export async function recutApply(args: string[]): Promise<CommandResult> {
   }
 }
 
-/** Put the files back and return the problem as the result of the command. */
-function failed(files: FileChanges, problem: string): CommandResult {
+/**
+ * Undo the recut and return the problem as the result of the command. When the commit may have staged the files, they are
+ * taken out of the index first (under the git lock). Then every file goes back to what it was.
+ */
+async function failed(project: string, files: FileChanges, problem: string, staged: boolean): Promise<CommandResult> {
+  const extra: string[] = []
+  if (staged) {
+    try {
+      const unstaged = await unstagePathsLocked(project, files.paths())
+      if (!unstaged.ok) extra.push(`the files could not be taken out of the index, run "git reset" for them: ${unstaged.problem}`)
+    } catch (error) {
+      extra.push(`the files could not be taken out of the index, run "git reset" for them: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
   const unrestored = files.restore()
-  const extra = unrestored.length > 0 ? [`these files could not be put back, restore them with git: ${unrestored.join(", ")}`] : []
-  return { ok: false, problems: [problem, ...extra] }
+  if (unrestored.length > 0) extra.push(`these files could not be put back, restore them with git: ${unrestored.join(", ")}`)
+  return { ok: false, problems: [...(problem === "" ? [] : [problem]), ...extra] }
+}
+
+function staleProblem(path: string): string {
+  return `${path} changed while the recut ran, so nothing was written. Run the recut again.`
+}
+
+/** True when the file on disk is not the text that the recut read. */
+function changedSince(project: string, path: string, before: string): boolean {
+  try {
+    return !readFileSync(resolveInProject(project, path)).equals(Buffer.from(before, "utf8"))
+  } catch {
+    return true
+  }
+}
+
+/** A file changed between the read of the recut and the write of it. */
+class ChangedWhileRunning extends Error {
+  constructor(readonly path: string) {
+    super(`${path} changed while the recut ran`)
+  }
 }
 
 function readPlanText(option: string): { ok: true; text: string } | { ok: false; problem: string } {
@@ -157,7 +206,7 @@ function editedDomainsFile(
   plan: RecutPlan,
   changes: DomainChanges,
   lenses: readonly string[],
-): { ok: true; text: string } | { ok: false; problem: string } {
+): { ok: true; text: string; before: string } | { ok: false; problem: string } {
   // A byte order mark stays where it is.
   const original = readFileSync(resolveInProject(project, DOMAINS_FILE), "utf8")
   const bom = original.startsWith("\uFEFF") ? "\uFEFF" : ""
@@ -176,7 +225,7 @@ function editedDomainsFile(
   if (!sameDomains(read.value, changes.next)) {
     return { ok: false, problem: `${DOMAINS_FILE} would not read back as planned after the ${plan.op}, so nothing was changed` }
   }
-  return { ok: true, text }
+  return { ok: true, text, before: original }
 }
 
 function sameDomains(a: DomainsConfig, b: DomainsConfig): boolean {
@@ -206,12 +255,16 @@ class FileChanges {
     return [...this.originals.keys()]
   }
 
-  write(path: string, text: string): void {
+  /** Write `text`. With `before`, the file must still hold that text: another tool may have written it since it was read. */
+  write(path: string, text: string, before?: string): void {
+    this.mustBeInside(path)
     this.remember(path)
+    if (before !== undefined && changedSince(this.project, path, before)) throw new ChangedWhileRunning(path)
     writeFileAtomic(resolveInProject(this.project, path), text)
   }
 
   remove(path: string): void {
+    this.mustBeInside(path)
     this.remember(path)
     rmSync(resolveInProject(this.project, path), { force: true })
   }
@@ -230,6 +283,11 @@ class FileChanges {
     }
     this.originals.clear()
     return failures
+  }
+
+  /** The last guard before a write: nothing is written or removed through a link that leads out of the project. */
+  private mustBeInside(path: string): void {
+    if (outsideProject(this.project, path) !== null) throw new Error(`${path} is outside the project`)
   }
 
   private remember(path: string): void {

@@ -10,7 +10,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import { afterEach, describe, expect, it, vi } from "vitest"
-import { commitPaths, commitPathsLocked } from "./git"
+import { commitPaths, commitPathsLocked, unstagePathsLocked } from "./git"
 
 // Each test starts many git processes; a busy machine needs more than the default 5 s.
 vi.setConfig({ testTimeout: 30_000 })
@@ -492,5 +492,60 @@ describe("commitPathsLocked", () => {
 
     expectProblem(result, /never committed/)
     expect(existsSync(join(repo, ".llm-wiki", "git.lock"))).toBe(false)
+  })
+})
+
+describe("unstagePathsLocked", () => {
+  it("takes the given paths out of the index and leaves the work tree and other staged paths as they are", async () => {
+    const repo = makeRepo()
+    commitAll(repo, "initial", { "a.md": "a\n", "b.md": "b\n", "folder/c.md": "c\n" })
+    write(repo, "a.md", "a changed\n")
+    write(repo, "folder/c.md", "c changed\n")
+    write(repo, "new.md", "new\n")
+    write(repo, "b.md", "b changed\n")
+    git(repo, "add", "-A")
+    expect(git(repo, "diff", "--cached", "--name-only").split("\n").filter(Boolean)).toEqual(["a.md", "b.md", "folder/c.md", "new.md"])
+
+    const result = await unstagePathsLocked(repo, ["a.md", "folder", "new.md"])
+    expect(result).toEqual({ ok: true })
+    expect(git(repo, "diff", "--cached", "--name-only").split("\n").filter(Boolean)).toEqual(["b.md"])
+    expect(readFileSync(join(repo, "a.md"), "utf8")).toBe("a changed\n")
+    expect(git(repo, "status", "--porcelain")).toBe(" M a.md\nM  b.md\n M folder/c.md\n?? new.md\n")
+  })
+
+  it("restores a staged deletion", async () => {
+    const repo = makeRepo()
+    commitAll(repo, "initial", { "a.md": "a\n" })
+    rmSync(join(repo, "a.md"))
+    git(repo, "add", "-A")
+    expect(await unstagePathsLocked(repo, ["a.md"])).toEqual({ ok: true })
+    expect(git(repo, "status", "--porcelain")).toBe(" D a.md\n")
+  })
+
+  it("does nothing for paths that are not staged, or for no path", async () => {
+    const repo = makeRepo()
+    commitAll(repo, "initial", { "a.md": "a\n" })
+    expect(await unstagePathsLocked(repo, ["a.md", "missing.md"])).toEqual({ ok: true })
+    expect(await unstagePathsLocked(repo, [])).toEqual({ ok: true })
+    expect(git(repo, "status", "--porcelain")).toBe("")
+  })
+
+  it("takes the paths literally and refuses an unsafe path", async () => {
+    const repo = makeRepo()
+    commitAll(repo, "initial", { "a.md": "a\n", "b.md": "b\n" })
+    write(repo, "a.md", "changed\n")
+    write(repo, "b.md", "changed\n")
+    git(repo, "add", "-A")
+    expect(await unstagePathsLocked(repo, [":(glob)*.md"])).toMatchObject({ ok: false })
+    expect(await unstagePathsLocked(repo, ["../outside.md"])).toMatchObject({ ok: false })
+    expect(await unstagePathsLocked(repo, [".llm-wiki/x"])).toMatchObject({ ok: false })
+    expect(git(repo, "diff", "--cached", "--name-only").split("\n").filter(Boolean)).toEqual(["a.md", "b.md"])
+  })
+
+  it("is the work of the git lock", async () => {
+    const repo = makeRepo()
+    commitAll(repo, "initial", { "a.md": "a\n" })
+    write(repo, ".llm-wiki/git.lock", JSON.stringify({ pid: process.pid, started_at: new Date().toISOString(), tool: "app", host: "x", platform: "x" }))
+    await expect(unstagePathsLocked(repo, ["a.md"], { waitMs: 300 })).rejects.toThrow("another wiki tool is using git")
   })
 })

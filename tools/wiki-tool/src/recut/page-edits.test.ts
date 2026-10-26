@@ -4,7 +4,7 @@
  * Domains and slugs are placeholders.
  */
 import { describe, expect, it } from "vitest"
-import { computePageEdits, type PageSource } from "./page-edits"
+import { computePageEdits, findLeftoverRefs, type PageSource } from "./page-edits"
 import { recutPage } from "./page-refs"
 import type { RecutPlan, SplitPlan } from "./plan"
 
@@ -166,5 +166,56 @@ describe("computePageEdits: split", () => {
     expect(result.edits.map((edit) => edit.path)).toEqual(["wiki/concepts/twin.md", "wiki/entities/twin.md"])
     expect(result.notes).toHaveLength(1)
     expect(result.notes[0]).toContain("[[twin]] (example/alpha)")
+  })
+})
+
+describe("findLeftoverRefs", () => {
+  const REMOVED = ["example/alpha", "example/alpha/child"]
+  const leftovers = (plan: RecutPlan, pages: PageSource[], removed: readonly string[] = REMOVED): string[] =>
+    findLeftoverRefs(pages, computePageEdits(plan, pages), removed)
+
+  it("is empty when every reference was rewritten", () => {
+    const pages = [
+      source("wiki/concepts/a.md", "---\ndomain: example/alpha\nalso: [example/alpha/child]\n---\nB\n"),
+      source("wiki/mechanisms/m.md", "---\ntype: mechanism\n---\n\n## Known instances\n- [[a]] (example/alpha): t\n"),
+    ]
+    expect(leftovers(rename, pages)).toEqual([])
+  })
+
+  it("names a page whose frontmatter the edit could not reach, and the key", () => {
+    const indented = source("wiki/concepts/indented.md", "---\n  type: concept\n  domain: example/alpha\n---\nB\n")
+    const flow = source("wiki/concepts/flow.md", "---\n{type: concept, also: [example/alpha]}\n---\nB\n")
+    expect(leftovers(rename, [indented, flow])).toEqual([
+      expect.stringMatching(/^wiki\/concepts\/indented\.md: domain still names example\/alpha, which the recut removes/),
+      expect.stringMatching(/^wiki\/concepts\/flow\.md: also still names example\/alpha, which the recut removes/),
+    ])
+  })
+
+  it("names from_domain and to_domain of a hypothesis page", () => {
+    const hypothesis = source("wiki/hypotheses/h.md", "---\n  type: hypothesis\n  from_domain: example/alpha\n  to_domain: example/alpha/child\n---\nB\n")
+    expect(leftovers(rename, [hypothesis]).map((problem) => problem.split(" still")[0])).toEqual([
+      "wiki/hypotheses/h.md: to_domain",
+      "wiki/hypotheses/h.md: from_domain",
+    ])
+  })
+
+  it("counts a page that the edit left as it was", () => {
+    const untouched = source("wiki/concepts/a.md", "---\ndomain: example/beta\n---\nB\n")
+    expect(leftovers(rename, [untouched])).toEqual([])
+    // The same page with a removed domain and no edit (the edit step was skipped).
+    const stale = source("wiki/concepts/b.md", "---\ndomain: example/alpha\n---\nB\n")
+    expect(findLeftoverRefs([stale], { edits: [], problems: [], notes: [], unresolved: [] }, REMOVED)).toHaveLength(1)
+  })
+
+  it("names an instance line that still names a removed domain", () => {
+    const mechanism = source("wiki/mechanisms/m.md", "---\ntype: mechanism\n---\n\n## Known instances\n- [[a]] (example/alpha): t\n")
+    const problems = findLeftoverRefs([mechanism], { edits: [], problems: [], notes: [], unresolved: [] }, REMOVED)
+    expect(problems).toEqual([expect.stringMatching(/^wiki\/mechanisms\/m\.md: the Known instances line \[\[a\]\] still names example\/alpha/)])
+  })
+
+  it("does not count an instance line that a split could not assign, because a note names it", () => {
+    const split: SplitPlan = { op: "split", from: "example/alpha", into: [INTO("example/one"), INTO("example/two")], assignments: {} }
+    const mechanism = source("wiki/mechanisms/m.md", "---\ntype: mechanism\n---\n\n## Known instances\n- [[gone]] (example/alpha): t\n")
+    expect(leftovers(split, [mechanism], ["example/alpha"])).toEqual([])
   })
 })

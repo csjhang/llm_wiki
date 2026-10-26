@@ -7,6 +7,7 @@
  * uncommitted after a sync, and the recut never commits it) and everything under `.llm-wiki/` (local state that is
  * never committed). This is the rule of `isDirty` in `plugins/llm-wiki/skills/wiki-undo/scripts/undo.mjs`, except that
  * a change outside the wiki folder of a larger repository does not count, because the commit of a recut names its paths.
+ * A wiki folder that git does not track yet is dirty: git is asked for every file below the folder, one by one.
  */
 import { CARD_MAP_FILE } from "../card-map"
 import { readGit } from "../git"
@@ -17,7 +18,9 @@ const LLM_WIKI_DIR = ".llm-wiki"
 /** The paths in the wiki folder (relative to it) that have uncommitted changes and count, sorted. Empty for a clean tree. */
 export function uncommittedChanges(project: string): string[] {
   const prefix = readGit(project, ["rev-parse", "--show-prefix"]).stdout.trim()
-  const status = readGit(project, ["status", "--porcelain", "-z", "--untracked-files=normal"])
+  // `-- .` is the project folder. Every untracked file is listed by itself: a folder that git has not seen is not one
+  // entry above the project folder, which would hide it.
+  const status = readGit(project, ["status", "--porcelain", "-z", "--untracked-files=all", "--", "."])
   if (status.status !== 0) throw new Error(status.stderr.trim() || "git status failed")
 
   const paths = new Set<string>()

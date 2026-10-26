@@ -221,3 +221,24 @@ export function commitPathsLocked(
 ): Promise<CommitResult> {
   return withGitLock(projectPath, () => commitPaths(projectPath, paths, message), lockOptions)
 }
+
+export type UnstageResult = { ok: true } | { ok: false; problem: string }
+
+/**
+ * Take the paths out of the index (`git reset --quiet -- <paths>`) and leave the work tree as it is. The paths follow
+ * the rules of `commitPaths`: inside the project, read literally, never `.llm-wiki` or `.git`. A path that is not
+ * staged is not an error. A caller uses this to undo what a failed `commitPaths` staged. Does not take the git lock:
+ * use unstagePathsLocked.
+ */
+export function unstagePaths(projectPath: string, paths: string[]): UnstageResult {
+  const checked = checkPaths(paths)
+  if (typeof checked === "string") return { ok: false, problem: checked }
+  if (checked.length === 0) return { ok: true }
+  const run = runGit(resolve(projectPath), ["--literal-pathspecs", "reset", "--quiet", "--", ...checked])
+  return run.status === 0 ? { ok: true } : { ok: false, problem: run.stderr.trim() || run.stdout.trim() || "git reset failed" }
+}
+
+/** unstagePaths under the git lock of the project, with the waiting and the error of commitPathsLocked. */
+export function unstagePathsLocked(projectPath: string, paths: string[], lockOptions?: GitLockOptions): Promise<UnstageResult> {
+  return withGitLock(projectPath, () => unstagePaths(projectPath, paths), lockOptions)
+}
