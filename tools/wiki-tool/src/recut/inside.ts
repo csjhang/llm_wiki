@@ -38,8 +38,15 @@ export function realPathOrParent(path: string): string {
   }
 }
 
-/** The real path of the project file `relativePath` when it is outside the project, else null. */
-export function outsideProject(project: string, relativePath: string): string | null {
-  const real = realPathOrParent(resolveInProject(project, relativePath))
-  return isInsideRoot(realProjectRoot(project), real) ? null : real
+/**
+ * Why a recut must not write the project file `relativePath`, or null when it may. The file is outside the project once
+ * links are followed, or its path cannot be resolved (a link loop, no permission): the text names the cause and the path.
+ */
+export function insideProblem(project: string, relativePath: string): string | null {
+  try {
+    const real = realPathOrParent(resolveInProject(project, relativePath))
+    return isInsideRoot(realProjectRoot(project), real) ? null : `the file is outside the project (it is ${real})`
+  } catch (error) {
+    return `the path cannot be resolved (${error instanceof Error ? error.message : String(error)})`
+  }
 }

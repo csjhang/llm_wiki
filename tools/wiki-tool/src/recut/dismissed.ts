@@ -5,11 +5,11 @@
  * (`recordDismissedPairs` in `src/lib/mechanism-wiki/fusion-candidates.ts`). When a recut gives a domain another name,
  * its pairs follow, so that a skipped candidate stays skipped. The file is local state and never committed. A file
  * that is missing, is not JSON, or is not a list is left alone, and so is an entry that is not a pair. A file that is a
- * link to a file outside the project is never written: the function throws.
+ * link that leads out of the project, or that cannot be resolved, is never written: the function throws.
  */
 import { existsSync, readFileSync } from "node:fs"
 import { resolveInProject, writeFileAtomic } from "../io"
-import { outsideProject } from "./inside"
+import { insideProblem } from "./inside"
 
 export const FUSION_DISMISSED_FILE = ".llm-wiki/fusion-dismissed.json"
 
@@ -32,7 +32,8 @@ function isPair(value: unknown): value is Pair {
 export function remapDismissedPairs(project: string, map: (domain: string) => string): boolean {
   const path = resolveInProject(project, FUSION_DISMISSED_FILE)
   if (!existsSync(path)) return false
-  if (outsideProject(project, FUSION_DISMISSED_FILE) !== null) throw new Error("the file is outside the project")
+  const problem = insideProblem(project, FUSION_DISMISSED_FILE)
+  if (problem !== null) throw new Error(problem)
   let entries: unknown
   try {
     entries = JSON.parse(readFileSync(path, "utf8"))

@@ -129,6 +129,51 @@ describe("recut apply: nothing is written outside the project", () => {
   })
 })
 
+describe("recut apply: a page behind a link that stays inside the project", () => {
+  const SHARED_PAGE = ["---", "type: concept", "title: Shared", `domain: ${ALPHA}`, "---", "", "# Shared", ""].join("\n")
+
+  it("refuses a page that is reached through a folder link, and writes nothing", async () => {
+    // The folder `shared/real` is not under wiki/, so the page is read only through the link `wiki/inlink`.
+    const project = makeRecutRepo({ "shared/real/r.md": SHARED_PAGE })
+    symlinkSync("../shared/real", join(project, "wiki/inlink"), "dir")
+    commit(project, "link a folder inside the project")
+    const before = head(project)
+
+    const result = await applyPlan(project, rename)
+    expect(result.exitCode).toBe(2)
+    expect(result.output.problems).toEqual(["wiki/inlink/r.md: a folder in its path is a link, so a recut cannot edit it safely"])
+    expect(read(project, "shared/real/r.md")).toBe(SHARED_PAGE)
+    expect(read(project, "wiki/concepts/one.md")).toBe(ONE)
+    expect(head(project)).toBe(before)
+    expect(status(project)).toBe("")
+  })
+})
+
+describe("recut apply: a path that cannot be resolved", () => {
+  it("names the path in a problem for a link loop, with exit 2", async () => {
+    const project = makeRecutRepo()
+    // The index file that the rename would write is a link to itself.
+    symlinkSync("example--gamma.md", join(project, "wiki/indexes/example--gamma.md"))
+    commit(project, "add a link loop")
+    const before = head(project)
+
+    const result = await applyPlan(project, rename)
+    expect(result.exitCode).toBe(2)
+    expect(result.output.problems).toEqual([expect.stringMatching(/^wiki\/indexes\/example--gamma\.md: the path cannot be resolved \(ELOOP.*example--gamma\.md.*\), so a recut does not write it$/)])
+    expect(head(project)).toBe(before)
+    expect(status(project)).toBe("")
+    expect(read(project, "wiki/concepts/one.md")).toBe(ONE)
+  })
+
+  it("does not rewrite a dismissed-pairs file behind a link loop, and says so", async () => {
+    const project = makeRecutRepo()
+    mkdirSync(join(project, ".llm-wiki"), { recursive: true })
+    symlinkSync("fusion-dismissed.json", join(project, ".llm-wiki/fusion-dismissed.json"))
+    const result = await applyPlan(project, rename)
+    expect(result.exitCode).toBe(0)
+  })
+})
+
 describe("recut apply: a reference it cannot rewrite is not skipped", () => {
   const forms: Array<[string, string]> = [
     ["indented frontmatter", `---\n  type: concept\n  title: Odd\n  domain: ${ALPHA}\n---\n\n# Odd\n`],

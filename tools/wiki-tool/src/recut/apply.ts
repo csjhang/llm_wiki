@@ -41,7 +41,7 @@ import { loadLintProject, notMechanismWiki, parseLintArgs } from "../lint/projec
 import { compareText } from "../mirror-pages"
 import { remapDismissedPairs } from "./dismissed"
 import { DomainsFileError, editDomainsYaml } from "./domains-file"
-import { outsideProject } from "./inside"
+import { insideProblem } from "./inside"
 import { computePageEdits, findLeftoverRefs } from "./page-edits"
 import { createMapper, type DomainChanges, findMergeCandidates, parseRecutPlan, planDomains, planTitle, type RecutPlan, validateRecutPlan } from "./plan"
 import { readPageSources } from "./read-pages"
@@ -74,7 +74,13 @@ export async function recutApply(args: string[]): Promise<CommandResult> {
   if (!planned.ok) return { ok: false, problems: planned.problems }
   const { plan } = planned
 
-  const { sources, blocked } = readPageSources(project)
+  let read: ReturnType<typeof readPageSources>
+  try {
+    read = readPageSources(project)
+  } catch (error) {
+    return { ok: false, problems: [`cannot read the pages of the wiki: ${error instanceof Error ? error.message : String(error)}`] }
+  }
+  const { sources, blocked } = read
   const lenses = knownLenses(project)
   const problems = validateRecutPlan({ plan, domains: config.domains, pages: sources.map((source) => source.page), lenses })
   if (problems.length > 0) return { ok: false, problems }
@@ -105,8 +111,8 @@ export async function recutApply(args: string[]): Promise<CommandResult> {
   const writes = indexFiles.filter(([path, text]) => currentText(project, path) !== text).map(([path]) => path)
   const removals = changes.removed.map(domainIndexPath).filter((path) => existsSync(resolveInProject(project, path)))
   const outside = [DOMAINS_FILE, ...writes, ...removals].flatMap((path) => {
-    const real = outsideProject(project, path)
-    return real === null ? [] : [`${path}: the file is outside the project (it is ${real}), so a recut does not write it`]
+    const problem = insideProblem(project, path)
+    return problem === null ? [] : [`${path}: ${problem}, so a recut does not write it`]
   })
   if (outside.length > 0) return { ok: false, problems: outside }
 
@@ -287,7 +293,8 @@ class FileChanges {
 
   /** The last guard before a write: nothing is written or removed through a link that leads out of the project. */
   private mustBeInside(path: string): void {
-    if (outsideProject(this.project, path) !== null) throw new Error(`${path} is outside the project`)
+    const problem = insideProblem(this.project, path)
+    if (problem !== null) throw new Error(`${path}: ${problem}`)
   }
 
   private remember(path: string): void {

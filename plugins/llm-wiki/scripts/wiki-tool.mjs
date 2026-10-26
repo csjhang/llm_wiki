@@ -8262,10 +8262,17 @@ function realPathOrParent(path) {
 		current = parent;
 	}
 }
-/** The real path of the project file `relativePath` when it is outside the project, else null. */
-function outsideProject(project, relativePath) {
-	const real = realPathOrParent(resolveInProject(project, relativePath));
-	return isInsideRoot(realProjectRoot(project), real) ? null : real;
+/**
+* Why a recut must not write the project file `relativePath`, or null when it may. The file is outside the project once
+* links are followed, or its path cannot be resolved (a link loop, no permission): the text names the cause and the path.
+*/
+function insideProblem(project, relativePath) {
+	try {
+		const real = realPathOrParent(resolveInProject(project, relativePath));
+		return isInsideRoot(realProjectRoot(project), real) ? null : `the file is outside the project (it is ${real})`;
+	} catch (error) {
+		return `the path cannot be resolved (${error instanceof Error ? error.message : String(error)})`;
+	}
 }
 
 //#endregion
@@ -8277,7 +8284,7 @@ function outsideProject(project, relativePath) {
 * (`recordDismissedPairs` in `src/lib/mechanism-wiki/fusion-candidates.ts`). When a recut gives a domain another name,
 * its pairs follow, so that a skipped candidate stays skipped. The file is local state and never committed. A file
 * that is missing, is not JSON, or is not a list is left alone, and so is an entry that is not a pair. A file that is a
-* link to a file outside the project is never written: the function throws.
+* link that leads out of the project, or that cannot be resolved, is never written: the function throws.
 */
 const FUSION_DISMISSED_FILE = ".llm-wiki/fusion-dismissed.json";
 function isPair(value) {
@@ -8292,7 +8299,8 @@ function isPair(value) {
 function remapDismissedPairs(project, map) {
 	const path = resolveInProject(project, FUSION_DISMISSED_FILE);
 	if (!existsSync(path)) return false;
-	if (outsideProject(project, ".llm-wiki/fusion-dismissed.json") !== null) throw new Error("the file is outside the project");
+	const problem = insideProblem(project, FUSION_DISMISSED_FILE);
+	if (problem !== null) throw new Error(problem);
 	let entries;
 	try {
 		entries = JSON.parse(readFileSync(path, "utf8"));
@@ -9378,17 +9386,22 @@ function findLeftoverRefs(sources, result, removed) {
 /**
 * The pages of a wiki as a recut reads them: the references of each page, and the text exactly as it is on disk.
 */
-/** Every page under `wiki/` (a page that a link brings in from outside the project is read, but blocked), sorted by path. A folder or file that cannot be read throws (see `readWikiPages`). */
+/**
+* Every page under `wiki/`, sorted by path. A folder or file that cannot be read throws (see `readWikiPages`). A page
+* that a recut must not edit is read but blocked, with the reason: it is outside the project once links are followed, a
+* folder in its path or the file itself is a link (the real file is not at the path of the page, so a commit that names
+* the page would miss it), or its bytes are not valid UTF-8 (text would change them).
+*/
 function readPageSources(project) {
 	const sources = [];
 	const blocked = /* @__PURE__ */ new Map();
 	const root = realProjectRoot(project);
 	for (const wikiPage of readWikiPages(project, { allowMissingWiki: true })) {
-		const bytes = readFileSync(resolveInProject(project, wikiPage.path));
+		const full = resolveInProject(project, wikiPage.path);
+		const bytes = readFileSync(full);
 		const text = bytes.toString("utf8");
-		if (!isInsideRoot(root, realpathSync(resolveInProject(project, wikiPage.path)))) blocked.set(wikiPage.path, "the file is outside the project");
-		else if (!Buffer.from(text, "utf8").equals(bytes)) blocked.set(wikiPage.path, "the file is not valid UTF-8");
-		else if (lstatSync(resolveInProject(project, wikiPage.path)).isSymbolicLink()) blocked.set(wikiPage.path, "the file is a link");
+		const reason = blockReason(root, wikiPage.path, full, bytes, text);
+		if (reason !== null) blocked.set(wikiPage.path, reason);
 		sources.push({
 			page: recutPage(wikiPage.path, wikiPage.markdown),
 			text
@@ -9398,6 +9411,19 @@ function readPageSources(project) {
 		sources,
 		blocked
 	};
+}
+function blockReason(root, path, full, bytes, text) {
+	let real;
+	try {
+		real = realpathSync(full);
+	} catch (error) {
+		return `the path cannot be resolved (${error instanceof Error ? error.message : String(error)})`;
+	}
+	if (!isInsideRoot(root, real)) return "the file is outside the project";
+	if (lstatSync(full).isSymbolicLink()) return "the file is a link";
+	if (real !== join(root, ...path.split("/"))) return "a folder in its path is a link";
+	if (!Buffer.from(text, "utf8").equals(bytes)) return "the file is not valid UTF-8";
+	return null;
 }
 
 //#endregion
@@ -9505,7 +9531,16 @@ async function recutApply(args) {
 		problems: planned.problems
 	};
 	const { plan } = planned;
-	const { sources, blocked } = readPageSources(project);
+	let read;
+	try {
+		read = readPageSources(project);
+	} catch (error) {
+		return {
+			ok: false,
+			problems: [`cannot read the pages of the wiki: ${error instanceof Error ? error.message : String(error)}`]
+		};
+	}
+	const { sources, blocked } = read;
 	const lenses = knownLenses(project);
 	const problems = validateRecutPlan({
 		plan,
@@ -9548,8 +9583,8 @@ async function recutApply(args) {
 		...writes,
 		...removals
 	].flatMap((path) => {
-		const real = outsideProject(project, path);
-		return real === null ? [] : [`${path}: the file is outside the project (it is ${real}), so a recut does not write it`];
+		const problem = insideProblem(project, path);
+		return problem === null ? [] : [`${path}: ${problem}, so a recut does not write it`];
 	});
 	if (outside.length > 0) return {
 		ok: false,
@@ -9733,7 +9768,8 @@ var FileChanges = class {
 	}
 	/** The last guard before a write: nothing is written or removed through a link that leads out of the project. */
 	mustBeInside(path) {
-		if (outsideProject(this.project, path) !== null) throw new Error(`${path} is outside the project`);
+		const problem = insideProblem(this.project, path);
+		if (problem !== null) throw new Error(`${path}: ${problem}`);
 	}
 	remember(path) {
 		if (this.originals.has(path)) return;
