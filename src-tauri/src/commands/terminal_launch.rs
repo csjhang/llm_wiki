@@ -34,6 +34,12 @@ const LINUX_SCRIPT: &str = r#"cd "$1" && command -v claude >/dev/null 2>&1 && ex
 /// `;` splits a `wt` command line.
 const CMD_REFUSED: [char; 11] = ['&', '|', '<', '>', '^', '%', '"', '!', ';', ',', '='];
 
+/// Characters that the macOS line must not have. Terminal types the line into the login shell of the user, and
+/// that shell may be fish or tcsh, not a POSIX shell. `shell_quote` is POSIX only. Inside single quotes fish
+/// reads `\'` and `\\` as escapes, so a path with one of them ends the quote and can run text. tcsh reads `!` as
+/// history, even inside single quotes. A backtick is refused with them. A folder name with one of these is rare.
+const MACOS_REFUSED: [char; 4] = ['\\', '\'', '!', '`'];
+
 /// One way to start a terminal: a program, its argument list, and how to run it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Launch {
@@ -104,9 +110,18 @@ pub fn applescript_quote(text: &str) -> String {
 
 /// The lines of the AppleScript that opens Terminal, runs `claude`, and brings
 /// Terminal to the front. The text goes through `shell_quote`, and the whole
-/// shell line then goes through `applescript_quote`.
+/// shell line then goes through `applescript_quote`. A path or command with a
+/// character of `MACOS_REFUSED` is refused with an error that names them.
 pub fn build_macos_script(project_path: &str, command: &str) -> Result<Vec<String>, String> {
     validate(project_path, command)?;
+    for (name, text) in [("project path", project_path), ("command", command)] {
+        if text.contains(MACOS_REFUSED) {
+            return Err(format!(
+                "{name} must not have any of these characters on macOS, because the shell of Terminal may be fish or tcsh: {}. Found in: {text}",
+                MACOS_REFUSED.iter().map(char::to_string).collect::<Vec<_>>().join(" ")
+            ));
+        }
+    }
     let shell_line = format!(
         "cd {} && claude {}",
         shell_quote(project_path),
@@ -330,6 +345,8 @@ mod tests {
     const COMMAND: &str = "/wiki-fuse 00000000-0000-4000-8000-000000000001";
     /// A path with a space, a single quote, a double quote, `$`, and a backtick.
     const HOSTILE_PATH: &str = "/Users/me/it's \"mine\" $HOME `id`";
+    /// What macOS still accepts: a space, a double quote, `$`, `;`, `&`, `|`, a glob, and a bracket. No `\`, `'`, `!`, or backtick.
+    const MACOS_HOSTILE_PATH: &str = "/Users/me/my \"mine\" $HOME; echo & ls | cat * ? [x] (y)";
 
     fn programs(list: &[Launch]) -> Vec<&'static str> {
         list.iter().map(|launch| launch.program).collect()
@@ -504,8 +521,8 @@ mod tests {
     }
 
     #[test]
-    fn macos_script_quotes_paths_with_spaces_quotes_dollar_and_backticks() {
-        let lines = build_macos_script(HOSTILE_PATH, COMMAND).unwrap();
+    fn macos_script_quotes_paths_with_spaces_double_quotes_dollar_and_shell_syntax() {
+        let lines = build_macos_script(MACOS_HOSTILE_PATH, COMMAND).unwrap();
         let prefix = "tell application \"Terminal\" to do script ";
         let literal = lines[0].strip_prefix(prefix).expect("do script line");
         // Undo the AppleScript layer: what Terminal types into the shell.
@@ -514,10 +531,63 @@ mod tests {
             shell_line,
             format!(
                 "cd {} && claude {}",
-                shell_quote(HOSTILE_PATH),
+                shell_quote(MACOS_HOSTILE_PATH),
                 shell_quote(COMMAND)
             )
         );
+    }
+
+    /// The login shell of Terminal may be fish or tcsh, and `shell_quote` is POSIX only. Inside single quotes
+    /// fish reads `\'` and `\\` as escapes, and tcsh reads `!` as history. A backtick is refused with them.
+    #[test]
+    fn macos_refuses_the_characters_that_fish_or_tcsh_read_inside_single_quotes() {
+        for bad in ['\\', '\'', '!', '`'] {
+            let path = format!("/Users/me/a{bad}b");
+            let message = build_macos_script(&path, COMMAND).unwrap_err();
+            assert!(message.contains("project path"), "{bad}: {message}");
+            assert!(message.contains("macOS"), "{bad}: {message}");
+            assert!(message.contains(bad), "{bad}: {message}");
+            assert!(macos_launch(&path, COMMAND).is_err(), "launch: {bad}");
+        }
+    }
+
+    #[test]
+    fn macos_names_every_refused_character_in_the_error() {
+        let message = build_macos_script("/Users/me/it's", COMMAND).unwrap_err();
+        assert!(message.contains("\\ ' ! `"), "{message}");
+        assert!(message.contains("/Users/me/it's"), "{message}");
+    }
+
+    #[test]
+    fn macos_refuses_them_in_the_command_too() {
+        for bad in [
+            "/wiki-fuse a\\b",
+            "/wiki-fuse it's",
+            "/wiki-fuse go!",
+            "/wiki-fuse `id`",
+        ] {
+            let message = build_macos_script(PATH, bad).unwrap_err();
+            assert!(message.contains("command"), "{bad}: {message}");
+            assert!(message.contains("macOS"), "{bad}: {message}");
+        }
+    }
+
+    #[test]
+    fn macos_accepts_the_path_and_command_of_the_panel() {
+        assert!(build_macos_script(PATH, COMMAND).is_ok());
+        assert!(build_macos_script("/Users/me/my-wiki_v2.1/a b", "/wiki-undo").is_ok());
+        assert!(build_macos_script(
+            "/Users/me/\u{7a7a}\u{767d} \u{fc}n\u{ef}code",
+            "/wiki-recut"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn the_other_hosts_still_take_a_path_with_a_single_quote() {
+        // The refusal belongs to the macOS builder only: Linux passes the path as a list item.
+        assert!(linux_candidates(HOSTILE_PATH, COMMAND).is_ok());
+        assert!(build_windows_args("C:\\Users\\me\\it's", COMMAND).is_ok());
     }
 
     #[test]
@@ -541,7 +611,7 @@ mod tests {
     #[test]
     fn macos_shell_line_changes_to_the_right_folder() {
         let base = std::env::temp_dir().join(format!("terminal-launch-{}", std::process::id()));
-        let folder = base.join("it's \"mine\" $HOME `id`");
+        let folder = base.join("my \"mine\" $HOME; echo & ls | cat * ? [x] (y)");
         std::fs::create_dir_all(&folder).unwrap();
         let path = folder.to_string_lossy().to_string();
         let lines = build_macos_script(&path, "/wiki-lint").unwrap();
