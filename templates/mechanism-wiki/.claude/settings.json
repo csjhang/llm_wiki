@@ -29,11 +29,13 @@
       "mcp__Heptabase__update_database_card_membership",
       "mcp__llm-wiki",
       "Bash(node */scripts/wiki-tool.mjs *)",
+      "Bash(node \"*/scripts/wiki-tool.mjs\" *)",
       "Bash(node */skills/wiki-undo/scripts/undo.mjs *)",
-      "Bash(git *)",
+      "Bash(node \"*/skills/wiki-undo/scripts/undo.mjs\" *)",
+      "Bash(git -C * rev-parse HEAD)",
       "Bash(mkdir -p */.llm-wiki/hepta*)",
       "Bash(cp * */.llm-wiki/hepta/*)",
-      "Edit(/.llm-wiki/**)"
+      "Edit(/.llm-wiki/hepta/**)"
     ],
     "deny": [
       "Bash(git push *)",
@@ -44,7 +46,20 @@
       "Bash(git rebase *)",
       "Bash(git branch -D *)",
       "Bash(git stash *)",
-      "Bash(rm *)"
+      "Bash(rm *)",
+      "Bash(node -e *)",
+      "Bash(node --eval *)",
+      "Bash(node -p *)",
+      "Bash(node --print *)",
+      "Bash(node --import *)",
+      "Bash(node -r *)",
+      "Bash(node --require *)",
+      "Bash(node * -e *)",
+      "Bash(git -c *)",
+      "Bash(git * -c *)",
+      "Bash(git --exec-path *)",
+      "Bash(git * --exec-path*)",
+      "Bash(node *.llm-wiki/*.mjs*)"
     ]
   }
 }

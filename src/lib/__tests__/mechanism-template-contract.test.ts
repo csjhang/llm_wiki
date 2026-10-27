@@ -10,6 +10,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "node:fs"
 import { join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
+import { bashCommandPermitted, matchingBashRules } from "@/test-helpers/permission-rules"
 import { findLongSentences } from "@/test-helpers/ste-check"
 import { KNOWN_LENSES, parseDomainsYaml } from "@/lib/wiki-config/domains"
 import { parseHeptabaseYaml } from "@/lib/wiki-config/heptabase-config"
@@ -1245,14 +1246,17 @@ describe("mechanism template: sentence length", () => {
 /**
  * The permissions of the template (`.claude/settings.json`). A background run of a skill
  * (`claude -p`) cannot ask, so a tool that is not on the allow list is denied. The list names only
- * what the skills need. Every rule was checked against the Claude Code docs (permissions and MCP):
+ * what the background skills (`wiki-sync`, `wiki-lint`) need. Every rule was checked against the Claude Code docs
+ * (permissions and MCP):
  * - `mcp__<server>` allows every tool of that server. The Heptabase tools are named one by one instead.
  * - The tools of a plugin server are named `mcp__plugin_<plugin>_<server>__<tool>`.
  *   The claude.ai connector names its tools `mcp__Heptabase__<tool>`. The list has both prefixes.
- * - A `*` can be anywhere in a Bash rule and matches spaces. A trailing ` *` also matches the bare command.
+ * - A Bash rule matches the raw text of the command. A `*` can be anywhere and matches spaces. A quote is not removed,
+ *   so a script path in double quotes needs its own rule.
  * - `Edit(/x/**)` is anchored at the project folder in a project settings file, and an Edit rule covers Write.
- * - A deny rule wins over an allow rule, so `Bash(git *)` stays allowed while `git push` is denied.
- *   A deny rule stops the usual form of a command only: `git -C . push` is not matched.
+ * - A deny rule wins over an allow rule.
+ * - The lists lower the number of prompts. They are not a boundary (ruling W14): a `*` before the subcommand lets option
+ *   text through, and a deny rule stops the usual form of a command only.
  */
 const PLUGIN_PREFIX = "mcp__plugin_heptabase_heptabase__"
 const CONNECTOR_PREFIX = "mcp__Heptabase__"
@@ -1285,15 +1289,17 @@ const ALLOWED_PERMISSIONS = [
   ...HEPTABASE_TOOLS.map((tool) => `${CONNECTOR_PREFIX}${tool}`),
   "mcp__llm-wiki",
   "Bash(node */scripts/wiki-tool.mjs *)",
+  'Bash(node "*/scripts/wiki-tool.mjs" *)',
   "Bash(node */skills/wiki-undo/scripts/undo.mjs *)",
-  "Bash(git *)",
+  'Bash(node "*/skills/wiki-undo/scripts/undo.mjs" *)',
+  "Bash(git -C * rev-parse HEAD)",
   "Bash(mkdir -p */.llm-wiki/hepta*)",
   "Bash(cp * */.llm-wiki/hepta/*)",
-  "Edit(/.llm-wiki/**)",
+  "Edit(/.llm-wiki/hepta/**)",
 ]
 
 /** Git commands that lose work or change history, and `rm`. No skill step runs one of them: the undo script runs its own git. */
-const DENIED_PERMISSIONS = [
+const DENIED_GIT_AND_RM = [
   "Bash(git push *)",
   "Bash(git reset *)",
   "Bash(git clean *)",
@@ -1303,6 +1309,36 @@ const DENIED_PERMISSIONS = [
   "Bash(git branch -D *)",
   "Bash(git stash *)",
   "Bash(rm *)",
+]
+
+/** Ways to make `node` run text instead of a script. No skill step uses a node option. */
+const DENIED_NODE_EVAL = [
+  "Bash(node -e *)",
+  "Bash(node --eval *)",
+  "Bash(node -p *)",
+  "Bash(node --print *)",
+  "Bash(node --import *)",
+  "Bash(node -r *)",
+  "Bash(node --require *)",
+  "Bash(node * -e *)",
+]
+
+/** Ways to make `git` run a program: a config value on the command line, or another exec path. The skill command has `-C`, in capitals. */
+const DENIED_GIT_EXEC = [
+  "Bash(git -c *)",
+  "Bash(git * -c *)",
+  "Bash(git --exec-path *)",
+  "Bash(git * --exec-path*)",
+]
+
+/** A script run from the `.llm-wiki` folder. The run may write there, so it must not run a script from there. */
+const DENIED_SCRIPT_IN_STATE_FOLDER = ["Bash(node *.llm-wiki/*.mjs*)"]
+
+const DENIED_PERMISSIONS = [
+  ...DENIED_GIT_AND_RM,
+  ...DENIED_NODE_EVAL,
+  ...DENIED_GIT_EXEC,
+  ...DENIED_SCRIPT_IN_STATE_FOLDER,
 ]
 
 /** Every Markdown file of the skills of the plugin: each `SKILL.md` and each `reference/*.md`. */
@@ -1329,6 +1365,57 @@ function heptabaseToolsNamedBySkills(): string[] {
   return [...names].sort()
 }
 
+/** The skills that can run in the background, from the panel. Nobody can answer a prompt there. */
+const BACKGROUND_SKILLS = ["wiki-sync", "wiki-lint"]
+
+/** A command line of a skill file: the text as written, and the text with sample values for the placeholders. */
+interface SkillCommandLine {
+  file: string
+  skill: string
+  template: string
+  command: string
+}
+
+/** Sample values for the placeholders of the skills. Nothing real. */
+function withSampleValues(template: string, skill: string): string {
+  const plugin = "/home/example/.claude/plugins/llm-wiki"
+  const values: Array<[string, string]> = [
+    ["<plugin dir>", plugin],
+    ["<base>", `${plugin}/skills/${skill}`],
+    ["<project folder>", "/home/example/wiki"],
+    ["<project>", "/home/example/wiki"],
+  ]
+  let text = template
+  for (const [placeholder, value] of values) text = text.split(placeholder).join(value)
+  return text.replace(/<[^<>\n]+>/g, "x")
+}
+
+/**
+ * Every command line in the skill files that starts a program: a code block line, or a backticked span in the text.
+ * A span counts when it starts with `node ` or `git -C `. A span such as `git show` or `git revert` names a command
+ * to explain it or to forbid it, and is not a command line.
+ */
+function skillCommandLines(): SkillCommandLine[] {
+  const lines: SkillCommandLine[] = []
+  for (const file of skillMarkdownFiles()) {
+    const skill = file.split("/skills/")[1].split("/")[0]
+    for (const { line, inFence } of linesOutsideFences(readFileSync(file, "utf8"))) {
+      const templates: string[] = []
+      if (inFence) {
+        if (/^(?:node|git|mkdir|cp) /.test(line.trim())) templates.push(line.trim())
+      } else {
+        for (const span of line.matchAll(/`([^`]+)`/g)) {
+          if (/^(?:node |git -C )/.test(span[1])) templates.push(span[1])
+        }
+      }
+      for (const template of templates) {
+        lines.push({ file, skill, template, command: withSampleValues(template, skill) })
+      }
+    }
+  }
+  return lines
+}
+
 describe("mechanism template: permission allowlist", () => {
   type Permissions = { allow: string[]; deny: string[] }
   const permissions = (): Permissions => (JSON.parse(readTemplate(".claude/settings.json")) as { permissions: Permissions }).permissions
@@ -1347,16 +1434,33 @@ describe("mechanism template: permission allowlist", () => {
     expect(new Set(deny).size).toBe(deny.length)
   })
 
-  it("no rule opens a whole tool: every Bash rule names a program, and Edit is limited to .llm-wiki/", () => {
+  it("no rule opens a whole tool: every Bash rule names a program, and Edit is limited to .llm-wiki/hepta/", () => {
     const { allow } = permissions()
     for (const rule of allow) {
       expect(rule, rule).not.toMatch(/^(Bash|Edit|Write|Read|WebFetch|WebSearch)(\(\*\))?$/)
       if (rule.startsWith("Bash(")) {
-        expect(rule, rule).toMatch(/^Bash\((?:node \*\/|git |mkdir -p \*\/\.llm-wiki\/|cp \* \*\/\.llm-wiki\/)/)
+        expect(rule, rule).toMatch(
+          /^Bash\((?:node "?\*\/|git -C \* rev-parse HEAD\)$|mkdir -p \*\/\.llm-wiki\/hepta|cp \* \*\/\.llm-wiki\/hepta\/)/,
+        )
       }
-      if (rule.startsWith("Edit(")) expect(rule).toBe("Edit(/.llm-wiki/**)")
+      if (rule.startsWith("Edit(")) expect(rule).toBe("Edit(/.llm-wiki/hepta/**)")
     }
     expect(allow.filter((rule) => rule.startsWith("Write("))).toEqual([])
+  })
+
+  it("the allow list has one git command: the read-only rev-parse that wiki-lint runs (ruling W14)", () => {
+    const { allow } = permissions()
+    expect(allow.filter((rule) => /^Bash\(git\b/.test(rule))).toEqual(["Bash(git -C * rev-parse HEAD)"])
+    expect(allow).not.toContain("Bash(git *)")
+  })
+
+  it("each wiki script has a rule for its path in double quotes and a rule for its path without quotes", () => {
+    const { allow } = permissions()
+    for (const script of ["wiki-tool.mjs", "skills/wiki-undo/scripts/undo.mjs"]) {
+      const path = script === "wiki-tool.mjs" ? "scripts/wiki-tool.mjs" : script
+      expect(allow, script).toContain(`Bash(node */${path} *)`)
+      expect(allow, script).toContain(`Bash(node "*/${path}" *)`)
+    }
   })
 
   it("the Heptabase tools are allowed one by one: no server-wide rule and no wildcard", () => {
@@ -1404,7 +1508,23 @@ describe("mechanism template: permission allowlist", () => {
     }
     expect(deny).toContain("Bash(git branch -D *)")
     expect(deny).toContain("Bash(rm *)")
-    for (const rule of deny) expect(rule, rule).toMatch(/^Bash\((?:git [a-z]+(?: -D)? |rm )\*\)$/)
+  })
+
+  it("the deny list stops the eval and alias forms of node and git (ruling W14)", () => {
+    const { deny } = permissions()
+    for (const rule of [...DENIED_NODE_EVAL, ...DENIED_GIT_EXEC, ...DENIED_SCRIPT_IN_STATE_FOLDER]) {
+      expect(deny, rule).toContain(rule)
+    }
+    // The ruling names these eight node forms and these git forms.
+    for (const rule of [
+      "Bash(node -e *)", "Bash(node --eval *)", "Bash(node -p *)", "Bash(node --print *)",
+      "Bash(node --import *)", "Bash(node -r *)", "Bash(node --require *)", "Bash(node * -e *)",
+      "Bash(git -c *)", "Bash(git * -c *)", "Bash(git --exec-path *)",
+    ]) {
+      expect(deny, rule).toContain(rule)
+    }
+    // Every deny rule is a Bash rule of one known shape: git, node, or rm. A new shape needs a new decision.
+    for (const rule of deny) expect(rule, rule).toMatch(/^Bash\((?:git |node |rm )/)
   })
 
   it("no skill step runs a denied command: a skill file names one only to forbid it", () => {
@@ -1416,6 +1536,96 @@ describe("mechanism template: permission allowlist", () => {
       }
     }
     expect(found).toEqual([])
+  })
+
+  it("finds the command lines of the skills: the scan sees every kind of command", () => {
+    const lines = skillCommandLines().map((entry) => entry.template)
+    const has = (part: string): boolean => lines.some((line) => line.includes(part))
+    for (const part of [
+      "wiki-tool.mjs\" hepta init", "hepta plan-up", "hepta plan-down", "hepta record", "hepta snapshot",
+      "wiki-tool.mjs\" lint structure", "lint mark", "fuse commit", "fuse resolve-board", "recut apply",
+      "undo.mjs list", "undo.mjs revert", "rev-parse HEAD", "show --relative",
+    ]) {
+      expect(has(part), part).toBe(true)
+    }
+  })
+
+  it("no skill command line matches a deny rule", () => {
+    const { deny } = permissions()
+    const hits = skillCommandLines().flatMap((entry) =>
+      matchingBashRules(deny, entry.command).map((rule) => `${entry.file}: ${entry.command} <- ${rule}`),
+    )
+    expect(hits).toEqual([])
+  })
+
+  it("every command line of wiki-sync and wiki-lint matches an allow rule: a background run cannot ask", () => {
+    const permissions_ = permissions()
+    const background = skillCommandLines().filter((entry) => BACKGROUND_SKILLS.includes(entry.skill))
+    expect(new Set(background.map((entry) => entry.skill))).toEqual(new Set(BACKGROUND_SKILLS))
+    const refused = background.filter((entry) => !bashCommandPermitted(permissions_, entry.command))
+    expect(refused.map((entry) => `${entry.file}: ${entry.command}`)).toEqual([])
+  })
+
+  it("a conversation skill command line matches an allow rule, except the git read of wiki-undo", () => {
+    const permissions_ = permissions()
+    const conversation = skillCommandLines().filter((entry) => !BACKGROUND_SKILLS.includes(entry.skill))
+    const notAllowed = conversation
+      .filter((entry) => !bashCommandPermitted(permissions_, entry.command))
+      .map((entry) => `${entry.skill}: ${entry.template}`)
+    // The user approves these in the conversation. Add a line here only after a decision (ruling W14).
+    expect(notAllowed).toEqual([`wiki-undo: git -C <project folder> show --relative --name-only --format= <sha>`])
+  })
+
+  it("the background skills write under .llm-wiki/hepta/ only; the recut plan is written by a conversation skill", () => {
+    const skills = join(REPO_ROOT, "plugins", "llm-wiki", "skills")
+    for (const file of skillMarkdownFiles().filter((name) => BACKGROUND_SKILLS.some((skill) => name.includes(`/${skill}/`)))) {
+      const text = readFileSync(file, "utf8")
+      // Every `.llm-wiki/` path that wiki-sync names is a hepta file. wiki-lint names the lint marker, which only `lint mark` writes.
+      for (const match of text.matchAll(/\.llm-wiki\/([A-Za-z0-9._-]+)/g)) {
+        if (file.includes("/wiki-sync/")) expect(match[1], file).toBe("hepta")
+        else expect(match[1], file).toBe("semantic-lint.json")
+      }
+    }
+    expect(readFileSync(join(skills, "wiki-lint", "SKILL.md"), "utf8")).toMatch(/Only `mark` writes a file/)
+    const recut = readFileSync(join(skills, "wiki-recut", "SKILL.md"), "utf8")
+    expect(recut).toContain("`<project>/.llm-wiki/recut-plan.json` with the file tool")
+  })
+
+  it("the lists stop the forms that the review of ruling W14 named, and let the skill forms through", () => {
+    const permissions_ = permissions()
+    const tool = "/home/example/.claude/plugins/llm-wiki/scripts/wiki-tool.mjs"
+    const stopped = [
+      `node -e 'process.exit()' ${tool} hepta plan-up`,
+      `node --eval 'x' ${tool} hepta plan-up`,
+      `node -p '1' ${tool} hepta plan-up`,
+      `node --print '1' ${tool} hepta plan-up`,
+      `node --import ./a.mjs ${tool} hepta plan-up`,
+      `node -r ./a.js ${tool} hepta plan-up`,
+      `node --require ./a.js ${tool} hepta plan-up`,
+      `node --no-warnings -e 'x' ${tool} hepta plan-up`,
+      // A script that the run wrote itself.
+      "node /home/example/wiki/.llm-wiki/hepta/scripts/wiki-tool.mjs hepta plan-up",
+      'node "/home/example/wiki/.llm-wiki/hepta/scripts/wiki-tool.mjs" hepta plan-up',
+      "git -C /home/example/wiki -c core.pager=x rev-parse HEAD",
+      "git -C /home/example/wiki --exec-path=/tmp/x rev-parse HEAD",
+      "git -c alias.x='!sh -c id' x",
+      "git push origin main",
+      "git status",
+      "git log -3",
+      "git -C /home/example/wiki status",
+      "git -C /home/example/wiki show HEAD",
+    ]
+    for (const command of stopped) expect(bashCommandPermitted(permissions_, command), command).toBe(false)
+    const allowed = [
+      `node ${tool} hepta plan-up --project /home/example/wiki`,
+      `node "${tool}" hepta plan-up --project "/home/example/wiki"`,
+      'git -C "/home/example/wiki" rev-parse HEAD',
+      "git -C /home/example/wiki rev-parse HEAD",
+      "mkdir -p /home/example/wiki/.llm-wiki/hepta",
+      'mkdir -p "/home/example/wiki/.llm-wiki/hepta"',
+      "cp /home/example/.claude/tool-results/a.txt /home/example/wiki/.llm-wiki/hepta/a.json",
+    ]
+    for (const command of allowed) expect(bashCommandPermitted(permissions_, command), command).toBe(true)
   })
 
   it("every script that a Bash rule names is a script of the plugin", () => {
@@ -1443,15 +1653,55 @@ describe("mechanism template: permission allowlist", () => {
     expect(setup).toMatch(/before the first background run/)
   })
 
+  it("matching is case sensitive for Bash (the docs say case-insensitive for PowerShell and WebFetch only): git -C is not git -c", () => {
+    const { deny } = permissions()
+    expect(matchingBashRules(deny, 'git -C "/home/example/wiki" rev-parse HEAD')).toEqual([])
+    expect(matchingBashRules(deny, "git -C /home/example/wiki -c core.pager=x rev-parse HEAD")).toEqual(["Bash(git * -c *)"])
+  })
+
+  it("a deny rule can also stop a safe command: a card title with ' -e ' in a snapshot command (the README says so)", () => {
+    const permissions_ = permissions()
+    const tool = "/home/example/.claude/plugins/llm-wiki/scripts/wiki-tool.mjs"
+    expect(bashCommandPermitted(permissions_, `node "${tool}" hepta snapshot --project "/home/example/wiki" --title 'Plain title'`)).toBe(true)
+    expect(bashCommandPermitted(permissions_, `node "${tool}" hepta snapshot --project "/home/example/wiki" --title 'Use grep -e here'`)).toBe(false)
+  })
+
   it("the template README says what the lists allow and deny", () => {
     const readme = readTemplate("README.md")
-    expect(sectionBody(readme, "What `.claude/settings.json` allows")).toMatch(/one by one/)
+    const allows = sectionBody(readme, "What `.claude/settings.json` allows")
+    expect(allows).toMatch(/one by one/)
+    // The git rule and the edit rule are named as the rules are (ruling W14).
+    expect(allows).toContain("`git -C <folder> rev-parse HEAD`")
+    expect(allows).toContain("`wiki-lint`")
+    expect(allows).toContain("`.llm-wiki/hepta`")
+    expect(allows).toContain("`.llm-wiki/recut-plan.json`")
+    expect(allows).toMatch(/do not check which folder holds the script/)
+    expect(allows).not.toMatch(/The `git` command/)
     const denies = sectionBody(readme, "What `.claude/settings.json` denies")
-    for (const word of ["git push", "git reset", "git clean", "git checkout", "git restore", "git rebase", "git stash", "git branch -D", "rm"]) {
+    for (const word of [
+      "git push", "git reset", "git clean", "git checkout", "git restore", "git rebase", "git stash", "git branch -D", "rm",
+      "node -e", "node --eval", "node -p", "node --print", "node --import", "node -r", "node --require", "git -c", "--exec-path",
+    ]) {
       expect(denies, word).toContain(`\`${word}\``)
     }
     // A deny rule matches the usual form of a command only. The README says so.
     expect(denies).toContain("git -C . push")
+  })
+
+  it("the template README says plainly that the lists are not a sandbox (ruling W14)", () => {
+    const readme = readTemplate("README.md")
+    const limits = sectionBody(readme, "What these lists do not do")
+    expect(limits).toMatch(/lowers the number of prompts/)
+    expect(limits).toMatch(/not a sandbox/)
+    expect(limits).toMatch(/rights of your user account/)
+    expect(limits).toMatch(/matches the text of a command/)
+    expect(limits).toMatch(/\bany text\b/)
+    expect(limits).toMatch(/can be written in a form that the rule does not match/)
+    expect(limits).toMatch(/Run a background skill only on a wiki whose sources you trust/)
+    expect(limits).toContain("https://code.claude.com/docs/en/sandboxing.md")
+    expect(limits).toContain("https://code.claude.com/docs/en/permissions.md")
+    // The old claim is gone.
+    expect(readme).not.toMatch(/The `wiki-tool` script of the plugin and/)
   })
 
   it("the template README keeps sentences short", () => {
