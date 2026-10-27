@@ -245,6 +245,13 @@ describe("wiki-sync skill", () => {
       expect(section).toContain("When a call fails")
     })
 
+    // Final review, M3: a denied tool in a background run is not a reason to look for another way in.
+    it("does not look for another route when Claude Code denies a tool, and names the tool in the report", () => {
+      expect(section).toContain("If Claude Code denies a tool, do not try another way. Leave out the step and name the tool in the report.")
+      // It is one of the numbered steps, so a run reads it with the other rules of the section.
+      expect(section).toMatch(/^\d+\. If Claude Code denies a tool, do not try another way\./m)
+    })
+
     it("stops when heptabase.yaml is missing and says to run /wiki-sync once in a conversation", () => {
       expect(section).toContain("`heptabase.yaml`")
       expect(section).toMatch(/Do not do the section "Set up Heptabase"/)
@@ -271,6 +278,37 @@ describe("wiki-sync skill", () => {
     it("keeps its sentences short", () => {
       expect(section).not.toBe("")
       expect(findLongSentences("SKILL.md", section)).toEqual([])
+    })
+  })
+
+  // Ruling W15: two Down runs at once can plan the same new page. The tool has no lock, so the skill says to run one at a time.
+  describe("one Down at a time", () => {
+    const down = skill.slice(skill.indexOf("## Down (wiki to Heptabase)"), skill.indexOf("### Record events"))
+    const beforeFirstStep = down.slice(0, down.indexOf("\n1. "))
+
+    it("says in the Down section, before step 1, to run one Down at a time", () => {
+      expect(beforeFirstStep).toContain("Run one Down at a time in a project.")
+    })
+
+    it("says why: two runs can plan the same new page and make two cards", () => {
+      expect(beforeFirstStep).toMatch(/Two Down runs at the same time can plan the same new page and create two cards\./)
+      expect(beforeFirstStep).toMatch(/The tool has no lock against this\./)
+    })
+
+    it("tells what to do when another run is going, without asking in a run without questions", () => {
+      expect(beforeFirstStep).toContain("another run of `wiki-sync` or `wiki-fuse` is still going")
+      expect(beforeFirstStep).toMatch(/do not start Down/)
+      expect(beforeFirstStep).toMatch(/run it again after the other run ends/)
+    })
+
+    it("is read by wiki-fuse too: its Down step points to this section", () => {
+      const directed = readFileSync(join(SKILL_DIR, "../wiki-fuse/reference/directed.md"), "utf8")
+      expect(directed).toContain('Read the section "Down" of `<base>/../wiki-sync/SKILL.md`.')
+    })
+
+    it("keeps its sentences short", () => {
+      expect(beforeFirstStep).not.toBe("")
+      expect(findLongSentences("SKILL.md", beforeFirstStep)).toEqual([])
     })
   })
 

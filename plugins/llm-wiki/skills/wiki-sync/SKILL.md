@@ -105,6 +105,7 @@ The steps below replace steps 1, 3, 7, 8, and 9 of "Before you start". Do the ot
 6. Follow "Up (Heptabase to wiki)" and "Down (wiki to Heptabase)" for the rest. Skip each step that asks the user.
 7. Leave out each step that needs a choice. Go on with the other steps.
 8. Put each left-out step, and each message for the user, in the report at the end.
+9. If Claude Code denies a tool, do not try another way. Leave out the step and name the tool in the report.
 
 These steps need a choice:
 
@@ -211,6 +212,9 @@ node "<plugin dir>/scripts/wiki-tool.mjs" hepta snapshot --project "<project>" -
 6. Add the card to the report. The plan lists a PDF card again on each run.
 
 ## Down (wiki to Heptabase)
+
+Run one Down at a time in a project. Two Down runs at the same time can plan the same new page and create two cards. The tool has no lock against this.
+If the user says that another run of `wiki-sync` or `wiki-fuse` is still going, do not start Down. Tell the user to run it again after the other run ends.
 
 1. Read `heptabase.yaml`. Note the mirror tag.
 2. Call `read_database` for the mirror tag. Save the result. It holds the select options that exist now.
