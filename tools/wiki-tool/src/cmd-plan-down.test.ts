@@ -1257,14 +1257,31 @@ describe("hepta plan-down", () => {
       return { project, list: writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated: EDITED_AT }]) }
     }
 
+    /** The user edited the card, the sync saved the edit as feedback (the edit the user saw), and the page is listed. */
+    async function seenEditProject(extra: Record<string, string> = {}): Promise<{ project: string; list: string }> {
+      const made = await editedProject(extra)
+      const card = cardFile(made.project, "card.json", "# Event Driven\n\nEdited.")
+      await record(made.project, { type: "feedback", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: EDITED_AT }, NOW, [card])
+      writeProjectFile(made.project, DISCARD_FILE, JSON.stringify([MECHANISM_PATH]))
+      return made
+    }
+
+    const listOf = (project: string, updated: string): string[] => [
+      "--mirror-cards",
+      writeMirrorList(project, [{ id: id(21), title: "Event Driven", updated }]),
+    ]
+
     it("discard-edit makes plan-down plan an update", async () => {
       const { project, list } = await editedProject()
-      expect((await plan(project, ["--mirror-cards", list])).output.actions.map((a) => a.op)).toEqual(["skip-edited"])
+      const card = cardFile(project, "card.json", "# Event Driven\n\nEdited.")
+      await record(project, { type: "feedback", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: EDITED_AT }, NOW, [card])
+      // The edit is handled and the page did not change: no action, the edit stays in the card.
+      expect((await plan(project, ["--mirror-cards", list])).output.actions).toEqual([])
 
       writeProjectFile(project, DISCARD_FILE, JSON.stringify([MECHANISM_PATH]))
       const result = await plan(project, ["--mirror-cards", list])
       expect(result.exitCode).toBe(0)
-      // The page did not change, and the card still gets the text of the wiki: the edit is gone.
+      // The page did not change, and the card still gets the text of the wiki: the edit the user saw is gone.
       expect(result.output.actions).toEqual([
         expect.objectContaining({ op: "update", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: EDITED_AT, title: "Event Driven" }),
       ])
@@ -1272,24 +1289,46 @@ describe("hepta plan-down", () => {
       expect(action.op === "update" && readFileSync(join(project, action.bodyFile), "utf8")).toBe(action.op === "update" ? action.body : "")
     })
 
-    it("plans the update also after the edit was saved as feedback", async () => {
+    it("gives skip-edited to a listed page when no feedback was recorded: the user did not see that edit", async () => {
       const { project, list } = await editedProject()
-      const card = cardFile(project, "card.json", "# Event Driven\n\nEdited.")
-      await record(project, { type: "feedback", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: EDITED_AT }, NOW, [card])
-      // The edit is handled, so there is no skip-edited, and the page did not change: no action at all.
-      expect((await plan(project, ["--mirror-cards", list])).output.actions).toEqual([])
-
       writeProjectFile(project, DISCARD_FILE, JSON.stringify([MECHANISM_PATH]))
-      expect((await plan(project, ["--mirror-cards", list])).output.actions.map((a) => a.op)).toEqual(["update"])
+      expect((await plan(project, ["--mirror-cards", list])).output.actions).toEqual([
+        { op: "skip-edited", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: EDITED_AT },
+      ])
+    })
+
+    it("gives skip-edited to a listed page when the card was edited again after the feedback", async () => {
+      const { project } = await seenEditProject()
+      const later = "2026-10-24T10:00:00.000Z"
+      expect((await plan(project, listOf(project, later))).output.actions).toEqual([
+        { op: "skip-edited", page: MECHANISM_PATH, cardId: id(21), cardUpdatedAt: later },
+      ])
+      // The edit the user saw is still covered when the card has its time.
+      expect((await plan(project, listOf(project, EDITED_AT))).output.actions.map((a) => a.op)).toEqual(["update"])
     })
 
     it("plans one update for a listed page that also changed", async () => {
-      const { project, list } = await editedProject()
+      const { project, list } = await seenEditProject()
       writeProjectFile(project, MECHANISM_PATH, mechanism("Event Driven", "Changed body."))
-      writeProjectFile(project, DISCARD_FILE, JSON.stringify([MECHANISM_PATH]))
       const { actions } = (await plan(project, ["--mirror-cards", list])).output
       expect(actions.map((a) => a.op)).toEqual(["update"])
       expect(actions[0].op === "update" && actions[0].body).toContain("Changed body.")
+    })
+
+    it("plans no forced update for a stale entry once the card was written after the edit", async () => {
+      const { project } = await seenEditProject()
+      const written = "2026-10-24T09:30:00.000Z"
+      // The card was written by the wiki after the edit (an updated event ran), and the entry is still in the list.
+      await record(project, { type: "updated", page: MECHANISM_PATH, cardUpdatedAt: written })
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([MECHANISM_PATH]))
+      expect((await plan(project, listOf(project, written))).output.actions).toEqual([])
+    })
+
+    it("does not force an update when the list has no time for the card", async () => {
+      const { project } = await seenEditProject()
+      const noTime = join(project, ".llm-wiki/hepta/no-time.txt")
+      writeProjectFile(project, ".llm-wiki/hepta/no-time.txt", mirrorList([{ id: id(21), title: "Event Driven", updated: "" }]))
+      expect((await plan(project, ["--mirror-cards", noTime])).output.actions).toEqual([])
     })
 
     it("still gives skip-edited to a page that is not listed", async () => {

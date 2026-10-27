@@ -349,7 +349,7 @@ Use it for a `skip-edited` action when `note` is a path and `llm_wiki_status` sa
 - `<note path>` is the `note` of the `record` result.
 - Give `options` exactly as shown. Do not change the labels or the actions. The app refuses any other action.
 - `Keep as feedback` only closes the item. The note is a source already.
-- `Discard the edit` makes the next sync write the text of the wiki over the card.
+- `Discard the edit` makes the next sync write the text of the wiki over the card. It covers this edit only.
 - `<note file name>` is the base name of `<note path>`, for example `feedback-<card id>-<stamp>.md`.
 - Save as `llm_wiki_add_review-<card id>.json`.
 - The result holds the `id` of the item. The same title gives the same id. Each edit has its own note, so each edit adds its own item.

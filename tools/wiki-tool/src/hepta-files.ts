@@ -7,8 +7,8 @@
  * wiki wrote is never taken for the user's change.
  *
  * `discard-edits.json` lists the pages whose Heptabase edit the user chose to discard in the review tab (spec 6.6). The app
- * writes it (`mech:discard-mirror-edit`), `hepta plan-down` reads it, and `hepta record` takes a page out of it once the
- * card was written. The format is in `src/lib/mechanism-wiki/discard-edits.ts`, which the app shares.
+ * writes it (`mech:discard-mirror-edit`), `hepta plan-down` reads it (for the edit the user saw only, ruling W13), and
+ * `hepta record` takes a page out of it when it saves feedback or writes the card. The format is in `src/lib/mechanism-wiki/discard-edits.ts`, which the app shares.
  */
 import { readFileSync } from "node:fs"
 import {

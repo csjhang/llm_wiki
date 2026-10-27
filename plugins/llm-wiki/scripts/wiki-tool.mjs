@@ -3195,8 +3195,10 @@ function isSyncable(page) {
 *
 * `.llm-wiki/hepta/discard-edits.json` is a JSON array of page paths. The review action `mech:discard-mirror-edit`
 * adds the page of a `mirror-edited` item. The next `wiki-tool hepta plan-down` plans the normal `update` for a listed
-* page, instead of `skip-edited`, so the card gets the text of the wiki again. `hepta record` takes the page out of
-* the list when the card was written (`updated`, `retired`, or `forgotten`).
+* page, instead of `skip-edited`, so the card gets the text of the wiki again. This covers only the edit the user saw
+* (ruling W13): the card must not be newer than the `feedback_card_updated_at` that `hepta record` saved for that edit. A
+* newer edit is a new edit and needs a new click. `hepta record` takes the page out of the list when it saves feedback,
+* creates the card, or writes over the card (`feedback`, `created`, `updated`, `retired`, or `forgotten`).
 *
 * This module is pure. The app and the `wiki-tool` both import it, so there is one reader and one writer of the
 * format.
@@ -3261,8 +3263,8 @@ function renderDiscardEdits(pages) {
 * wiki wrote is never taken for the user's change.
 *
 * `discard-edits.json` lists the pages whose Heptabase edit the user chose to discard in the review tab (spec 6.6). The app
-* writes it (`mech:discard-mirror-edit`), `hepta plan-down` reads it, and `hepta record` takes a page out of it once the
-* card was written. The format is in `src/lib/mechanism-wiki/discard-edits.ts`, which the app shares.
+* writes it (`mech:discard-mirror-edit`), `hepta plan-down` reads it (for the edit the user saw only, ruling W13), and
+* `hepta record` takes a page out of it when it saves feedback or writes the card. The format is in `src/lib/mechanism-wiki/discard-edits.ts`, which the app shares.
 */
 const HEPTA_DIRECTORY = ".llm-wiki/hepta";
 /** The project-relative path of the outbox file of a page. */
@@ -4428,10 +4430,13 @@ function cardHash(body, properties) {
 * card for ever, and a page that is back and mirrored would be stopped by a card that is gone.
 *
 * A mirror card that the user edited is never overwritten: its page gets a `skip-edited`, whether
-* the page changed or not, until `hepta record` saves the edit as feedback. The one way round it is the user's own word:
-* a page that is in `.llm-wiki/hepta/discard-edits.json` (the "Discard the edit" option of the review item, spec 6.6) gets the
-* normal `update` instead, also when the page did not change, so the card gets the text of the wiki again. `hepta record`
-* takes the page out of that file when the card was written. The edit check needs the whole list
+* the page changed or not, until `hepta record` saves the edit as feedback. The one way round it is the user's own word,
+* and it covers only the edit the user saw (ruling W13). A page that is in `.llm-wiki/hepta/discard-edits.json` (the
+* "Discard the edit" option of the review item, spec 6.6) gets the normal `update` instead, also when the page did not change,
+* so the card gets the text of the wiki again, when the card is not newer than `feedback_card_updated_at`: the edit that
+* `hepta record` saved as feedback, and that the review item showed. A page without recorded feedback, and a card that was
+* edited again after the feedback, get `skip-edited` as for any edited card. `hepta record` takes the page out of the file
+* when it saves feedback, creates the card, or writes over the card. The edit check needs the whole list
 * of the mirror tag, so `--mirror-cards` is required once a card is mapped, and a list that is a failed result or
 * stops before its last page is refused. A card of the map that the list does not hold (taken out of the tag, or
 * deleted) gets no action at all and a problem, so a half-read list never makes a write. Every action that writes
@@ -4712,7 +4717,7 @@ function planPage(input, renderer, page, entry) {
 	});
 	const hash = cardHash(body, pageProperties(page, input));
 	let main;
-	const discarded = entry.status === "active" && input.discards.has(page.path);
+	const discarded = entry.status === "active" && discardCoversCard(input, page.path, entry);
 	if (entry.status !== "active" || hash !== entry.content_hash || discarded) main = !discarded && entry.status === "active" && onlyLinksChanged(input, renderer, page, entry.content_hash, resolved) ? {
 		op: "relink",
 		page: page.path,
@@ -4735,6 +4740,20 @@ function planPage(input, renderer, page, entry) {
 		notes: []
 	};
 	return finish(input, page.path, main, place, notes);
+}
+/**
+* True when the user chose to discard the edit of this page and the card holds no other edit than the one the user saw
+* (ruling W13). The edit the user saw is the one that `hepta record` saved as feedback: the card is not newer than
+* `feedback_card_updated_at`. Without recorded feedback, without a time on the card, or with a newer edit, nothing is covered:
+* the card is judged as any card (`editedCard`) and an edit is never overwritten without the word of the user.
+*/
+function discardCoversCard(input, path, entry) {
+	if (!input.discards.has(path) || entry.feedback_card_updated_at === void 0) return false;
+	const card = input.cards.get(entry.card_id);
+	if (!card?.updatedAt) return false;
+	const seen = Date.parse(entry.feedback_card_updated_at);
+	const now = Date.parse(card.updatedAt);
+	return !Number.isNaN(seen) && !Number.isNaN(now) && now <= seen;
 }
 /**
 * The only action of a page whose card waits for setup. The properties are those of a new card; a page that is gone,
@@ -4804,7 +4823,7 @@ function finish(input, path, main, place, notes) {
 			blockers: [`card ${entry.card_id} of ${path} is not in the mirror tag (removed from the tag or deleted?)`],
 			notes: []
 		};
-		checked = (input.discards.has(path) ? null : editedCard(entry, path, card)) ?? main;
+		checked = editedCard(entry, path, card) ?? main;
 		const stamp = card.updatedAt;
 		if (stamp !== void 0) {
 			if (checked?.op === "update" || checked?.op === "relink" || checked?.op === "retire") checked = {
@@ -5201,9 +5220,10 @@ function readContentFiles(paths, cardId, problems) {
 * It is for the `forget` action of plan-down and takes a retired entry only: the card of an active page is not gone.
 * A page that is mirrored again later gets a new card at the next plan.
 *
-* An `updated`, `retired`, or `forgotten` event also takes the page out of `.llm-wiki/hepta/discard-edits.json`, the list of
-* pages whose Heptabase edit the user chose to discard (spec 6.6). The write over the card has used up that choice; a later
-* edit of the card is a new edit. The map is saved first. When the file cannot be read, the event still works and the
+* A `feedback`, `created`, `updated`, `retired`, or `forgotten` event also takes the page out of
+* `.llm-wiki/hepta/discard-edits.json`, the list of pages whose Heptabase edit the user chose to discard (spec 6.6). The
+* choice covers only the edit the user saw (ruling W13): saving a new edit as feedback, a new card, or a write over the
+* card has used it up, and the next edit needs a new click. The map is saved first. When the file cannot be read, the event still works and the
 * result says so in `discardWarning`. The result has `"discardCleared": true` when the page was in the list.
 *
 * An `up-decision` event keeps the user's answer to a question of `plan-up` (an `ask` action): `skip` leaves the
@@ -5221,14 +5241,14 @@ const OPTION_SPEC$3 = {
 const FEEDBACK_DIRECTORY = "raw/sources/heptabase";
 const HASH_PATTERN = /^[0-9a-f]{64}$/;
 const HANDLERS = {
-	created: recordCreated,
+	created: (context) => spendDiscard(context, recordCreated(context)),
 	updated: (context) => spendDiscard(context, recordRewritten(context, "updated")),
 	relinked: (context) => recordRewritten(context, "relinked"),
 	"setup-done": recordSetupDone,
 	placed: recordPlaced,
 	retired: (context) => spendDiscard(context, recordRetired(context)),
 	forgotten: (context) => spendDiscard(context, recordForgotten(context)),
-	feedback: recordFeedback,
+	feedback: (context) => spendDiscard(context, recordFeedback(context)),
 	"up-decision": recordUpDecision
 };
 function record(args) {

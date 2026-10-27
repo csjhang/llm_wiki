@@ -43,9 +43,10 @@
  * It is for the `forget` action of plan-down and takes a retired entry only: the card of an active page is not gone.
  * A page that is mirrored again later gets a new card at the next plan.
  *
- * An `updated`, `retired`, or `forgotten` event also takes the page out of `.llm-wiki/hepta/discard-edits.json`, the list of
- * pages whose Heptabase edit the user chose to discard (spec 6.6). The write over the card has used up that choice; a later
- * edit of the card is a new edit. The map is saved first. When the file cannot be read, the event still works and the
+ * A `feedback`, `created`, `updated`, `retired`, or `forgotten` event also takes the page out of
+ * `.llm-wiki/hepta/discard-edits.json`, the list of pages whose Heptabase edit the user chose to discard (spec 6.6). The
+ * choice covers only the edit the user saw (ruling W13): saving a new edit as feedback, a new card, or a write over the
+ * card has used it up, and the next edit needs a new click. The map is saved first. When the file cannot be read, the event still works and the
  * result says so in `discardWarning`. The result has `"discardCleared": true` when the page was in the list.
  *
  * An `up-decision` event keeps the user's answer to a question of `plan-up` (an `ask` action): `skip` leaves the
@@ -95,14 +96,14 @@ interface RecordContext {
 type EventHandler = (context: RecordContext) => CommandResult
 
 const HANDLERS: Record<string, EventHandler> = {
-  created: recordCreated,
+  created: (context) => spendDiscard(context, recordCreated(context)),
   updated: (context) => spendDiscard(context, recordRewritten(context, "updated")),
   relinked: (context) => recordRewritten(context, "relinked"),
   "setup-done": recordSetupDone,
   placed: recordPlaced,
   retired: (context) => spendDiscard(context, recordRetired(context)),
   forgotten: (context) => spendDiscard(context, recordForgotten(context)),
-  feedback: recordFeedback,
+  feedback: (context) => spendDiscard(context, recordFeedback(context)),
   "up-decision": recordUpDecision,
 }
 

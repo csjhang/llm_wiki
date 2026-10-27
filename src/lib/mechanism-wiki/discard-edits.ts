@@ -3,8 +3,10 @@
  *
  * `.llm-wiki/hepta/discard-edits.json` is a JSON array of page paths. The review action `mech:discard-mirror-edit`
  * adds the page of a `mirror-edited` item. The next `wiki-tool hepta plan-down` plans the normal `update` for a listed
- * page, instead of `skip-edited`, so the card gets the text of the wiki again. `hepta record` takes the page out of
- * the list when the card was written (`updated`, `retired`, or `forgotten`).
+ * page, instead of `skip-edited`, so the card gets the text of the wiki again. This covers only the edit the user saw
+ * (ruling W13): the card must not be newer than the `feedback_card_updated_at` that `hepta record` saved for that edit. A
+ * newer edit is a new edit and needs a new click. `hepta record` takes the page out of the list when it saves feedback,
+ * creates the card, or writes over the card (`feedback`, `created`, `updated`, `retired`, or `forgotten`).
  *
  * This module is pure. The app and the `wiki-tool` both import it, so there is one reader and one writer of the
  * format.

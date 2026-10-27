@@ -307,7 +307,7 @@ The card exists, but its tag and properties are not set.
 6. If the tool refuses the edit, stop for this card. Show the message to the user. Do not run `record`.
 7. For an `update`, call `edit_card_properties` with the `properties` of the action. A `relink` has no properties.
 8. Get the card time. Run `record` with an `updated` event for an `update`, or a `relinked` event for a `relink`.
-9. The user can choose "Discard the edit" on a `mirror-edited` item in the app. The plan then gives a normal `update` for that page, also when the page did not change. Handle it like any `update`. The `updated` event takes the page out of the list.
+9. The user can choose "Discard the edit" on a `mirror-edited` item in the app. The plan then gives a normal `update` for that page, also when the page did not change. Handle it like any `update`. The `updated` event takes the page out of the list. A newer edit still gets a `skip-edited` action.
 
 ### retire
 

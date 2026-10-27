@@ -129,6 +129,11 @@ function requireItem(item: ReviewItem | undefined, action: string): ReviewItem {
   return item
 }
 
+/** An action that writes files runs only for the item type it was made for: a button that came another way does not. */
+function requireItemType(item: ReviewItem, type: ReviewItem["type"], action: string): void {
+  if (item.type !== type) throw new Error(`The action ${action} is for a ${type} review item, not for a ${item.type} item.`)
+}
+
 function projectRoot(projectPath: string): string {
   return normalizePath(projectPath).replace(/\/+$/, "")
 }
@@ -151,6 +156,7 @@ interface DomainProposal {
 }
 
 const DOMAINS_FILE = "domains.yaml"
+const NOT_A_MECHANISM_WIKI = `${DOMAINS_FILE} does not exist, so this project is not a mechanism wiki and has no domain to use instead.`
 /** The `domains` key with a block (or nothing) after it. */
 const DOMAINS_BLOCK = /^domains[ \t]*:[ \t]*(?:#.*)?$/
 /** The `domains` key with an empty value: `domains: {}`, `domains: ~`, or `domains: null`. */
@@ -653,8 +659,13 @@ async function dismissFusion(item: ReviewItem, ctx: ReviewActionContext): Promis
  * domain (`planUseExistingDomain` says which and how), the domain index is rebuilt, and version history gets one commit.
  * The plan is made before anything is written: a page that the app cannot edit stops the action with an error that
  * names it. A write that fails puts the pages that were written back. The item resolves last.
+ *
+ * The pages are read, planned, and written under the project lock that the ingest takes for its writes, so the action
+ * waits for a running ingest and an ingest waits for it. The picker is not behind the lock, because the user may take
+ * long to choose. `domains.yaml` is read again inside the lock: it may have changed while the picker was open.
  */
 async function useExistingDomain(item: ReviewItem, ctx: ReviewActionContext): Promise<void> {
+  requireItemType(item, "new-domain", USE_EXISTING_DOMAIN)
   const proposal = readProposal(item.description)
   const source = (item.sourcePath ?? "").trim()
   if (source === "") {
@@ -663,19 +674,21 @@ async function useExistingDomain(item: ReviewItem, ctx: ReviewActionContext): Pr
   if (ctx.chooseDomain === undefined) throw new Error("This screen cannot choose a domain.")
   const pp = projectRoot(ctx.projectPath)
 
-  const mechanism = await loadMechanismContext(pp)
-  if (mechanism === null) {
-    throw new Error(`${DOMAINS_FILE} does not exist, so this project is not a mechanism wiki and has no domain to use instead.`)
-  }
-  const domains = Object.keys(mechanism.domains.domains).filter((domain) => domain !== proposal.path)
+  const listed = await loadMechanismContext(pp)
+  if (listed === null) throw new Error(NOT_A_MECHANISM_WIKI)
+  const domains = Object.keys(listed.domains.domains).filter((domain) => domain !== proposal.path)
   if (domains.length === 0) {
     throw new Error(`${DOMAINS_FILE} lists no domain to use instead. Approve the proposed domain, or add a domain by hand.`)
   }
   const chosen = await ctx.chooseDomain(domains, proposal.path)
   if (chosen === null) return
-  if (!domains.includes(chosen)) throw new Error(`The domain "${chosen}" is not listed in ${DOMAINS_FILE}, so the pages cannot use it.`)
 
-  const { edits, indexFiles } = await withProjectLock(`${pp}\0wiki-pages`, async () => {
+  const { edits, indexFiles } = await withProjectLock(normalizePath(ctx.projectPath), async () => {
+    const mechanism = await loadMechanismContext(pp)
+    if (mechanism === null) throw new Error(NOT_A_MECHANISM_WIKI)
+    if (chosen === proposal.path || !hasOwn(mechanism.domains.domains, chosen)) {
+      throw new Error(`The domain "${chosen}" is not listed in ${DOMAINS_FILE}, so the pages cannot use it.`)
+    }
     const pages = await scanWikiPagesWith(pp, pageOfMarkdown)
     const plan = planUseExistingDomain(pages, { source, proposed: proposal.path, chosen })
     if (plan.problems.length > 0) {
@@ -701,29 +714,45 @@ async function useExistingDomain(item: ReviewItem, ctx: ReviewActionContext): Pr
   await refresh(ctx)
 }
 
-/** Write the new text of the pages, then rebuild the domain index. A failure puts the pages back, and the error goes on. */
+/**
+ * Write the new text of the pages, then rebuild the domain index. A failure puts the pages back, and when the index was
+ * being built, builds it again from the pages as they are now (best effort), so no index file keeps the new domain. The
+ * error goes on. When a page cannot be put back, the error names it.
+ */
 async function writeDomainChange(
   pp: string,
   mechanism: NonNullable<Awaited<ReturnType<typeof loadMechanismContext>>>,
   edits: readonly UseDomainEdit[],
 ): Promise<string[]> {
   const written: UseDomainEdit[] = []
+  let indexStarted = false
   try {
     for (const edit of edits) {
       await writeFile(`${pp}/${edit.path}`, edit.after)
       written.push(edit)
     }
-    // The index files are made from the pages, so the next rebuild repairs them if this one stops half way.
+    indexStarted = true
     return await rebuildDomainIndex(pp, mechanism)
   } catch (err) {
-    for (const edit of written.reverse()) {
+    const stuck: string[] = []
+    for (const edit of [...written].reverse()) {
       try {
         await writeFile(`${pp}/${edit.path}`, edit.before)
       } catch (restoreError) {
+        stuck.push(edit.path)
         console.warn(`[review-actions] could not put back ${edit.path}:`, restoreError instanceof Error ? restoreError.message : restoreError)
       }
     }
-    throw err
+    if (indexStarted) {
+      try {
+        await rebuildDomainIndex(pp, mechanism)
+      } catch (rebuildError) {
+        console.warn("[review-actions] could not build the domain index again:", rebuildError instanceof Error ? rebuildError.message : rebuildError)
+      }
+    }
+    if (stuck.length === 0) throw err
+    const reason = err instanceof Error ? err.message : String(err)
+    throw new Error(`${reason}. Some pages could not be put back and still have the new domain: ${stuck.join(", ")}.`)
   }
 }
 
@@ -731,10 +760,12 @@ async function writeDomainChange(
 
 /**
  * Add the page of the item (`affectedPages[0]`) to `.llm-wiki/hepta/discard-edits.json`. The next `wiki-tool hepta plan-down`
- * then plans the normal `update` for that page instead of `skip-edited`, and `hepta record` takes the page out again. The
- * edit is already a source: the sync saved it as a feedback note, so "Keep as feedback" is a plain dismissal.
+ * then plans the normal `update` for that page instead of `skip-edited` (for the edit the user saw, ruling W13), and
+ * `hepta record` takes the page out again. The edit is already a source: the sync saved it as a feedback note, so
+ * "Keep as feedback" is a plain dismissal.
  */
 async function discardMirrorEdit(item: ReviewItem, ctx: ReviewActionContext): Promise<void> {
+  requireItemType(item, "mirror-edited", DISCARD_MIRROR_EDIT)
   const raw = (item.affectedPages?.[0] ?? "").trim()
   const page = discardEditPage(raw)
   if (page === null) {

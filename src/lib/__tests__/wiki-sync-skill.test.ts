@@ -119,7 +119,7 @@ describe("wiki-sync skill", () => {
       '"options": [{ "label": "Keep as feedback", "action": "dismiss" }, { "label": "Discard the edit", "action": "mech:discard-mirror-edit" }]',
     )
     expect(call).toContain("`Keep as feedback` only closes the item. The note is a source already.")
-    expect(call).toContain("`Discard the edit` makes the next sync write the text of the wiki over the card.")
+    expect(call).toContain("`Discard the edit` makes the next sync write the text of the wiki over the card. It covers this edit only.")
     // The actions are in the list of ruling S17, so the app takes the item.
     const actions = [...call.matchAll(/"action": "([^"]+)"/g)].map((match) => match[1])
     expect(actions).toEqual(["dismiss", "mech:discard-mirror-edit"])
@@ -130,6 +130,8 @@ describe("wiki-sync skill", () => {
     const update = skill.slice(skill.indexOf("### update and relink"), skill.indexOf("### retire"))
     expect(update).toContain("Discard the edit")
     expect(update).toContain("The `updated` event takes the page out of the list.")
+    // Ruling W13: the choice covers the edit the user saw, so a newer edit is still a skip-edited action.
+    expect(update).toContain("A newer edit still gets a `skip-edited` action.")
   })
 
   it("passes project_id, the project folder, in every call to a project tool of the llm_wiki MCP", () => {

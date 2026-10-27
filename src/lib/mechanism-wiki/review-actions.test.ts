@@ -4,6 +4,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 import { createTempProject, fileExists, readFileRaw, realFs, writeFileRaw } from "@/test-helpers/fs-temp"
+import { withProjectLock } from "@/lib/project-mutex"
 import { buildActionCommitMessage } from "@/lib/commit-message"
 import { readDiscardEdits } from "../../../tools/wiki-tool/src/hepta-files"
 import { MECHANISM_TEMPLATE_FILES } from "@/lib/mechanism-template"
@@ -13,14 +14,14 @@ import { useWikiStore } from "@/stores/wiki-store"
 import type { MechanismContext } from "./context"
 import { domainIndexPath } from "./domain-index-render"
 
-/** A test can make the n-th call of `writeFile` fail (n counts from 1; 0 means never). */
-const writes = vi.hoisted(() => ({ failAt: 0, count: 0 }))
+/** A test can make the n-th calls of `writeFile` fail (n counts from 1; an empty list means never). */
+const writes = vi.hoisted(() => ({ failAt: [] as number[], count: 0 }))
 
 vi.mock("@/commands/fs", () => ({
   ...realFs,
   writeFile: async (path: string, contents: string): Promise<void> => {
     writes.count += 1
-    if (writes.failAt === writes.count) throw new Error("disk full")
+    if (writes.failAt.includes(writes.count)) throw new Error("disk full")
     return realFs.writeFile(path, contents)
   },
 }))
@@ -61,7 +62,7 @@ beforeEach(async () => {
   reading = `${root}/reading`
   work = `${root}/work`
   loader.override = undefined
-  writes.failAt = 0
+  writes.failAt = []
   writes.count = 0
   embedding.embedPage.mockClear()
 })
@@ -1511,12 +1512,119 @@ describe("mech:use-existing-domain", () => {
     const { ctx, resolveItem } = makeCtx(work, { chooseDomain: chooser(CHOSEN), commit })
     writes.count = 0
     // The third page write fails: the first two are written, then put back.
-    writes.failAt = 3
+    writes.failAt = [3]
 
     await expect(handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", ctx)).rejects.toThrow(/disk full/)
 
     for (const [path, text] of Object.entries(PAGES)) expect(await read(path), path).toBe(text)
     expect(commit).not.toHaveBeenCalled()
+    expect(resolveItem).not.toHaveBeenCalled()
+  })
+
+  it("puts the pages back and builds the index again when the index cannot be written", async () => {
+    await setUpIngest()
+    const commit = vi.fn(async () => {})
+    const { ctx, resolveItem } = makeCtx(work, { chooseDomain: chooser(CHOSEN), commit })
+    // Writes 1 to 4 are the pages; write 5 is the first index file.
+    writes.failAt = [5]
+
+    await expect(handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", ctx)).rejects.toThrow(/disk full/)
+
+    for (const [path, text] of Object.entries(PAGES)) expect(await read(path), path).toBe(text)
+    // The index was built again from the pages as they are now: the root index exists, and the chosen domain lists no page of the ingest.
+    expect(await fileExists(`${work}/wiki/index.md`)).toBe(true)
+    expect(await read(domainIndexPath(CHOSEN))).not.toContain("Alpha")
+    expect(commit).not.toHaveBeenCalled()
+    expect(resolveItem).not.toHaveBeenCalled()
+  })
+
+  it("says which page could not be put back when the restore fails too", async () => {
+    await setUpIngest()
+    const { ctx, resolveItem } = makeCtx(work, { chooseDomain: chooser(CHOSEN) })
+    // Write 5 (the first index file) fails. The restore writes the pages in reverse order, writes 6 to 9: the 2nd one fails.
+    writes.failAt = [5, 7]
+
+    const error = await handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", ctx).then(
+      () => null,
+      (reason: unknown) => (reason instanceof Error ? reason : new Error(String(reason))),
+    )
+
+    expect(error?.message).toMatch(/disk full/)
+    expect(error?.message).toMatch(/could not be put back/)
+    expect(error?.message).toContain("wiki/mechanisms/handshake.md")
+    expect(error?.message).not.toContain("wiki/sources/note.md")
+    expect(resolveItem).not.toHaveBeenCalled()
+  })
+
+  it("takes the project lock of the ingest, so it waits for a running ingest write", async () => {
+    await setUpIngest()
+    const chooseDomain = chooser(CHOSEN)
+    const { ctx, resolveItem } = makeCtx(work, { chooseDomain })
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const holder = withProjectLock(work, () => held)
+
+    const action = handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", ctx)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+
+    // The picker is not behind the lock, but nothing is read or written while the lock is held.
+    expect(chooseDomain).toHaveBeenCalledTimes(1)
+    for (const [path, text] of Object.entries(PAGES)) expect(await read(path), path).toBe(text)
+    expect(resolveItem).not.toHaveBeenCalled()
+
+    release()
+    await holder
+    expect(await action).toBe(true)
+    expect(await read("wiki/concepts/alpha.md")).toContain(`domain: ${CHOSEN}`)
+    expect(resolveItem).toHaveBeenCalledTimes(1)
+  })
+
+  it("reads domains.yaml again inside the lock", async () => {
+    await setUpIngest()
+    const { ctx, resolveItem } = makeCtx(work, { chooseDomain: chooser(CHOSEN) })
+    let release!: () => void
+    const held = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const holder = withProjectLock(work, () => held)
+
+    const action = handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", ctx)
+    const outcome = action.then(
+      () => null,
+      (reason: unknown) => (reason instanceof Error ? reason : new Error(String(reason))),
+    )
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    // While the action waits, the chosen domain leaves domains.yaml.
+    await writeFileRaw(`${work}/domains.yaml`, LISTED_DOMAINS.replace(/ {2}hardware\/async-circuits:[\s\S]*?whiteboards: \[\] {3}# Optional\.\n/, ""))
+    release()
+    await holder
+
+    expect((await outcome)?.message).toMatch(/not listed in domains\.yaml/)
+    for (const [path, text] of Object.entries(PAGES)) expect(await read(path), path).toBe(text)
+    expect(resolveItem).not.toHaveBeenCalled()
+  })
+
+  it("refuses an item that is not a new-domain item, and writes nothing", async () => {
+    await setUpIngest()
+    for (const type of ["confirm", "mirror-edited", "fusion-candidate"] as const) {
+      const chooseDomain = chooser(CHOSEN)
+      const { ctx, resolveItem } = makeCtx(work, { chooseDomain })
+      await expect(handleMechanismReviewAction(domainItem({ type }), "mech:use-existing-domain", ctx), type).rejects.toThrow(/new-domain/)
+      expect(chooseDomain).not.toHaveBeenCalled()
+      expect(resolveItem).not.toHaveBeenCalled()
+    }
+    for (const [path, text] of Object.entries(PAGES)) expect(await read(path), path).toBe(text)
+  })
+
+  it("refuses a plain wiki: a project without domains.yaml has no domain to use", async () => {
+    await writeFileRaw(`${work}/wiki/concepts/alpha.md`, PAGES["wiki/concepts/alpha.md"])
+    const chooseDomain = chooser(CHOSEN)
+    const { ctx, resolveItem } = makeCtx(work, { chooseDomain })
+    await expect(handleMechanismReviewAction(domainItem(), "mech:use-existing-domain", ctx)).rejects.toThrow(/domains\.yaml does not exist/)
+    expect(chooseDomain).not.toHaveBeenCalled()
+    expect(await read("wiki/concepts/alpha.md")).toBe(PAGES["wiki/concepts/alpha.md"])
     expect(resolveItem).not.toHaveBeenCalled()
   })
 
@@ -1639,6 +1747,17 @@ describe("mech:discard-mirror-edit", () => {
     await writeFileRaw(`${work}/${FILE}`, "{")
     await expect(handleMechanismReviewAction(mirrorItem(), "mech:discard-mirror-edit", ctx)).rejects.toThrow(/discard-edits\.json/)
     expect(await readFileRaw(`${work}/${FILE}`)).toBe("{")
+    expect(resolveItem).not.toHaveBeenCalled()
+  })
+
+  it("refuses an item that is not a mirror-edited item, and writes nothing", async () => {
+    await setUpReading()
+    await setUpWork()
+    const { ctx, resolveItem } = makeCtx(work)
+    for (const type of ["confirm", "new-domain", "fusion-candidate"] as const) {
+      await expect(handleMechanismReviewAction(mirrorItem({ type }), "mech:discard-mirror-edit", ctx), type).rejects.toThrow(/mirror-edited/)
+    }
+    expect(await fileExists(`${work}/${FILE}`)).toBe(false)
     expect(resolveItem).not.toHaveBeenCalled()
   })
 

@@ -29,10 +29,13 @@
  * card for ever, and a page that is back and mirrored would be stopped by a card that is gone.
  *
  * A mirror card that the user edited is never overwritten: its page gets a `skip-edited`, whether
- * the page changed or not, until `hepta record` saves the edit as feedback. The one way round it is the user's own word:
- * a page that is in `.llm-wiki/hepta/discard-edits.json` (the "Discard the edit" option of the review item, spec 6.6) gets the
- * normal `update` instead, also when the page did not change, so the card gets the text of the wiki again. `hepta record`
- * takes the page out of that file when the card was written. The edit check needs the whole list
+ * the page changed or not, until `hepta record` saves the edit as feedback. The one way round it is the user's own word,
+ * and it covers only the edit the user saw (ruling W13). A page that is in `.llm-wiki/hepta/discard-edits.json` (the
+ * "Discard the edit" option of the review item, spec 6.6) gets the normal `update` instead, also when the page did not change,
+ * so the card gets the text of the wiki again, when the card is not newer than `feedback_card_updated_at`: the edit that
+ * `hepta record` saved as feedback, and that the review item showed. A page without recorded feedback, and a card that was
+ * edited again after the feedback, get `skip-edited` as for any edited card. `hepta record` takes the page out of the file
+ * when it saves feedback, creates the card, or writes over the card. The edit check needs the whole list
  * of the mirror tag, so `--mirror-cards` is required once a card is mapped, and a list that is a failed result or
  * stops before its last page is refused. A card of the map that the list does not hold (taken out of the tag, or
  * deleted) gets no action at all and a problem, so a half-read list never makes a write. Every action that writes
@@ -441,7 +444,7 @@ function planPage(input: PlanInput, renderer: MirrorRenderer, page: WikiPage, en
   const hash = cardHash(body, pageProperties(page, input))
   let main: DownAction | undefined
   // A discarded edit is still in the card, so the card gets the text of the wiki even when the page did not change.
-  const discarded = entry.status === "active" && input.discards.has(page.path)
+  const discarded = entry.status === "active" && discardCoversCard(input, page.path, entry)
   if (entry.status !== "active" || hash !== entry.content_hash || discarded) {
     const linksOnly = !discarded && entry.status === "active" && onlyLinksChanged(input, renderer, page, entry.content_hash, resolved)
     main = linksOnly
@@ -459,6 +462,21 @@ function planPage(input: PlanInput, renderer: MirrorRenderer, page: WikiPage, en
   }
   const { place, notes } = entry.status === "active" ? placement(page, entry) : { place: undefined, notes: [] }
   return finish(input, page.path, main, place, notes)
+}
+
+/**
+ * True when the user chose to discard the edit of this page and the card holds no other edit than the one the user saw
+ * (ruling W13). The edit the user saw is the one that `hepta record` saved as feedback: the card is not newer than
+ * `feedback_card_updated_at`. Without recorded feedback, without a time on the card, or with a newer edit, nothing is covered:
+ * the card is judged as any card (`editedCard`) and an edit is never overwritten without the word of the user.
+ */
+function discardCoversCard(input: PlanInput, path: string, entry: PageEntry): boolean {
+  if (!input.discards.has(path) || entry.feedback_card_updated_at === undefined) return false
+  const card = input.cards.get(entry.card_id)
+  if (!card?.updatedAt) return false
+  const seen = Date.parse(entry.feedback_card_updated_at)
+  const now = Date.parse(card.updatedAt)
+  return !Number.isNaN(seen) && !Number.isNaN(now) && now <= seen
 }
 
 /**
@@ -531,8 +549,7 @@ function finish(
     if (!card) {
       return { blockers: [`card ${entry.card_id} of ${path} is not in the mirror tag (removed from the tag or deleted?)`], notes: [] }
     }
-    // The user chose to discard the edit: the card is overwritten as for a card nobody edited.
-    checked = (input.discards.has(path) ? null : editedCard(entry, path, card)) ?? main
+    checked = editedCard(entry, path, card) ?? main
     const stamp = card.updatedAt
     if (stamp !== undefined) {
       if (checked?.op === "update" || checked?.op === "relink" || checked?.op === "retire") checked = { ...checked, cardUpdatedAt: stamp }

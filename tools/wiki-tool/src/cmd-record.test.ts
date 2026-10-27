@@ -380,6 +380,34 @@ describe("hepta record", () => {
       expect(readFileSync(join(project, DISCARD_FILE), "utf8")).toBe(text)
     })
 
+    it("is cleared by feedback: each new edit needs a new click (ruling W13)", async () => {
+      const project = await createdProject()
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([PAGE, OTHER]))
+      const card = cardFile(project, "card.json", "# Event Driven\n\nEdited.")
+      const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED }, [card])
+      expect(result.exitCode).toBe(0)
+      expect(result.output).toMatchObject({ ok: true, event: "feedback", page: PAGE, discardCleared: true })
+      expect(listed(project)).toEqual([OTHER])
+      // The feedback is saved, as it is without a list.
+      expect(loadCardMap(project).pages[PAGE].feedback_card_updated_at).toBe(EDITED)
+    })
+
+    it("is cleared by created: a new card has no edit to discard", async () => {
+      const project = makeProject({ [PAGE]: mechanism() })
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([PAGE, OTHER]))
+      const result = await record(project, { type: "created", page: PAGE, cardId: id(21), cardUpdatedAt: NOW, contentHash: HASH_A })
+      expect(result.output).toMatchObject({ ok: true, event: "created", page: PAGE, discardCleared: true })
+      expect(listed(project)).toEqual([OTHER])
+    })
+
+    it("is not cleared by a feedback event that is refused", async () => {
+      const project = await createdProject()
+      writeProjectFile(project, DISCARD_FILE, JSON.stringify([PAGE]))
+      const result = await record(project, { type: "feedback", page: PAGE, cardId: id(21), cardUpdatedAt: EDITED })
+      expect(result.exitCode).toBe(2)
+      expect(listed(project)).toEqual([PAGE])
+    })
+
     it("is also cleared by retired and by forgotten, because those events write over the card", async () => {
       const project = await createdProject()
       writeProjectFile(project, DISCARD_FILE, JSON.stringify([PAGE, OTHER]))

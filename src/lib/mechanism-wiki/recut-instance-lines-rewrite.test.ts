@@ -1,5 +1,5 @@
 /**
- * instances.test.ts - tests for the rewrite of the `(<domain>)` of Known instances lines (ruling U4).
+ * recut-instance-lines-rewrite.test.ts - tests for the rewrite of the `(<domain>)` of Known instances lines (ruling U4).
  *
  * A line has the form `- [[<slug>]] (<domain>): <term>` under the heading "Known instances" (or its Chinese
  * variants). The rest of the page must not change. Slugs and domains are placeholders.
