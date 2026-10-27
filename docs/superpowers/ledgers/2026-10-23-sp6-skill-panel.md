@@ -21,3 +21,47 @@ Ruling W3: the lint reminder counts like `lint changed-domains` `ingestsSince`: 
 Ruling W4: Task 6 adds the spec 6.6 options: new-domain "Use an existing domain" (`mech:use-existing-domain` with a picker; rewrites the ingest's pages and commits) and mirror-edited "Keep as feedback" (dismissal) / "Discard the edit" (`mech:discard-mirror-edit` → `.llm-wiki/hepta/discard-edits.json` → next plan-down updates; `record updated` clears it). S17's allowed list gains `mech:discard-mirror-edit`. — Why: spec 6.6 is binding; T16 was deferred here. — Cost if wrong: two actions.
 Ruling W8: Task 6 also fixes `percent_decode` (S20). — Why: it is reachable through the review filters. — Cost if wrong: none.
 Task 1: dispatched (sonnet); base after the plan-amend commit
+Task 1: DONE f49a2bd (mocks 4417); key `buttons`; blank input left out; whitespace in an input value throws; review dispatched (haiku)
+Task 1: review Needs fixes (1 Important: commandFor refuses whitespace only; `;`/quotes/`$(` pass); fix round 1 dispatched (resume implementer; fix base f49a2bd)
+Task 1: fix round 1 done 22529cf (mocks 4447); controller scoped re-review of the 2-file diff: items 1-5 addressed (UUID allowlist for whiteboard, safe-word path rule, args words, duplicate skill refused, trimmed label)
+Task 1: complete (303211e..22529cf)
+Task 2: dispatched (sonnet); base 22529cf
+Task 2: DONE_WITH_CONCERNS 40a6a35 (cargo terminal_launch 34, mocks 4449); not run on macOS/Windows (builders unit-tested on Linux)
+Ruling W9: on Windows the `wt` launcher runs `cmd /k claude <command>` inside the tab (an npm install gives `claude.cmd`, which a no-shell start does not find). Accept: the path must be absolute and the command must start with `/`; success means the launcher started. — Why: the npm install is the common case. — Cost if wrong: one extra cmd layer in the tab.
+Task 2: review dispatched (sonnet), with W9 as a known fix
+Task 2: review Approved (0 Critical, 0 Important); fix round 1 for W9 + UNC paths + test gaps; deferred: is_absolute_like per host, tcsh `!`, repeated map; manual checks needed on Windows (wt quoting, %VAR% in -d), macOS, Debian x-terminal-emulator
+Task 2: fix round 1 dispatched (resume implementer; fix base 40a6a35)
+Task 2: fix round 1 done e5bc9e2 (cargo terminal_launch 35); controller scoped re-review: W9 (wt runs cmd /k claude), one shared Windows refused set, UNC refused, tests added
+Task 2: complete (22529cf..e5bc9e2)
+Task 3: dispatched (sonnet); base e5bc9e2; carries W1
+Task 3: DONE_WITH_CONCERNS e4f197a (mocks 4525, cargo claude_cli 10, terminal_launch 35); new Rust `claude_cli_run_skill` (`claude -p --output-format stream-json --verbose "<command>"`, no isolation, no permission flag); W1 section added to wiki-sync
+Ruling W10: a background run needs the folder's trust prompt accepted once; Task 5 adds the README step and a panel hint. — Why: Claude Code ignores the project allow list in -p runs until the folder is trusted. — Cost if wrong: one hint line.
+Task 3: review dispatched (sonnet)
+Task 3: review Needs fixes (1 Important: a running write-capable run can be started again → duplicate cards risk); fix round 1 dispatched (resume implementer; fix base e4f197a)
+Task 3: fix round 1 done 20a4368 (mocks 4542); controller scoped re-review: the run guard is in the disabled state and in the press handler (ref); denied tools → warning status; last run tied to the project; whiteboard list reloads after a sync; Rules line amended. Deferred: no DOM test for the press handler (no jsdom); progress grows; mechanism check only on project change
+Task 3: complete (e5bc9e2..20a4368)
+Task 4: dispatched (sonnet); base 20a4368; carries W3
+Task 4: DONE_WITH_CONCERNS 82aa05f (mocks 4579, cargo git_history 100 incl. 2 parity tests with the bundle)
+Ruling W11: the `zh` locale is Simplified Chinese, so `skillPanel.lintReminder` in zh.json is written in Simplified Chinese like its neighbours; the panel.yaml button labels stay Traditional (the plan fixes them). Accept: the toggle sits in Settings > Maintenance and applies at once; parity tests skip when node is missing; the reminder reloads on panel open and after a wiki-lint run. — Why: one script per locale file. — Cost if wrong: one string.
+Task 4: review dispatched (haiku), with W11 as a known fix
+Task 4: review Approved with conditions (W11 zh; M1 nested-repo hint; M2 parity tests assert without node); fix round 1 dispatched (resume implementer; fix base 82aa05f)
+SP6 Task 4 fix round INTERRUPTED by the usage limit (resets 22:00 UTC 2026-10-26). Uncommitted files at the stop: 0 (committed as a WIP commit if any). Resume: SendMessage to agent a25d20009247ff307 ("continue the fix round; your files are committed in the WIP commit if one exists"), then the scoped re-review, then Task 5 (notes ready), Task 6 (notes ready), SP6 final review.
+RESUMED by the 6-hour check (23:02 UTC): Task 4 fix round agent a25d20009247ff307 resumed
+Task 4: fix round 1 done 1f755f4 (mocks 4584, cargo git_history 100 with both parity tests run); controller scoped re-review: W11 zh Simplified with the Traditional button word quoted; nested-repo hint; parity tests assert fixed counts
+Task 4: complete (20a4368..1f755f4)
+Task 5: dispatched (sonnet); base 1f755f4; carries W2, W10
+Task 5: DONE_WITH_CONCERNS 2368b06 (mocks 4624); accept: the read-only notice is the fixed Traditional text of the brief; a new template README holds the W2/W10 setup steps; the Heptabase plugin prefix is unconfirmed (README says how to check with /mcp); review dispatched (haiku)
+Task 5: review Needs fixes (0 Critical, 2 Important: page-links Create/Draft write wiki/ pages on a read-only page; the allow list lets background runs push/reset and use every Heptabase tool)
+Ruling W12: the template allow list names each Heptabase tool the skills use (both prefixes), keeps `mcp__llm-wiki` server-wide, and adds deny rules for destructive git commands and `rm`. — Why: a background run must not be able to push, reset, or remove whiteboard objects. — Cost if wrong: a skill that later needs a new Heptabase tool gets one prompt until the list is updated.
+Task 5: fix round 1 dispatched (resume implementer; fix base 2368b06)
+Task 5: fix round 1 done f1549d0 (mocks 4635); controller scoped re-review: 26 per-tool Heptabase rules (13 tools x 2 prefixes, read_system_manual_page accepted), mcp__llm-wiki, 9 deny rules, PageLinksPanel readOnly prop; README notes deny rules match the usual form only
+Task 5: complete (1f755f4..f1549d0)
+Task 6: dispatched (sonnet); base f1549d0; carries W4, W8, S17
+Task 6: DONE_WITH_CONCERNS 6ef1272 af44043 (mocks 4697, mcp 56, cargo api_server 73); moved frontmatter-edit + instance-line editor to src/lib (one copy); discard cleared on updated/retired/forgotten; review dispatched (sonnet)
+Task 6: review Needs fixes (0 Critical, 2 Important: "Discard the edit" bypassed editedCard, so later edits and API-planted discards overwrite user edits without consent; "Use an existing domain" used its own lock, not the ingest's)
+Ruling W13: a discard covers only the edit the user saw: plan-down updates a listed page only when the card time is not later than `feedback_card_updated_at`; no recorded feedback → `skip-edited`; `record feedback`/`created` clear the entry. — Why: SP3 Q3, a user edit is never overwritten without consent. — Cost if wrong: one more click after a new edit.
+Task 6: fix round 1 dispatched (resume implementer; fix base af44043)
+Task 6: fix round 1 done a8813d3 (mocks 4710, mcp 56); accept: a card with no time in the mirror list is never forced; commit and resolve run outside the lock; scoped re-review dispatched (haiku)
+Task 6: re-review clean (5 addressed); minor (deferred): the lock tests prove the wait by a 50 ms sleep; a page whose write throws mid-way is neither restored nor named (pre-existing in writeDomainChange)
+Task 6: complete (f1549d0..a8813d3)
+SP6 final review dispatched (opus), range 65a331b..a8813d3
