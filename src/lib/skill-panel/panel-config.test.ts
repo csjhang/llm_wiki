@@ -88,6 +88,31 @@ describe("parsePanelYaml", () => {
     expect(pathsOf(parsePanelYaml(text, DESCRIPTIONS))).toEqual(["buttons[3].skill"])
   })
 
+  it("rejects two buttons with the same label: the panel finds the run of a button by its label", () => {
+    const text = SAMPLE.replace("label: Lint", "label: Sync")
+    const result = parsePanelYaml(text, DESCRIPTIONS)
+    expect(pathsOf(result)).toEqual(["buttons[2].label"])
+    if (result.ok) throw new Error("expected issues")
+    expect(result.issues[0].message).toBe('duplicate label "Sync"')
+  })
+
+  it("counts a label with spaces around it as the same label", () => {
+    const text = SAMPLE.replace("label: Lint", 'label: "  Sync "')
+    expect(pathsOf(parsePanelYaml(text, DESCRIPTIONS))).toEqual(["buttons[2].label"])
+  })
+
+  it("names the skill only when the skill and the label are both duplicates", () => {
+    const text = `${SAMPLE}  - skill: wiki-lint
+    label: Lint
+    mode: background
+`
+    expect(pathsOf(parsePanelYaml(text, DESCRIPTIONS))).toEqual(["buttons[3].skill"])
+  })
+
+  it("keeps two labels that differ", () => {
+    expect(valueOf(parsePanelYaml(SAMPLE, DESCRIPTIONS)).map((entry) => entry.label)).toEqual(["Sync", "Fuse", "Lint"])
+  })
+
   it("accepts args made of safe words split by single spaces", () => {
     const text = SAMPLE.replace("args: --yes", 'args: "--yes --dry-run wiki/example.md"')
     expect(valueOf(parsePanelYaml(text, DESCRIPTIONS))[0].args).toBe("--yes --dry-run wiki/example.md")

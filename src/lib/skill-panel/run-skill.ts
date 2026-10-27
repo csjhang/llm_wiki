@@ -49,8 +49,8 @@ export interface RunSkillDeps {
   projectPath: string
   /** `claude_cli_detect`. */
   detectClaude(): Promise<{ installed: boolean; error?: string | null }>
-  /** Start `claude -p "<command>"` in the project. Resolves when the process has started. */
-  spawnClaude(projectPath: string, command: string, handlers: SkillRunHandlers): Promise<void>
+  /** Start `claude -p "<command>"` in the project. Resolves to the stream id when the process has started. */
+  spawnClaude(projectPath: string, command: string, handlers: SkillRunHandlers): Promise<string>
   /** `open_claude_terminal`. Resolves to the name of the launcher. */
   openTerminal(projectPath: string, command: string): Promise<string>
   copy(text: string): Promise<void>
@@ -336,8 +336,9 @@ export async function runSkill(
     deps.activity.updateItem(itemId, { status, detail })
   }
 
+  let streamId: string
   try {
-    await deps.spawnClaude(deps.projectPath, command, {
+    streamId = await deps.spawnClaude(deps.projectPath, command, {
       onLine(line) {
         monitor.feed(line)
         show()
@@ -360,6 +361,7 @@ export async function runSkill(
     detail: command,
     filesWritten: [],
     projectPath: deps.projectPath,
+    streamId,
   })
   show()
   return "started"

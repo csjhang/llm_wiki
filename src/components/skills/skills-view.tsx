@@ -11,7 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import type { TFunction } from "i18next"
-import { AlertCircle, AlertTriangle, CheckCircle2, Loader2, Stethoscope } from "lucide-react"
+import { AlertCircle, AlertTriangle, Ban, CheckCircle2, Loader2, Stethoscope } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { openClaudeTerminal } from "@/commands/terminal"
 import { useMechanismWiki } from "@/hooks/use-mechanism-wiki"
@@ -40,6 +40,12 @@ export interface SkillRunView {
 
 /** The skill whose run fills the whiteboard list (`heptabase-map.json`). When it ends, the list is read again. */
 export const WHITEBOARD_SOURCE_SKILL = "wiki-sync"
+
+/**
+ * The skill whose card says not to start it while a conversation runs the Down steps (ruling W15).
+ * Two Down runs at once can plan the same new page and create two cards. The tool has no lock for it.
+ */
+export const DOWN_HINT_SKILL = "wiki-sync"
 
 // ---- runs ----
 
@@ -218,6 +224,12 @@ function SkillCard({
         </p>
       )}
 
+      {entry.skill === DOWN_HINT_SKILL && (
+        <p data-down-hint="" className="text-xs text-muted-foreground">
+          {t("skillPanel.downHint")}
+        </p>
+      )}
+
       {showPicker && (
         <label className="block space-y-1 text-xs">
           <span className="text-muted-foreground">{t("skillPanel.whiteboard")}</span>
@@ -269,6 +281,7 @@ function SkillCard({
             {run.status === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500" />}
             {run.status === "warning" && <AlertTriangle className="h-3 w-3 text-amber-500" />}
             {run.status === "error" && <AlertCircle className="h-3 w-3 text-destructive" />}
+            {run.status === "cancelled" && <Ban className="h-3 w-3 text-muted-foreground" />}
             <span>
               {t("skillPanel.lastRun")}: {t(`skillPanel.status.${run.status}`)}
             </span>

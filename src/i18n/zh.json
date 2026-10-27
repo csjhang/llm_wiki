@@ -51,7 +51,8 @@
     "lastRun": "上次运行",
     "lintReminder": "已累积 {{count}} 次收录，建议执行“健檢”",
     "trustHint": "首次后台运行前，请先在 wiki 文件夹中打开一次 Claude Code（在该文件夹中运行 claude），并接受信任提示。",
-    "status": { "running": "运行中", "done": "完成", "warning": "完成，但有工具被拒绝", "error": "失败" }
+    "downHint": "对话中正在运行 wiki-sync 或 wiki-fuse 时，请不要运行它。",
+    "status": { "running": "运行中", "done": "完成", "warning": "完成，但有工具被拒绝", "error": "失败", "cancelled": "已取消" }
   },
   "updateBanner": {
     "message": "新版本 {{version}} 已发布",

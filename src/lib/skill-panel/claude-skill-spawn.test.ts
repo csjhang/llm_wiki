@@ -11,7 +11,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/core", () => ({ invoke: mocks.invoke }))
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }))
 
-import { detectClaudeCode, spawnClaudeSkill } from "./claude-skill-spawn"
+import { detectClaudeCode, killClaudeSkill, spawnClaudeSkill } from "./claude-skill-spawn"
 
 function handlers(): SkillRunHandlers & { lines: string[]; exits: Array<{ code: number | null; stderr: string }> } {
   const lines: string[] = []
@@ -57,6 +57,14 @@ describe("spawnClaudeSkill", () => {
     expect([...mocks.listeners.keys()].sort()).toEqual([`claude-cli:${streamId}`, `claude-cli:${streamId}:done`])
   })
 
+  it("resolves to the stream id of the run, the one in the topics and in the call", async () => {
+    const streamId = await spawnClaudeSkill("/home/user/example-wiki", "/wiki-lint", handlers())
+
+    const [, payload] = mocks.invoke.mock.calls[0]
+    expect(streamId).toBe((payload as { streamId: string }).streamId)
+    expect([...mocks.listeners.keys()]).toContain(`claude-cli:${streamId}`)
+  })
+
   it("passes each stdout line, then the exit, and stops listening at the exit", async () => {
     const h = handlers()
     await spawnClaudeSkill("/home/user/example-wiki", "/wiki-lint", h)
@@ -90,6 +98,20 @@ describe("spawnClaudeSkill", () => {
     )
 
     expect(mocks.unlistened).toHaveLength(2)
+  })
+})
+
+describe("killClaudeSkill", () => {
+  it("asks claude_cli_kill to stop the run with this stream id", async () => {
+    await killClaudeSkill("stream-1")
+
+    expect(mocks.invoke).toHaveBeenCalledWith("claude_cli_kill", { streamId: "stream-1" })
+  })
+
+  it("rejects with the error of the call, so the panel can name it", async () => {
+    mocks.invoke.mockRejectedValue("ipc failed")
+
+    await expect(killClaudeSkill("stream-1")).rejects.toBe("ipc failed")
   })
 })
 

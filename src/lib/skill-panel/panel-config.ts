@@ -82,6 +82,8 @@ function parseButtons(
   }
   const entries: PanelEntry[] = []
   const seen = new Set<string>()
+  // The panel finds the run of a button by its label, so two buttons must not share one.
+  const seenLabels = new Set<string>()
   raw.forEach((item, index) => {
     const path = `buttons[${index}]`
     const entry = parseButton(item, path, skillDescriptions, issues)
@@ -90,7 +92,12 @@ function parseButtons(
       issues.push({ path: childPath(path, "skill"), message: `duplicate button for skill "${entry.skill}"` })
       return
     }
+    if (seenLabels.has(entry.label)) {
+      issues.push({ path: childPath(path, "label"), message: `duplicate label "${entry.label}"` })
+      return
+    }
     seen.add(entry.skill)
+    seenLabels.add(entry.label)
     entries.push(entry)
   })
   return entries

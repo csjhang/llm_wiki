@@ -12,6 +12,7 @@ import { SkillCopyError } from "@/lib/skill-panel/run-skill"
 import type { WhiteboardOption } from "@/lib/skill-panel/whiteboards"
 import type { ActivityItem } from "@/stores/activity-store"
 import {
+  DOWN_HINT_SKILL,
   NEED_SYNC_LABEL,
   SkillPanel,
   isRunBlocked,
@@ -219,6 +220,17 @@ describe("SkillPanel", () => {
     expect(card(html, "wiki-lint")).not.toContain("Failed")
   })
 
+  it("shows a cancelled run as cancelled, and keeps the button free", () => {
+    const html = render({
+      runs: { "wiki-sync": { status: "cancelled", detail: "Cancelled. Claude Code was stopped before it finished." } },
+    })
+
+    expect(card(html, "wiki-sync")).toContain("Cancelled")
+    expect(card(html, "wiki-sync")).toContain("Claude Code was stopped before it finished.")
+    expect(card(html, "wiki-sync")).not.toContain("Failed")
+    expect(isDisabled(runButton(card(html, "wiki-sync")))).toBe(false)
+  })
+
   it("shows a running run and a finished run", () => {
     const html = render({
       runs: {
@@ -307,7 +319,7 @@ describe("isRunBlocked", () => {
     const runs = { "wiki-lint": { status: "running" as const, detail: "" } }
     expect(isRunBlocked("wiki-sync", new Set(["wiki-lint"]), runs)).toBe(false)
     expect(isRunBlocked("wiki-sync", new Set(), {})).toBe(false)
-    for (const status of ["done", "warning", "error"] as const) {
+    for (const status of ["done", "warning", "error", "cancelled"] as const) {
       expect(isRunBlocked("wiki-sync", new Set(), { "wiki-sync": { status, detail: "" } }), status).toBe(false)
     }
   })
@@ -315,7 +327,7 @@ describe("isRunBlocked", () => {
 
 describe("shouldReloadWhiteboards", () => {
   it("is true when the sync run leaves running, whatever the result", () => {
-    for (const next of ["done", "warning", "error"] as const) {
+    for (const next of ["done", "warning", "error", "cancelled"] as const) {
       expect(shouldReloadWhiteboards("running", next), next).toBe(true)
     }
     // The run item was removed while it ran.
@@ -436,6 +448,54 @@ describe("trust hint", () => {
   })
 })
 
+describe("Down hint (ruling W15)", () => {
+  const HINT = "Do not run this while a conversation runs wiki-sync or wiki-fuse."
+
+  /** The hint element of a card, with its text. */
+  function hintOf(cardHtml: string): string | null {
+    const match = /<p[^>]*data-down-hint[^>]*>([\s\S]*?)<\/p>/.exec(cardHtml)
+    return match ? match[1] : null
+  }
+
+  it("tells under the sync button not to run it while a conversation runs the Down steps", () => {
+    const sync = card(render(), "wiki-sync")
+
+    expect(hintOf(sync)).toBe(HINT)
+    expect(sync.indexOf("data-down-hint")).toBeGreaterThan(sync.indexOf('data-action="run"'))
+  })
+
+  it("shows the hint on the sync card only", () => {
+    const html = render({ whiteboards: WHITEBOARDS })
+
+    for (const entry of PANEL_ENTRIES.filter((candidate) => candidate.skill !== "wiki-sync")) {
+      expect(hintOf(card(html, entry.skill)), entry.skill).toBeNull()
+    }
+    expect(html.match(/data-down-hint/g)).toHaveLength(1)
+  })
+
+  it("is one line: one hint element, beside the trust hint", () => {
+    const sync = card(render(), "wiki-sync")
+
+    expect(sync.match(/data-down-hint/g)).toHaveLength(1)
+    expect(sync).toContain("data-trust-hint")
+  })
+
+  it("names both skills in every language", () => {
+    for (const lng of ["en", "it", "ru", "zh"]) {
+      const text = i18n.getFixedT(lng)("skillPanel.downHint")
+      expect(text, lng).toContain("wiki-sync")
+      expect(text, lng).toContain("wiki-fuse")
+    }
+    expect(i18n.getFixedT("en")("skillPanel.downHint")).toBe(HINT)
+    // zh.json is Simplified (ruling W11).
+    expect(i18n.getFixedT("zh")("skillPanel.downHint")).toBe("对话中正在运行 wiki-sync 或 wiki-fuse 时，请不要运行它。")
+  })
+
+  it("names the skill that the hint belongs to", () => {
+    expect(DOWN_HINT_SKILL).toBe("wiki-sync")
+  })
+})
+
 describe("lint reminder", () => {
   it("shows the count of ingests when the reminder is due", () => {
     const html = render({ lintReminder: 12 })
@@ -480,7 +540,7 @@ describe("lint reminder", () => {
 
 describe("runJustEnded", () => {
   it("is true when a run leaves running, whatever the result", () => {
-    for (const next of ["done", "warning", "error", undefined] as const) {
+    for (const next of ["done", "warning", "error", "cancelled", undefined] as const) {
       expect(runJustEnded("running", next), String(next)).toBe(true)
     }
   })

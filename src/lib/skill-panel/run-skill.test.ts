@@ -56,10 +56,11 @@ const result = (fields: Record<string, unknown>): string =>
 interface FakeItem {
   type: string
   title: string
-  status: "running" | "done" | "warning" | "error"
+  status: "running" | "done" | "warning" | "error" | "cancelled"
   detail: string
   filesWritten: string[]
   projectPath?: string
+  streamId?: string
 }
 
 function fakeActivity(): { api: ActivityApi; items: FakeItem[] } {
@@ -96,6 +97,7 @@ function harness(overrides: Partial<RunSkillDeps> = {}): Harness {
   let captured: SkillRunHandlers | null = null
   const spawnClaude = vi.fn(async (_path: string, _command: string, handlers: SkillRunHandlers) => {
     captured = handlers
+    return "stream-1"
   })
   const openTerminal = vi.fn(async () => "gnome-terminal")
   const detectClaude = vi.fn(async () => ({ installed: true, error: null }))
@@ -274,6 +276,44 @@ describe("runSkill, background button: the run", () => {
     await runSkill(SYNC, {}, h.deps)
 
     expect(h.activity.items[0].projectPath).toBe(PROJECT)
+  })
+
+  it("stores the stream id of the run on the item, so the activity panel can stop the run", async () => {
+    const h = harness()
+
+    await runSkill(SYNC, {}, h.deps)
+
+    expect(h.activity.items[0].streamId).toBe("stream-1")
+  })
+
+  it("stores the stream id of a fast run too", async () => {
+    const activity = fakeActivity()
+    const h = harness({
+      activity: activity.api,
+      spawnClaude: vi.fn(async (_path: string, _command: string, handlers: SkillRunHandlers) => {
+        handlers.onLine(result({ result: "Nothing to lint." }))
+        handlers.onExit({ code: 0, stderr: "" })
+        return "stream-fast"
+      }),
+    })
+
+    await runSkill(LINT, {}, h.deps)
+
+    expect(activity.items[0]).toMatchObject({ status: "done", streamId: "stream-fast" })
+  })
+
+  it("does not let the exit of a killed process turn a cancelled item into an error", async () => {
+    useActivityStore.setState({ items: [] })
+    const h = harness({ activity: useActivityStore.getState() })
+    await runSkill(SYNC, {}, h.deps)
+    const [item] = useActivityStore.getState().items
+    // The Cancel button: the item is cancelled first, then the process is killed.
+    useActivityStore.getState().updateItem(item.id, { status: "cancelled", detail: "Cancelled." })
+
+    h.handlers().onLine(assistantText("Still working"))
+    h.handlers().onExit({ code: null, stderr: "" })
+
+    expect(useActivityStore.getState().items[0]).toMatchObject({ status: "cancelled", detail: "Cancelled." })
   })
 
   it("puts the progress into the item while it runs", async () => {
@@ -499,6 +539,7 @@ describe("runSkill, background button: the run", () => {
         // A fast run: the events come before the start call returns.
         handlers.onLine(result({ result: "Nothing to lint." }))
         handlers.onExit({ code: 0, stderr: "" })
+        return "stream-fast"
       }),
     })
 

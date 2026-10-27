@@ -51,7 +51,8 @@
     "lastRun": "Ultima esecuzione",
     "lintReminder": "{{count}} elaborazioni dall'ultimo controllo. Valuta di eseguire 健檢.",
     "trustHint": "Prima della prima esecuzione in background, apri Claude Code una volta nella cartella del wiki (esegui claude lì) e accetta la richiesta di fiducia.",
-    "status": { "running": "In corso", "done": "Fatto", "warning": "Fatto, con strumenti negati", "error": "Non riuscito" }
+    "downHint": "Non avviarla mentre una conversazione esegue wiki-sync o wiki-fuse.",
+    "status": { "running": "In corso", "done": "Fatto", "warning": "Fatto, con strumenti negati", "error": "Non riuscito", "cancelled": "Annullata" }
   },
   "updateBanner": {
     "message": "La versione {{version}} è disponibile",

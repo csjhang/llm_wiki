@@ -51,7 +51,8 @@
     "lastRun": "Last run",
     "lintReminder": "{{count}} ingests since the last check. Consider running 健檢.",
     "trustHint": "Before the first background run, open Claude Code once in the wiki folder (run claude there) and accept the trust prompt.",
-    "status": { "running": "Running", "done": "Done", "warning": "Done with denied tools", "error": "Failed" }
+    "downHint": "Do not run this while a conversation runs wiki-sync or wiki-fuse.",
+    "status": { "running": "Running", "done": "Done", "warning": "Done with denied tools", "error": "Failed", "cancelled": "Cancelled" }
   },
   "updateBanner": {
     "message": "Version {{version}} is available",

@@ -3,7 +3,7 @@ import {
   ChevronUp, ChevronDown, Loader2, CheckCircle2, AlertCircle, AlertTriangle,
   FileText, Users, Lightbulb, BookOpen, GitMerge, BarChart3, HelpCircle, Layout,
   RotateCcw, X, Clock, TrendingUp, Target, Pause, Play,
-  ArrowUp, ArrowDown, Trash2,
+  ArrowUp, ArrowDown, Trash2, Ban,
 } from "lucide-react"
 import { useTranslation } from "react-i18next"
 import { useAppDialog } from "@/stores/app-dialog-store"
@@ -11,6 +11,8 @@ import { useActivityStore, type ActivityItem } from "@/stores/activity-store"
 import { useWikiStore } from "@/stores/wiki-store"
 import { useFileSyncStore } from "@/stores/file-sync-store"
 import { normalizePath, getFileName, isAbsolutePath } from "@/lib/path-utils"
+import { killClaudeSkill } from "@/lib/skill-panel/claude-skill-spawn"
+import { canCancelSkillRun, cancelSkillRun } from "@/lib/skill-panel/cancel-skill"
 import {
   getQueue,
   getQueueSummary,
@@ -483,13 +485,13 @@ export function ActivityPanel() {
             const matchingTask = item.status === "running"
               ? queueTasks.find((t) => t.status === "processing" && getFileName(t.sourcePath) === item.title)
               : undefined
-            return (
-              <ActivityRow
-                key={item.id}
-                item={item}
-                onCancel={matchingTask ? () => handleIngestCancel(matchingTask.id) : undefined}
-              />
-            )
+            // A background skill run is stopped with its process; an ingest item is stopped through the queue.
+            const onCancel = canCancelSkillRun(item)
+              ? () => void cancelSkillRun(item.id, { activity: useActivityStore.getState(), kill: killClaudeSkill })
+              : matchingTask
+                ? () => handleIngestCancel(matchingTask.id)
+                : undefined
+            return <ActivityRow key={item.id} item={item} onCancel={onCancel} />
           })}
           {items.some((i) => i.status !== "running") && (
             <button
@@ -657,6 +659,7 @@ function ActivityRow({ item, onCancel }: { item: ActivityItem; onCancel?: () => 
           {item.status === "done" && <CheckCircle2 className="h-3 w-3 text-emerald-500" />}
           {item.status === "warning" && <AlertTriangle className="h-3 w-3 text-amber-500" />}
           {item.status === "error" && <AlertCircle className="h-3 w-3 text-destructive" />}
+          {item.status === "cancelled" && <Ban className="h-3 w-3 text-muted-foreground" />}
         </div>
         <div className="min-w-0 flex-1">
           <div className="font-medium">{item.title}</div>

@@ -24,14 +24,15 @@ export async function detectClaudeCode(): Promise<{ installed: boolean; error: s
 }
 
 /**
- * Start `claude -p "<command>"` in the project folder. Resolves when the process has started;
- * the output comes later through `handlers`. Rejects with the message of Rust when it cannot start.
+ * Start `claude -p "<command>"` in the project folder. Resolves to the stream id when the process has
+ * started; the output comes later through `handlers`. The stream id is what `killClaudeSkill` needs to stop the run.
+ * Rejects with the message of Rust when it cannot start.
  */
 export async function spawnClaudeSkill(
   projectPath: string,
   command: string,
   handlers: SkillRunHandlers,
-): Promise<void> {
+): Promise<string> {
   const streamId = crypto.randomUUID()
   const unlisteners: UnlistenFn[] = []
   const stopListening = (): void => {
@@ -56,4 +57,13 @@ export async function spawnClaudeSkill(
     stopListening()
     throw error
   }
+  return streamId
+}
+
+/**
+ * Stop a run that `spawnClaudeSkill` started. The process is killed; its exit event still comes,
+ * with no exit code. Does nothing for a run that has ended.
+ */
+export async function killClaudeSkill(streamId: string): Promise<void> {
+  await invoke("claude_cli_kill", { streamId })
 }
